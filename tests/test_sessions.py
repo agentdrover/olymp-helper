@@ -179,3 +179,34 @@ def test_ac3_failed_event_does_not_extend_session(env):
     row = svc.get_session(sid)
     assert row["last_activity_at"] == _t0().isoformat()
     assert svc.list_events(sid) == []
+
+
+class FlakyCommit:
+    """Обёртка соединения: первый COMMIT падает, транзакция остаётся открытой."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.fail_commit = True
+
+    def execute(self, sql, *args):
+        if sql.strip().upper() == "COMMIT" and self.fail_commit:
+            self.fail_commit = False
+            raise sqlite3.OperationalError("disk I/O error (injected)")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_ac3_failed_commit_rolls_back_and_next_call_works(env):
+    conn, clock, _ = env
+    flaky = FlakyCommit(conn)
+    svc = SessionService(flaky, clock)
+    sid = svc.open_session()
+    with pytest.raises(sqlite3.OperationalError):
+        svc.record_event(sid, "chat")
+    assert conn.in_transaction is False
+    assert svc.list_events(sid) == []
+    svc.record_event(sid, "chat")  # следующая операция не упирается в открытую транзакцию
+    assert len(svc.list_events(sid)) == 1
+    assert conn.in_transaction is False

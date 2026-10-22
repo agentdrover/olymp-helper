@@ -39,10 +39,12 @@ class SessionService:
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             yield
+            self.conn.execute("COMMIT")
         except BaseException:
-            self.conn.execute("ROLLBACK")
+            # COMMIT мог упасть при открытой транзакции: без отката следующий BEGIN сломается.
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
             raise
-        self.conn.execute("COMMIT")
 
     def _expire_idle(self, now: datetime) -> list[int]:
         """Закрыть занятия без событий не менее 30 минут; конец = время последнего события."""
