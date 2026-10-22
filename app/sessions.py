@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 IDLE_TIMEOUT = timedelta(minutes=30)
@@ -29,11 +30,32 @@ class SessionService:
         self.clock = clock
         conn.row_factory = None
 
-    def _now(self) -> str:
-        return self.clock().astimezone(UTC).isoformat()
+    def _read_clock(self) -> datetime:
+        """Одно чтение часов на операцию: проверка простоя и запись видят одно и то же now."""
+        return self.clock().astimezone(UTC)
+
+    @contextmanager
+    def _tx(self):
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+        self.conn.execute("COMMIT")
+
+    def _expire_idle(self, now: datetime) -> list[int]:
+        """Закрыть занятия без событий не менее 30 минут; конец = время последнего события."""
+        threshold = (now - IDLE_TIMEOUT).isoformat()
+        rows = self.conn.execute(
+            "UPDATE study_session SET ended_at = last_activity_at, end_reason = 'idle' "
+            "WHERE ended_at IS NULL AND last_activity_at <= ? RETURNING id",
+            (threshold,),
+        ).fetchall()
+        return sorted(r[0] for r in rows)
 
     def open_session(self) -> int:
-        now = self._now()
+        now = self._read_clock().isoformat()
         cur = self.conn.execute(
             "INSERT INTO study_session (started_at, last_activity_at) VALUES (?, ?)", (now, now)
         )
@@ -44,52 +66,62 @@ class SessionService:
     ) -> int:
         if type not in EVENT_TYPES:
             raise ValueError(f"unknown event type: {type}")
-        self.close_idle()
-        now = self._now()
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            # Привязка и продление простоя - одним условным UPDATE: закрытое занятие не оживает.
+        now_dt = self._read_clock()
+        now = now_dt.isoformat()
+        closed = False
+        with self._tx():
+            self._expire_idle(now_dt)
+            # Продление простоя - условный UPDATE: закрытое занятие не оживает.
             cur = self.conn.execute(
                 "UPDATE study_session SET last_activity_at = ? WHERE id = ? AND ended_at IS NULL",
                 (now, session_id),
             )
             if cur.rowcount != 1:
-                raise SessionClosedError(session_id)
-            cur = self.conn.execute(
-                "INSERT INTO event (session_id, type, task_item_id, data, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (
-                    session_id,
-                    type,
-                    task_item_id,
-                    None if data is None else json.dumps(data, ensure_ascii=False),
-                    now,
-                ),
-            )
-            self.conn.execute("COMMIT")
-        except BaseException:
-            self.conn.execute("ROLLBACK")
-            raise
-        return cur.lastrowid
+                closed = True  # закрытие по простою должно сохраниться: выходим после COMMIT
+            else:
+                cur = self.conn.execute(
+                    "INSERT INTO event (session_id, type, task_item_id, data, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        type,
+                        task_item_id,
+                        None if data is None else json.dumps(data, ensure_ascii=False),
+                        now,
+                    ),
+                )
+                event_id = cur.lastrowid
+        if closed:
+            raise SessionClosedError(session_id)
+        return event_id
 
     def close_session(self, session_id: int, summary: dict | None = None) -> None:
-        cur = self.conn.execute(
-            "UPDATE study_session SET ended_at = ?, end_reason = 'explicit', summary = ? "
-            "WHERE id = ? AND ended_at IS NULL",
-            (self._now(), None if summary is None else json.dumps(summary), session_id),
-        )
-        if cur.rowcount != 1:
-            raise SessionClosedError(session_id)
+        """Явное «закончить». Если занятие уже простаивало 30 минут, оно закрывается как idle."""
+        now_dt = self._read_clock()
+        threshold = (now_dt - IDLE_TIMEOUT).isoformat()
+        text = None if summary is None else json.dumps(summary, ensure_ascii=False)
+        with self._tx():
+            row = self.conn.execute(
+                "SELECT ended_at, last_activity_at FROM study_session WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None or row[0] is not None:
+                raise SessionClosedError(session_id)
+            if row[1] <= threshold:
+                self.conn.execute(
+                    "UPDATE study_session SET ended_at = last_activity_at, end_reason = 'idle', "
+                    "summary = ? WHERE id = ?",
+                    (text, session_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE study_session SET ended_at = ?, end_reason = 'explicit', summary = ? "
+                    "WHERE id = ?",
+                    (now_dt.isoformat(), text, session_id),
+                )
 
     def close_idle(self) -> list[int]:
-        """Закрыть занятия без событий не менее 30 минут; конец = время последнего события."""
-        threshold = (self.clock().astimezone(UTC) - IDLE_TIMEOUT).isoformat()
-        rows = self.conn.execute(
-            "UPDATE study_session SET ended_at = last_activity_at, end_reason = 'idle' "
-            "WHERE ended_at IS NULL AND last_activity_at <= ? RETURNING id",
-            (threshold,),
-        ).fetchall()
-        return sorted(r[0] for r in rows)
+        with self._tx():
+            return self._expire_idle(self._read_clock())
 
     def get_session(self, session_id: int) -> dict:
         cur = self.conn.execute("SELECT * FROM study_session WHERE id = ?", (session_id,))

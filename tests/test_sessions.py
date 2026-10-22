@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -90,3 +91,91 @@ def test_ac3_explicit_close_and_unknown_type(env):
     assert row["end_reason"] == "explicit"
     assert row["ended_at"] == clock().isoformat()
     assert svc.close_idle() == []
+
+
+class SeqClock:
+    """Часы, отдающие заранее заданные значения по одному на чтение."""
+
+    def __init__(self, values):
+        self.values = list(values)
+        self.reads = 0
+
+    def __call__(self):
+        self.reads += 1
+        return self.values.pop(0) if len(self.values) > 1 else self.values[0]
+
+
+def _t0():
+    return datetime(2026, 10, 23, 10, 0, tzinfo=UTC)
+
+
+def test_ac3_close_after_idle_is_idle_not_explicit(env):
+    _, clock, svc = env
+    sid = svc.open_session()
+    clock.advance(minutes=5)
+    last = clock()
+    svc.record_event(sid, "chat")
+    clock.advance(minutes=31)
+    svc.close_session(sid, summary={"solved": 1})
+    row = svc.get_session(sid)
+    assert row["end_reason"] == "idle"
+    assert row["ended_at"] == last.isoformat()
+    assert row["summary"] == '{"solved": 1}'
+    with pytest.raises(SessionClosedError):
+        svc.close_session(sid)
+
+
+def test_ac3_close_boundary(env):
+    _, clock, svc = env
+    a = svc.open_session()
+    clock.advance(minutes=29, seconds=59)
+    svc.close_session(a)
+    assert svc.get_session(a)["end_reason"] == "explicit"
+    b = svc.open_session()
+    clock.advance(minutes=30)
+    svc.close_session(b)
+    assert svc.get_session(b)["end_reason"] == "idle"
+
+
+def test_ac3_event_exactly_at_threshold_is_rejected(env):
+    _, clock, svc = env
+    sid = svc.open_session()
+    clock.advance(minutes=30)
+    with pytest.raises(SessionClosedError):
+        svc.record_event(sid, "chat")
+    row = svc.get_session(sid)
+    assert row["end_reason"] == "idle"
+    assert row["last_activity_at"] == _t0().isoformat()
+    assert svc.list_events(sid) == []
+
+
+def test_ac3_one_clock_read_per_operation(env):
+    conn, _, _ = env
+    start = _t0()
+    # Первое чтение - до порога, второе - ровно на пороге: событие не должно "проскочить"
+    # по расходящимся чтениям и записаться временем второго чтения.
+    clock = SeqClock([start, start + timedelta(minutes=29, seconds=59), start + IDLE_TIMEOUT])
+    svc = SessionService(conn, clock)
+    sid = svc.open_session()
+    assert clock.reads == 1
+    svc.record_event(sid, "chat")
+    assert clock.reads == 2
+    ev = svc.list_events(sid)[0]
+    assert ev["created_at"] == (start + timedelta(minutes=29, seconds=59)).isoformat()
+    assert svc.get_session(sid)["last_activity_at"] == ev["created_at"]
+    svc.close_idle()
+    assert clock.reads == 3
+    svc.open_session()
+    svc.close_session(1)
+    assert clock.reads == 5
+
+
+def test_ac3_failed_event_does_not_extend_session(env):
+    _, clock, svc = env
+    sid = svc.open_session()
+    clock.advance(minutes=10)
+    with pytest.raises(sqlite3.IntegrityError):
+        svc.record_event(sid, "chat", task_item_id=999)
+    row = svc.get_session(sid)
+    assert row["last_activity_at"] == _t0().isoformat()
+    assert svc.list_events(sid) == []

@@ -51,11 +51,14 @@ jobs:
       - name: Sync dependencies (lockfile must be current)
         run: uv sync --frozen
 
+      - name: Lockfile is up to date
+        run: uv lock --check
+
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --frozen ruff check .
 
       - name: Tests
-        run: uv run pytest -q
+        run: uv run --frozen pytest -q
 
       # Carries the result of this repository's acceptance tests back to the
       # hub as evidence about ONE commit. Never fails the job and never
@@ -78,4 +81,4 @@ jobs:
           hub-url: ${{ secrets.HAIPLANE_HUB_URL }}
           hub-token: ${{ secrets.HAIPLANE_HUB_CI_TOKEN }}
           head-sha: ${{ github.event.pull_request.head.sha || github.sha }}
-          ac-runner: "uv run pytest"
+          ac-runner: "uv run --frozen pytest"

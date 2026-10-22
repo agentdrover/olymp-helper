@@ -88,3 +88,23 @@ def test_ac2(tmp_path):
     assert _dump(conn2) == before
     assert conn2.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
     conn2.close()
+
+
+def test_ac2_settings_stage_date(tmp_path):
+    conn = connect(tmp_path / "olymp.db")
+    migrate(conn)
+    assert conn.execute("SELECT stage_date FROM settings").fetchone() == (None,)
+    conn.execute("UPDATE settings SET stage_date = '2027-02-14', show_exam_countdown = 1")
+    conn.close()
+    conn = connect(tmp_path / "olymp.db")
+    migrate(conn)
+    assert conn.execute("SELECT stage_date, show_exam_countdown FROM settings").fetchone() == (
+        "2027-02-14",
+        1,
+    )
+    for bad in ("14.02.2027", "2027-02-30", ""):
+        try:
+            conn.execute("UPDATE settings SET stage_date = ?", (bad,))
+        except sqlite3.IntegrityError:
+            continue
+        raise AssertionError(f"stage_date accepted: {bad!r}")

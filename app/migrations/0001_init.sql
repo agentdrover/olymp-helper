@@ -84,6 +84,8 @@ CREATE TABLE settings (
     cursor_model TEXT,
     daily_run_limit INTEGER NOT NULL DEFAULT 200 CHECK (daily_run_limit > 0),
     parent_pin_hash TEXT,
-    show_exam_countdown INTEGER NOT NULL DEFAULT 0 CHECK (show_exam_countdown IN (0, 1))
+    show_exam_countdown INTEGER NOT NULL DEFAULT 0 CHECK (show_exam_countdown IN (0, 1)),
+    -- Дата этапа олимпиады (ISO YYYY-MM-DD) для счётчика дней; SPEC 1.8.
+    stage_date TEXT CHECK (stage_date IS NULL OR date(stage_date) IS stage_date)
 );
 INSERT INTO settings (id) VALUES (1);
