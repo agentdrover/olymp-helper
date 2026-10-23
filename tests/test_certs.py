@@ -118,3 +118,82 @@ def test_renew_server_keeps_ca_and_reissues_server(tmp_path):
 
 def test_renew_server_without_ca_fails(tmp_path):
     assert _run("bash", str(SCRIPT), str(tmp_path), "--renew-server").returncode != 0
+
+
+def _entry(env_extra, tmp_path, timeout=5):
+    env = {
+        "PATH": "/usr/bin:/bin:" + str(Path(sys.executable).parent),
+        "PYTHONPATH": str(ROOT),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "OLYMP_DB": str(tmp_path / "olymp.db"),
+        **env_extra,
+    }
+    return subprocess.Popen(
+        ["bash", str(ROOT / "deploy" / "entrypoint.sh")],
+        env=env,
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def test_entrypoint_without_tls_exits_with_error_by_default(tmp_path):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    proc = _entry({"OLYMP_PORT": str(port), "OLYMP_HOST": "127.0.0.1"}, tmp_path)
+    try:
+        out, _ = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        pytest.fail("без сертификата запущен HTTP-сервер")
+    assert proc.returncode != 0
+    assert "OLYMP_TLS_CERT" in out and "OLYMP_INSECURE_HTTP" in out
+
+
+def test_entrypoint_with_only_one_tls_variable_exits_with_error(certs, tmp_path):
+    proc = _entry({"OLYMP_TLS_CERT": str(certs / "server.pem")}, tmp_path)
+    proc.communicate(timeout=10)
+    assert proc.returncode != 0
+
+
+def test_entrypoint_insecure_http_only_when_explicit_and_warns(tmp_path):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = _entry(
+        {"OLYMP_INSECURE_HTTP": "1", "OLYMP_PORT": str(port), "OLYMP_HOST": "127.0.0.1"}, tmp_path
+    )
+    try:
+        body = b""
+        for _ in range(100):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1) as raw:
+                    raw.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    while chunk := raw.recv(4096):
+                        body += chunk
+                break
+            except OSError:
+                time.sleep(0.1)
+        assert b"200 OK" in body
+    finally:
+        proc.terminate()
+        out, _ = proc.communicate(timeout=10)
+    assert "OLYMP_INSECURE_HTTP" in out and "WARNING" in out
+
+
+def test_entrypoint_insecure_flag_other_than_1_does_not_enable_http(tmp_path):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    proc = _entry(
+        {"OLYMP_INSECURE_HTTP": "true", "OLYMP_PORT": str(port), "OLYMP_HOST": "127.0.0.1"},
+        tmp_path,
+    )
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        pytest.fail("OLYMP_INSECURE_HTTP=true запустил HTTP-сервер")
+    assert proc.returncode != 0

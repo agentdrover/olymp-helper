@@ -51,7 +51,7 @@ wait_healthz() {
     deadline=$((SECONDS + 60))
     while [ "$SECONDS" -lt "$deadline" ]; do
         # Проверка цепочки: сертификат подписан нашим CA и содержит SAN на адрес K8.
-        if body="$(curl --silent --fail --cacert "$WORK/certs/ca.pem" \
+        if body="$(curl --silent --fail --connect-timeout 2 --max-time 5 --cacert "$WORK/certs/ca.pem" \
                 --connect-to "192.168.0.138:8443:127.0.0.1:${port}" \
                 https://192.168.0.138:8443/healthz 2>/dev/null)"; then
             echo "healthz: $body"
@@ -86,6 +86,19 @@ print(sqlite3.connect('/srv/olymp/olymp.db').execute('SELECT v FROM smoke_marker
 ")"
 [ "$got" = "${RUN_ID}" ] || fail "контрольная запись не пережила пересоздание (получено: '$got')"
 echo "запись сохранилась"
+
+step "TLS обязателен: без сертификата контейнер не стартует"
+if docker run --rm --network none "$IMAGE" >"$WORK/notls.log" 2>&1; then
+    fail "контейнер без OLYMP_TLS_CERT/KEY запустился"
+fi
+grep -q OLYMP_TLS_CERT "$WORK/notls.log" || fail "нет сообщения о TLS"
+
+step "в рантайме нет установщиков и загрузчиков"
+docker run --rm --network none --entrypoint sh "$IMAGE" -c '
+    for t in uv pip pip3 curl wget; do
+        if command -v "$t" >/dev/null 2>&1; then echo "в образе есть $t"; exit 1; fi
+    done
+'
 
 step "AC-2: ffmpeg и whisper.cpp в образе, веса с ожидаемой контрольной суммой"
 docker run --rm --network none --entrypoint sh "$IMAGE" -c '

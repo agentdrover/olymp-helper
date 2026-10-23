@@ -30,27 +30,35 @@ RUN cmake -S /src/whisper.cpp -B /src/build -DCMAKE_BUILD_TYPE=Release \
 RUN curl --fail --location --silent --show-error -o /out/ggml-small.bin "$WHISPER_MODEL_URL" \
     && echo "${WHISPER_MODEL_SHA256}  /out/ggml-small.bin" | sha256sum -c -
 
-# --- Стадия 2: приложение ------------------------------------------------------------------
-FROM python:3.12.8-slim-bookworm
+# --- Стадия 2: зависимости Python (установщик остаётся здесь) -------------------------------
+FROM python:3.12.8-slim-bookworm AS venv
 
 COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
+        uv sync --frozen --no-dev --no-install-project
+
+# --- Стадия 3: рантайм ---------------------------------------------------------------------
+FROM python:3.12.8-slim-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/local/lib/python3.12/site-packages/pip* /usr/local/bin/pip* \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin olymp \
     && install -d -o olymp -g olymp /srv/olymp
 
 COPY --from=whisper /out/whisper-cli /usr/local/bin/whisper-cli
 COPY --from=whisper /out/ggml-small.bin /opt/whisper/ggml-small.bin
+COPY --from=venv /opt/venv /opt/venv
 
 WORKDIR /app
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
 COPY app ./app
 COPY deploy/entrypoint.sh deploy/healthcheck.py /app/deploy/
 
-ENV PATH="/app/.venv/bin:$PATH" \
+ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     OLYMP_DB=/srv/olymp/olymp.db \

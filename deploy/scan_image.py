@@ -13,11 +13,14 @@ PATTERNS: dict[str, re.Pattern[bytes]] = {
     "anthropic-key": re.compile(rb"sk-ant-[A-Za-z0-9_\-]{20,}"),
     "openai-style-key": re.compile(rb"\bsk-[A-Za-z0-9]{40,}"),
     "cursor-key": re.compile(rb"\bkey_[0-9a-f]{64}\b"),
+    "cursor-crsr": re.compile(rb"\bcrsr_[A-Za-z0-9]{20,}"),
     "github-token": re.compile(rb"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}"),
     "github-pat": re.compile(rb"\bgithub_pat_[A-Za-z0-9_]{22,}"),
     "aws-access-key": re.compile(rb"\bAKIA[0-9A-Z]{16}\b"),
+    # Значение любого ключа *_API_KEY / *_TOKEN (имя заглавными), в форме VAR=value, VAR: value
+    # и JSON {"VAR": "value"}; значение от 16 знаков.
     "secret-assignment": re.compile(
-        rb"(?:CLAUDE_CODE_OAUTH_TOKEN|CURSOR_API_KEY)[ \t]*[=:][ \t]*[\"']?[A-Za-z0-9_\-]{16,}"
+        rb"[A-Z0-9_]*(?:API_KEY|TOKEN)[A-Z0-9_]*[\"']?[ \t]*[=:][ \t]*[\"']?[A-Za-z0-9_\-]{16,}"
     ),
 }
 CHUNK = 8 * 1024 * 1024

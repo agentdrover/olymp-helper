@@ -29,15 +29,31 @@ services:
     tmpfs:
       - /tmp
 
-  # Образ и параметры исполнителя - OH-T03 (#2013); здесь только место в наборе.
-  executor:
+  # Исполнители моделей (OH-T03, #2013): по контейнеру на канал, у каждого только свой токен.
+  # Корень файловой системы только для чтения; рабочий каталог запуска - /work (tmpfs,
+  # без исполнения, с лимитом, владелец - uid исполнителя). Образ и параметры задаёт OH-T03.
+  executor-claude:
     image: ${OLYMP_EXECUTOR_IMAGE:?образ исполнителя (OH-T03)}
     restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp
+      - /work:size=64m,noexec,nosuid,nodev,uid=${OLYMP_EXECUTOR_UID:-10002},gid=${OLYMP_EXECUTOR_UID:-10002},mode=0700
     environment:
+      - EXECUTOR_WORKROOT=/work
       - CLAUDE_CODE_OAUTH_TOKEN
+    mem_limit: 1g
+    cpus: 1.0
+
+  executor-cursor:
+    image: ${OLYMP_EXECUTOR_IMAGE:?образ исполнителя (OH-T03)}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /work:size=64m,noexec,nosuid,nodev,uid=${OLYMP_EXECUTOR_UID:-10002},gid=${OLYMP_EXECUTOR_UID:-10002},mode=0700
+    environment:
+      - EXECUTOR_WORKROOT=/work
       - CURSOR_API_KEY
     mem_limit: 1g
     cpus: 1.0

@@ -39,8 +39,11 @@ def test_containerfile_installs_ffmpeg_and_whisper_cli_in_runtime_stage():
 
 def test_containerfile_runtime_stage_downloads_nothing():
     runtime = _stages(_containerfile())[-1]
-    for tool in ("curl", "wget", "git clone", "pip install", "uv pip"):
+    for tool in ("curl", "wget", "git clone", "pip install"):
         assert tool not in runtime, tool
+    assert not re.search(r"\buv\b", runtime)  # ни установщика, ни его образа в рантайме
+    assert "COPY --from=venv /opt/venv /opt/venv" in runtime
+    assert "uv sync" in _containerfile().split("FROM python")[1]  # зависимости ставит стадия сборки
 
 
 def test_containerfile_base_images_are_pinned_and_user_is_not_root():
@@ -65,6 +68,7 @@ def test_containerfile_serves_app_with_optional_tls_entrypoint():
     entry = (ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
     assert "--ssl-certfile" in entry and "--ssl-keyfile" in entry
     assert "OLYMP_TLS_CERT" in entry and "OLYMP_TLS_KEY" in entry
+    assert "OLYMP_INSECURE_HTTP" in entry
 
 
 def test_compose_app_service_limits_volume_healthcheck_and_ports():
@@ -77,17 +81,34 @@ def test_compose_app_service_limits_volume_healthcheck_and_ports():
     assert app.get("restart") == "unless-stopped"
 
 
-def test_compose_has_two_containers_and_secrets_only_in_executor():
+def _env_names(svc: dict) -> list[str]:
+    env = svc.get("environment") or []
+    return [str(x).split("=")[0] for x in (env if isinstance(env, list) else list(env))]
+
+
+def test_compose_app_and_two_executors_each_with_only_its_own_token():
     services = _compose()["services"]
-    assert set(services) == {"app", "executor"}
-    app_env = services["app"]["environment"]
-    flat = app_env if isinstance(app_env, list) else list(app_env)
-    assert not [e for e in flat if re.search(r"TOKEN|API_KEY|SECRET", str(e))]
-    ex_env = services["executor"]["environment"]
-    ex_flat = ex_env if isinstance(ex_env, list) else list(ex_env)
-    assert "CLAUDE_CODE_OAUTH_TOKEN" in ex_flat and "CURSOR_API_KEY" in ex_flat  # без значения
-    assert services["executor"].get("read_only") is True
-    assert not services["executor"].get("volumes")
+    assert set(services) == {"app", "executor-claude", "executor-cursor"}
+    assert not [e for e in _env_names(services["app"]) if re.search(r"TOKEN|API_KEY|SECRET", e)]
+    claude = _env_names(services["executor-claude"])
+    cursor = _env_names(services["executor-cursor"])
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in claude and "CURSOR_API_KEY" not in claude
+    assert "CURSOR_API_KEY" in cursor and "CLAUDE_CODE_OAUTH_TOKEN" not in cursor
+
+
+def test_compose_executors_have_writable_limited_work_tmpfs_and_read_only_root():
+    services = _compose()["services"]
+    for name in ("executor-claude", "executor-cursor"):
+        svc = services[name]
+        assert svc.get("read_only") is True
+        assert not svc.get("volumes")
+        assert "EXECUTOR_WORKROOT=/work" in svc["environment"]
+        work = [t for t in svc["tmpfs"] if str(t).startswith("/work")]
+        assert len(work) == 1, name
+        opts = str(work[0]).split(":", 1)[1].split(",")
+        assert {"noexec", "nosuid", "nodev"} <= set(opts)
+        assert any(o.startswith("size=") for o in opts)
+        assert any(o.startswith("uid=") for o in opts) and any(o.startswith("gid=") for o in opts)
 
 
 def test_compose_has_no_literal_secret_values():
@@ -95,16 +116,20 @@ def test_compose_has_no_literal_secret_values():
     assert not re.search(r"(TOKEN|API_KEY)\s*[:=]\s*\S", text)
 
 
-def test_ci_has_image_smoke_before_reporter_without_secrets():
+HUB_ACTION = "agentdrover/haiplane/.github/actions/hub-ci-report"
+
+
+def test_ci_has_image_smoke_before_hub_step_without_secrets():
     text = (ROOT / ".github/workflows/haiplane-ci.yml").read_text(encoding="utf-8")
-    smoke = text.index("name: image-smoke")
-    reporter = text.index("name: Report AC tests and validation to Hub")
-    assert smoke < reporter
-    block = text[smoke : text.index("# Carries the result")]
-    assert "deploy/image-smoke.sh" in block
-    assert "secrets." not in block
-    assert "continue-on-error" not in block
-    assert "image-build" in text[: smoke + 1]
+    smoke = text.index("- name: image-smoke")
+    assert "- name: image-build" in text[:smoke]
+    # порядок задаётся действием хаба (uses), а не названием шага: имя шага у хаба может смениться
+    assert smoke < text.index(f"uses: {HUB_ACTION}")
+    step = re.search(r"- name: image-smoke\n(?:        .*\n)+", text).group(0)
+    assert "deploy/image-smoke.sh" in step
+    assert "secrets." not in step
+    assert "continue-on-error" not in step
+    assert "if:" not in step
 
 
 def test_smoke_script_cleans_up_always_and_fails_loudly():
@@ -113,8 +138,11 @@ def test_smoke_script_cleans_up_always_and_fails_loudly():
     assert re.search(r"trap \S+ EXIT", script)
     assert "docker rm -f" in script
     assert "/healthz" in script
-    assert script.count("--network none") == 2  # распознавание без сети: ничего не скачивается
+    assert script.count("--network none") == 4  # распознавание без сети: ничего не скачивается
     assert "scan_image.py" in script
+    curls = [ln for ln in script.splitlines() if re.search(r"\bcurl\s+--", ln)]
+    assert curls and all("--connect-timeout" in ln and "--max-time" in ln for ln in curls)
+    assert "for t in uv pip pip3 curl wget" in script  # в рантайме нет uv, pip, curl, wget
     assert "whisper-cli" in script and "ffmpeg" in script
     assert "tests/fixtures" in script
 
@@ -134,7 +162,9 @@ def test_deploy_doc_names_variables_volume_ports_hosts_and_procedures():
     for svc in env.values():
         e = svc.get("environment") or []
         names |= {str(x).split("=")[0] for x in (e if isinstance(e, list) else list(e))}
+    names.add("OLYMP_INSECURE_HTTP")
     assert names >= {"OLYMP_DB", "OLYMP_TLS_CERT", "OLYMP_TLS_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+    assert {"executor-claude", "executor-cursor"} <= set(env)
     for name in names:
         assert f"| `{name}` |" in doc or f"`{name}`," in doc, name
     for must in (

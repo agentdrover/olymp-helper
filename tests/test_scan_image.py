@@ -7,6 +7,8 @@ import sys
 import tarfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "deploy" / "scan_image.py"
 FAKE_ANTHROPIC = "sk-ant-" + "oat01-" + "A" * 40
@@ -71,3 +73,37 @@ def test_unreadable_archive_is_an_error_not_a_pass(tmp_path):
     bad.write_bytes(b"not a tar")
     assert _scan(bad).returncode == 2
     assert _scan(tmp_path / "missing.tar").returncode == 2
+
+
+LEAKS = {
+    "crsr": b"x crsr_" + b"a1b2c3d4" * 6,
+    "json-uuid": b'{"CURSOR_API_KEY":"0b8f6c1e-4d52-4c1a-9a77-5e3f2d1c0b9a"}',
+    "json-spaced": b'{ "CLAUDE_CODE_OAUTH_TOKEN" : "abcdefghijklmnop1234" }',
+    "generic-api-key": b"MY_SERVICE_API_KEY=abcdef0123456789",
+    "generic-token": b"export DEPLOY_TOKEN: 'abcdef0123456789xyz'",
+    "gho": b"gho_" + b"c" * 36,
+    "github_pat": b"github_pat_" + b"D" * 30,
+    "sk-ant": FAKE_ANTHROPIC.encode(),
+}
+
+
+@pytest.mark.parametrize("name", sorted(LEAKS))
+def test_each_token_format_is_found_and_not_echoed(tmp_path, name):
+    res = _scan(_image(tmp_path / "i.tar", file_content=LEAKS[name]))
+    assert res.returncode == 1, name
+    assert LEAKS[name].decode() not in res.stdout + res.stderr
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"CURSOR_API_KEY":""}',
+        b"CURSOR_API_KEY=short",
+        b"API_KEY = os.environ[name]",
+        b"access_token = self.some_long_attribute_name",
+        b"crsr_ is a prefix",
+        b"ghp_short",
+    ],
+)
+def test_lookalikes_without_a_secret_value_pass(tmp_path, content):
+    assert _scan(_image(tmp_path / "i.tar", file_content=content)).returncode == 0
