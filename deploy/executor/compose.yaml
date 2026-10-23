@@ -16,7 +16,7 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set at run time by home-infra}
     read_only: true
     tmpfs:
-      - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+      - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
     cap_drop:
       - ALL
     cap_add:
@@ -37,7 +37,7 @@ services:
       CURSOR_API_KEY: ${CURSOR_API_KEY:?set at run time by home-infra}
     read_only: true
     tmpfs:
-      - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+      - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
     cap_drop:
       - ALL
     cap_add:

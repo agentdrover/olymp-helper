@@ -24,7 +24,7 @@ for pair in "claude:CLAUDE_CODE_OAUTH_TOKEN" "cursor:CURSOR_API_KEY"; do
     token_var="${pair##*:}"
     name="olymp-exec-${channel}"
     docker run -d --name "$name" --read-only \
-        --tmpfs /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+        --tmpfs /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711 \
         --cap-drop ALL --cap-add SETUID --cap-add SETGID --pids-limit 256 \
         -e "EXECUTOR_CHANNEL=${channel}" \
         -e "${token_var}=ci-placeholder-not-a-secret" \
