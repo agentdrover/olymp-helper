@@ -113,7 +113,7 @@
 ### 1.8 Данные (минимум)
 - `material`: id, файл, хэш, тип (tasks|key|textbook), олимпиада/год/этап/вариант, статус импорта, страницы (FTS5).
 - `task_item`: id, material_id, страницы, вариант, исходный номер, subject=biology, type, text, options, points, topic, import_status (draft|checked|unsupported), answer_key, key_source (official|parent|null), model_answer, revision, figure (null | {file, material_id, page, rect — пункты PDF неповёрнутой страницы, alt, teacher_note, confirmed_by_parent}).
-- `study_session`: id, начало, конец (явный «закончить» или 30 минут простоя), итог.
+- `study_session`: id, начало, конец (явный «закончить» или 30 минут простоя), итог. При закрытии по простою конец = время последнего события (фактический конец активности); «закончить» после 30 минут простоя тоже закрывает занятие как простой (уточнение по ревью #2012).
 - `event`: session_id, тип (attempt — с отметкой уверенности и признаком «повтор»|hint|answer_shown|explain|chat|voice|fallback|disputed_key|shown_to_parent|parent_opened_chat), task_item, данные, время — источник для итогов. Событие `answer_shown` (показ ответа кнопкой «Показать ответ» в режиме «только проверка по ключу», 1.1) пишется с числом попыток до показа (уточнение по ревью #2011), чтобы итог занятия «ответ показан после N попыток, не разобрано» строился из событий.
-- `settings` дополнительно: показывать ли счётчик дней и дату этапа.
+- `settings` дополнительно: показывать ли счётчик дней и дату этапа (поле `stage_date`, ISO-дата).
 - `settings`: основной канал, модель на канал, лимит, хэш PIN родителя.

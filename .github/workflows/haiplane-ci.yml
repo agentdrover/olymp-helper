@@ -41,15 +41,24 @@ jobs:
           # that comparison.
           fetch-depth: 0
 
-      # ---------------------------------------------------------------------
-      # ADD THIS REPOSITORY'S OWN BUILD AND TEST STEPS HERE.
-      #
-      # The hub deliberately does not guess them. Inventing a build command
-      # for a repository it has never read would turn "no CI" into "failing
-      # CI", which is strictly worse: the delivery gate treats a red job as a
-      # blocker and spends fix cycles on it, while an honest silence is read
-      # as unknown and routed to a human.
-      # ---------------------------------------------------------------------
+      # Required steps of this repository (OH-T02, #2012). They run BEFORE the
+      # reporter below: any failing step, and a run that collects no tests at
+      # all (pytest exits 5), turns this job red. The reporter step after them
+      # is unchanged.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync dependencies (lockfile must be current)
+        run: uv sync --frozen
+
+      - name: Lockfile is up to date
+        run: uv lock --check
+
+      - name: Lint
+        run: uv run --frozen ruff check .
+
+      - name: Tests
+        run: uv run --frozen pytest -q
 
       # Carries the result of this repository's acceptance tests back to the
       # hub as evidence about ONE commit. Never fails the job and never
@@ -72,4 +81,4 @@ jobs:
           hub-url: ${{ secrets.HAIPLANE_HUB_URL }}
           hub-token: ${{ secrets.HAIPLANE_HUB_CI_TOKEN }}
           head-sha: ${{ github.event.pull_request.head.sha || github.sha }}
-          ac-runner: "uv run pytest"
+          ac-runner: "uv run --frozen pytest"
