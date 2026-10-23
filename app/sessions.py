@@ -125,10 +125,14 @@ class SessionService:
         with self._tx():
             return self._expire_idle(self._read_clock())
 
-    def get_session(self, session_id: int) -> dict:
+    def get_session(self, session_id: int) -> dict | None:
+        """Занятие по id или None, если его нет (запись изменений для неизвестного id - ошибка)."""
         cur = self.conn.execute("SELECT * FROM study_session WHERE id = ?", (session_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
         cols = [c[0] for c in cur.description]
-        return dict(zip(cols, cur.fetchone(), strict=True))
+        return dict(zip(cols, row, strict=True))
 
     def list_events(self, session_id: int) -> list[dict]:
         cur = self.conn.execute(

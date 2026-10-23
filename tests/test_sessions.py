@@ -210,3 +210,10 @@ def test_ac3_failed_commit_rolls_back_and_next_call_works(env):
     svc.record_event(sid, "chat")  # следующая операция не упирается в открытую транзакцию
     assert len(svc.list_events(sid)) == 1
     assert conn.in_transaction is False
+
+
+def test_ac3_get_session_missing_returns_none(env):
+    _, _, svc = env
+    assert svc.get_session(999) is None
+    sid = svc.open_session()
+    assert svc.get_session(sid)["id"] == sid
