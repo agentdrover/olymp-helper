@@ -1,6 +1,6 @@
 # Контейнер-исполнитель модели (SPEC-1.0 1.4, ADR 0001): единственное место, где запускаются CLI.
 # Контейнер НА КАНАЛ (уточнение по ревью #2013): executor-claude держит только токен Claude,
-# executor-cursor - только ключ Cursor (deploy/executor/compose.yaml). Один образ, канал задаёт
+# executor-cursor - только ключ Cursor (deploy/compose.yaml). Один образ, канал задаёт
 # EXECUTOR_CHANNEL. Сервер работает под exec-srv, CLI запускается им под exec-cli через setpriv:
 # CLI не читает /proc/<pid>/environ сервера. Корень только для чтения, /work - ограниченный tmpfs
 # без тома данных; сеть наружу - только к API своего провайдера (задача HI-1).

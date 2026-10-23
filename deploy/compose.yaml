@@ -1,20 +1,47 @@
-# Два контейнера-исполнителя, по одному на канал (уточнение по ревью #2013, SPEC-1.0 1.4).
-# Образ один (deploy/executor/Containerfile); токен канала приходит из окружения хоста при запуске
-# через home-infra и в образ, репозиторий и журналы не попадает. Тома данных нет. Сеть наружу
-# (только к API своего провайдера) задаёт HI-1; порт наружу не публикуется, приложение ходит по
-# внутренней сети. no-new-privileges здесь НЕ включён намеренно: setpriv сервера получает
-# CAP_SETUID/CAP_SETGID из file capabilities, а CLI запускается уже с no-new-privs (setpriv).
-# Один запуск за раз; при неисправности (/healthz 503) процесс выходит, restart поднимает контейнер.
-# Общий ключ EXECUTOR_SHARED_KEY приложения и исполнителя; в окружение CLI он не передаётся.
-# Сверка с deploy/compose.yaml из OH-T04 (#2014) - при слиянии.
+# Два контейнера (ADR 0001): приложение и исполнитель модели. Установка на K8 - home-infra (#2021).
+# Запуск: docker compose -f deploy/compose.yaml up -d  (переменные - в docs/deploy.md).
 services:
+  app:
+    build:
+      context: ..
+      dockerfile: Containerfile
+    image: olymp-app:local
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - /srv/olymp:/srv/olymp
+      - ${OLYMP_CERT_DIR:-/srv/olymp-certs}:/certs:ro
+    environment:
+      - OLYMP_DB=/srv/olymp/olymp.db
+      - OLYMP_PORT=8443
+      - OLYMP_TLS_CERT=/certs/server.pem
+      - OLYMP_TLS_KEY=/certs/server.key
+      - EXECUTOR_SHARED_KEY
+    healthcheck:
+      test: ["CMD", "python", "/app/deploy/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    mem_limit: 2g
+    cpus: 2.0
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # Исполнители моделей (OH-T03, #2013): по контейнеру на канал, у каждого только свой токен.
+  # Единственное описание исполнителей (сверка #2013 и #2014): корень только для чтения, /work -
+  # tmpfs сервера исполнителя (uid 10001, 0711), без /tmp и /dev/shm, нулевые лимиты IPC, общий
+  # ключ с приложением. Почему каждая строка такая - SPEC-1.0 §1.4 и deploy/executor/sandbox.sh.
   executor-claude:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/executor/Containerfile
-    image: olymp-executor:local
+    image: ${OLYMP_EXECUTOR_IMAGE:-olymp-executor:local}
     environment:
       EXECUTOR_CHANNEL: claude
+      EXECUTOR_WORKROOT: /work
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set at run time by home-infra}
       EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
     read_only: true
@@ -38,6 +65,8 @@ services:
       - SETUID
       - SETGID
     pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
     restart: unless-stopped
     init: true
     healthcheck:
@@ -50,11 +79,12 @@ services:
 
   executor-cursor:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/executor/Containerfile
-    image: olymp-executor:local
+    image: ${OLYMP_EXECUTOR_IMAGE:-olymp-executor:local}
     environment:
       EXECUTOR_CHANNEL: cursor
+      EXECUTOR_WORKROOT: /work
       CURSOR_API_KEY: ${CURSOR_API_KEY:?set at run time by home-infra}
       EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
     read_only: true
@@ -78,6 +108,8 @@ services:
       - SETUID
       - SETGID
     pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
     restart: unless-stopped
     init: true
     healthcheck:

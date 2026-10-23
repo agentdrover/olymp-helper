@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from app.model import runner
 from app.model.adapters import ClaudeAdapter
@@ -314,10 +315,13 @@ def test_client_sends_the_shared_key():
 
 def test_compose_and_sandbox_carry_the_shared_key_and_restart_policy():
     root = Path(__file__).parent.parent / "deploy" / "executor"
-    compose = (root / "compose.yaml").read_text(encoding="utf-8")
-    assert compose.count("EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?") == 2
-    assert compose.count("init: true") == 2 and compose.count("healthcheck:") == 2
-    assert compose.count("restart: unless-stopped") == 2
+    compose = (root.parent / "compose.yaml").read_text(encoding="utf-8")
+    services = yaml.safe_load(compose)["services"]
+    for name in ("executor-claude", "executor-cursor"):
+        svc = services[name]
+        assert svc["environment"]["EXECUTOR_SHARED_KEY"].startswith("${EXECUTOR_SHARED_KEY:?")
+        assert svc["init"] is True and "healthcheck" in svc
+        assert svc["restart"] == "unless-stopped"
     assert "EXECUTOR_SHARED_KEY" in (root / "sandbox.sh").read_text(encoding="utf-8")
     assert "--init" in (root / "sandbox.sh").read_text(encoding="utf-8")
     # Без /dev/shm: иначе это место записи CLI, которое переживает запуск.
@@ -652,7 +656,7 @@ SYSCTLS = {
 def test_zero_ipc_limits_are_pinned_in_compose_and_sandbox():
     """Слабый тест, но он закрепляет конфигурацию: объекты IPC невозможны по построению."""
     root = Path(__file__).parent.parent / "deploy" / "executor"
-    compose = (root / "compose.yaml").read_text(encoding="utf-8")
+    compose = (root.parent / "compose.yaml").read_text(encoding="utf-8")
     sandbox = (root / "sandbox.sh").read_text(encoding="utf-8")
     assert compose.count("    sysctls:\n") == 2
     for name, value in SYSCTLS.items():

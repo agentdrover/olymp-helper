@@ -50,7 +50,7 @@ def read(rel):
 
 
 def service_block(name):
-    src = read("deploy/executor/compose.yaml")
+    src = read("deploy/compose.yaml")
     match = re.search(rf"^  {name}:\n((?:    .*\n|\n)+)", src, re.MULTILINE)
     assert match, f"service {name} is not described"
     return match.group(1)
