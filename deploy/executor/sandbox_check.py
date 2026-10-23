@@ -127,6 +127,17 @@ def server_mode() -> None:
         for n in dirs + files
     ]
     check("/work пуст после ответа", not left, "; ".join(left))
+    if left:  # диагностика: что скажет та же уборка, запущенная вручную
+        for d, dirs, _ in os.walk("/work"):
+            if d.endswith("/work") and d != "/work":
+                res = default_spawn(
+                    [*launcher, "find", d, "-mindepth", "1", "-delete"],
+                    input="",
+                    env={"PATH": os.environ["PATH"]},
+                    cwd=d,
+                    timeout=30,
+                )
+                print("DIAG find rc=", res.returncode, res.stderr, flush=True)
     other = next(c for c in TOKENS if c != channel)
     out = handle_request(
         dict(payload, channel=other),
