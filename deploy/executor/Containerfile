@@ -1,0 +1,42 @@
+# Контейнер-исполнитель модели (SPEC-1.0 1.4, ADR 0001): единственное место, где запускаются CLI.
+# Запуск (делает home-infra, HI-1): корень только для чтения, tmpfs в /work, без тома с данными,
+# окружение - только токен(ы) каналов, исходящая сеть только к API провайдеров:
+#   docker run --read-only --tmpfs /work:rw,noexec,nosuid,uid=1000,gid=1000,mode=0700 \
+#     --cap-drop ALL --security-opt no-new-privileges -e CLAUDE_CODE_OAUTH_TOKEN -e CURSOR_API_KEY ...
+# Версии CLI закреплены здесь; при сборке версия образа сверяется с заявленной, расхождение - ошибка.
+FROM node:22.11.0-bookworm-slim
+
+ARG CLAUDE_CODE_VERSION=2.1.296
+ARG CURSOR_AGENT_VERSION=2026.10.01-14929f9
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && claude --version | grep -F "${CLAUDE_CODE_VERSION}"
+
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) arch=x64 ;; arm64) arch=arm64 ;; *) echo "unsupported arch $arch"; exit 1 ;; esac; \
+    mkdir -p /opt/cursor-agent; \
+    curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_AGENT_VERSION}/linux/${arch}/agent-cli-package.tar.gz" \
+        | tar --strip-components=1 -xz -C /opt/cursor-agent; \
+    ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent; \
+    cursor-agent --version | grep -F "${CURSOR_AGENT_VERSION}"
+
+# Следы сборки (кэши, домашние каталоги CLI) в образе не остаются.
+RUN rm -rf /root/.claude /root/.claude.json /root/.cursor /root/.config /root/.npm /home/node/.npm
+
+COPY app/__init__.py /opt/executor/app/__init__.py
+COPY app/model /opt/executor/app/model
+COPY deploy/executor/sandbox_check.py /opt/executor/sandbox_check.py
+
+# /work - точка монтирования tmpfs; домашний каталог CLI создаётся на каждый запрос внутри него.
+RUN mkdir /work && chown node:node /work
+ENV PYTHONDONTWRITEBYTECODE=1 EXECUTOR_WORKROOT=/work EXECUTOR_PORT=8099
+USER node
+# Рабочий каталог процесса - в образе (только чтение), а не в /work.
+WORKDIR /opt/executor
+EXPOSE 8099
+CMD ["python3", "-m", "app.model.executor_server"]

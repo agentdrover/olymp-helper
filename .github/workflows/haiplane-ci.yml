@@ -55,10 +55,18 @@ jobs:
         run: uv lock --check
 
       - name: Lint
+        id: lint
         run: uv run --frozen ruff check .
 
       - name: Tests
+        id: tests
         run: uv run --frozen pytest -q
+
+      # AC-5 and AC-8 of OH-T03 (#2013): builds the model-executor image and checks its sandbox
+      # from the inside. No secrets, no real CLI calls. BEFORE the reporter below.
+      - name: executor-sandbox
+        id: executor-sandbox
+        run: bash deploy/executor/sandbox.sh
 
       # Carries the result of this repository's acceptance tests back to the
       # hub as evidence about ONE commit. Never fails the job and never
