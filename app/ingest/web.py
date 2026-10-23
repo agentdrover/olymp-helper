@@ -8,7 +8,7 @@ from typing import Annotated
 
 import pymupdf
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -18,8 +18,17 @@ from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
 from app.ingest.publish import child_view, is_published
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
-from app.roles import PARENT, current_role, require_parent
+from app.roles import (
+    COOKIE,
+    PARENT,
+    current_role,
+    key_matches,
+    parent_key,
+    parent_token,
+    require_parent,
+)
 from app.search import search
+from app.search.tasks import search_published_tasks
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 KINDS = ("tasks", "key", "textbook")
@@ -46,6 +55,29 @@ Db = Annotated[sqlite3.Connection, Depends(db_of)]
 
 def _refusal(exc: Refusal) -> JSONResponse:
     return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+
+# ------------------------------------------------------------------------- вход
+
+
+@public.get("/parent/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    return TEMPLATES.TemplateResponse(request, "parent/login.html", {"error": None})
+
+
+@public.post("/parent/login")
+def login(request: Request, key: Annotated[str, Form()] = ""):
+    if not key_matches(key):
+        page = TEMPLATES.TemplateResponse(
+            request, "parent/login.html", {"error": "Неверный ключ или вход не настроен."}
+        )
+        page.status_code = 403
+        return page
+    response = RedirectResponse("/parent/review", status_code=303)
+    response.set_cookie(
+        COOKIE, parent_token(parent_key()), httponly=True, samesite="strict", path="/"
+    )
+    return response
 
 
 # --------------------------------------------------------------------- материалы
@@ -383,5 +415,8 @@ def task_figure_png(task_id: int, request: Request, conn: Db):
 
 
 @public.get("/api/search")
-def api_search(conn: Db, q: str = ""):
-    return {"results": search(conn, q)}
+def api_search(request: Request, conn: Db, q: str = ""):
+    """Родитель ищет по страницам материалов; ребёнок - только по опубликованным заданиям."""
+    if current_role(request) == PARENT:
+        return {"results": search(conn, q)}
+    return {"results": search_published_tasks(conn, q)}

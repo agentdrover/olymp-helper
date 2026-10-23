@@ -1,15 +1,16 @@
 """Лимиты загрузки PDF (SPEC-1.0 1.7): размер, страницы, распакованное содержимое."""
 
-import zlib
+import re
 
 import pymupdf
+
+from app.ingest.filters import IMAGE_CODECS, FilterError, canonical, decoded_chunks
 
 MB = 1024 * 1024
 MAX_PDF_BYTES = 50 * MB
 MAX_PAGES = 400
 MAX_UNPACKED_BYTES = 200 * MB
 IMPORT_TIMEOUT_S = 600
-_CHUNK = 1 * MB
 
 
 class UploadRejected(Exception):
@@ -21,39 +22,65 @@ class UploadRejected(Exception):
         self.message = message
 
 
-def _unpacked_size(doc: pymupdf.Document) -> int:
-    """Сумма размеров потоков после распаковки; считается кусками, без загрузки в память."""
+_NAME = re.compile(r"/?([A-Za-z0-9]+)")
+_COMPONENTS = {"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}
+
+
+def _filters(doc, xref: int) -> list[str]:
+    kind, value = doc.xref_get_key(xref, "Filter")
+    if kind == "null":
+        return []
+    return [m.group(1) for m in _NAME.finditer(value.strip("[]"))]
+
+
+def _image_estimate(doc, xref: int, raw_size: int) -> int:
+    """Распакованный размер растра по ширине, высоте и глубине; не меньше размера данных."""
+
+    def number(key):
+        kind, value = doc.xref_get_key(xref, key)
+        return int(float(value)) if kind == "int" else 0
+
+    cs = doc.xref_get_key(xref, "ColorSpace")[1].lstrip("/")
+    bpc = number("BitsPerComponent") or 8
+    pixels = number("Width") * number("Height") * _COMPONENTS.get(cs, 4) * bpc // 8
+    return max(raw_size, pixels)
+
+
+def _stream_size(doc, xref: int, budget: int) -> int:
+    raw = doc.xref_stream_raw(xref)
+    filters = [canonical(f) for f in _filters(doc, xref)]
+    if filters and filters[-1] in IMAGE_CODECS:
+        data_size = _count(raw, filters[:-1], budget)
+        return max(data_size, _image_estimate(doc, xref, data_size))
+    return _count(raw, filters, budget)
+
+
+def _count(raw: bytes, filters: list[str], budget: int) -> int:
     total = 0
-    for xref in range(1, doc.xref_length()):
-        if not doc.xref_is_stream(xref):
-            continue
-        raw = doc.xref_stream_raw(xref)
-        kind, filt = doc.xref_get_key(xref, "Filter")
-        if kind != "null" and "FlateDecode" in filt:
-            total += _inflated_size(raw, MAX_UNPACKED_BYTES - total)
-        else:
-            total += len(raw)
-        if total > MAX_UNPACKED_BYTES:
+    for chunk in decoded_chunks(raw, filters):
+        total += len(chunk)
+        if total > budget:
             break
     return total
 
 
-def _inflated_size(raw: bytes, budget: int) -> int:
-    """Размер распакованного потока; прекращает счёт, как только он превысит budget."""
-    dec = zlib.decompressobj()
-    size = 0
-    buf = raw
-    try:
-        while True:
-            data = dec.decompress(buf, _CHUNK)
-            size += len(data)
-            if size > budget:
-                return size
-            buf = dec.unconsumed_tail
-            if dec.eof or (not data and not buf):
-                return size
-    except zlib.error:
-        return len(raw)
+def _unpacked_size(doc: pymupdf.Document) -> int:
+    """Сумма размеров потоков после ПОЛНОЙ цепочки фильтров; считается кусками."""
+    total = 0
+    for xref in range(1, doc.xref_length()):
+        if not doc.xref_is_stream(xref):
+            continue
+        try:
+            total += _stream_size(doc, xref, MAX_UNPACKED_BYTES - total)
+        except FilterError as exc:
+            raise UploadRejected(
+                422,
+                f"Не удалось проверить размер содержимого после распаковки: {exc}. "
+                "Нужен PDF без повреждённых потоков и редких фильтров.",
+            ) from exc
+        if total > MAX_UNPACKED_BYTES:
+            break
+    return total
 
 
 def check_pdf(data: bytes) -> int:

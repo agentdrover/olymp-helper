@@ -4,7 +4,7 @@ import json
 
 from app.ingest.answers import display, normalize_answer
 from app.ingest.prompt import ANSWER_SCHEMA, build_task_request
-from app.ingest.store import figure_of, get_task, update_task
+from app.ingest.store import figure_of, get_task, save_snapshot
 
 
 def compute_model_answer(ctx, conn, task_id: int) -> bool:
@@ -32,11 +32,15 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
         else "high",
         "unverified": True,
     }
-    # Только если за время запроса ревизия не изменилась.
+    # Только в пустое поле и только если за время запроса ревизия не изменилась: заполненный
+    # ответ не заменяется (смена эталона - это новая ревизия).
     cur = conn.execute(
-        "UPDATE task_item SET model_answer = ? WHERE id = ? AND revision = ?",
+        "UPDATE task_item SET model_answer = ? WHERE id = ? AND revision = ? "
+        "AND model_answer IS NULL",
         (json.dumps(record, ensure_ascii=False), task_id, task["revision"]),
     )
+    if cur.rowcount == 1:
+        save_snapshot(conn, task_id)
     return cur.rowcount == 1
 
 
@@ -45,4 +49,4 @@ def model_value(task):
     return json.loads(task["model_answer"])["value"] if task["model_answer"] else None
 
 
-__all__ = ["compute_model_answer", "model_value", "update_task"]
+__all__ = ["compute_model_answer", "model_value"]

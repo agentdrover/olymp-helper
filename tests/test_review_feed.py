@@ -8,12 +8,14 @@ from app.sessions import SessionService
 from tests.bank_helpers import (
     CHILD,
     PARENT,
+    TEST_PARENT_KEY,
     StubModel,
     answer_by_number,
     build_app,
     db,
     key_pdf,
     make_task,
+    parent_cookie,
     reply,
     row,
     task_ids,
@@ -66,7 +68,8 @@ def test_ac15(tmp_path):
         post(c, f"/parent/tasks/{b}/key", answer="В")
         q = c.get("/parent/review/queue", headers=PARENT).json()
         assert q["total"] == 3 and [x["task_id"] for x in q["cards"]] == [a, b, third]
-        assert q["cards"][0]["kind"] == "confirm" and q["cards"][0]["model_agrees"] is True
+        assert q["cards"][0]["kind"] == "confirm" and q["cards"][0]["model_answer"] is None
+        assert _model.calls_of("task_answer") == []  # opening the feed never runs the model
         assert q["cards"][0]["button"] == "Верно, ответ Б — подтвердить и дальше"
 
         first = post(c, f"/parent/tasks/{a}/confirm")
@@ -171,8 +174,12 @@ def test_ac19(tmp_path):
         got = row(tmp_path, no_key)
         assert got["key_source"] == "parent" and json.loads(got["answer_key"])["value"] == "В"
 
-        # Discrepancy: key Б against the model's Г.
+        # Discrepancy: key Б against the model's Г. The model runs only after the condition is
+        # confirmed, so the discrepancy card exists from then on.
         for tid in (keep, mine):
+            card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
+            assert card["kind"] == "confirm" and card["model_answer"] is None
+            post(c, f"/parent/tasks/{tid}/confirm")
             card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
             assert card["kind"] == "discrepancy"
             assert card["key"] == "Б" and card["model_answer"] == "Г"
@@ -244,3 +251,98 @@ def test_changing_only_the_key_source_makes_a_revision(tmp_path):
         got = row(tmp_path, tid)
         assert got["key_source"] == "parent" and got["import_status"] == "draft"
         assert r["revision"] == 2 and r["key_version"] == got["key_version"]
+
+
+def test_get_never_runs_the_model_and_confirm_runs_it_once(tmp_path):
+    c, model, (tid,) = start(tmp_path, [1], {"1": "Б"})
+    with c:
+        for url in (
+            "/parent/review",
+            "/parent/review/queue",
+            f"/parent/review/{tid}",
+            f"/parent/review/{tid}?fragment=1",
+            f"/parent/tasks/{tid}",
+        ):
+            assert c.get(url, headers=PARENT).status_code == 200, url
+        assert model.calls_of("task_answer") == []
+        assert row(tmp_path, tid)["model_answer"] is None
+        post(c, f"/parent/tasks/{tid}/confirm")
+        assert len(model.calls_of("task_answer")) == 1
+        # a failing model is not retried by reloading pages
+        c.app.state.model.answer = None
+        before = len(model.calls_of("task_answer"))
+        for _ in range(3):
+            c.get("/parent/review", headers=PARENT)
+            c.get(f"/parent/tasks/{tid}", headers=PARENT)
+        assert len(model.calls_of("task_answer")) == before
+
+
+def test_retry_cannot_replace_a_model_answer_and_revisions_keep_the_old_one(tmp_path):
+    c, _model, (tid,) = start(tmp_path, [1], {"1": "Б"})
+    with c:
+        post(c, f"/parent/tasks/{tid}/confirm")
+        before = row(tmp_path, tid)
+        assert json.loads(before["model_answer"])["answer"] == "Б"
+        c.app.state.model.answer = answer_by_number({"1": "Г"})
+        r = c.post(f"/parent/tasks/{tid}/retry-model", headers=PARENT)
+        assert r.status_code == 409
+        after = row(tmp_path, tid)
+        assert after["model_answer"] == before["model_answer"] and after["revision"] == 1
+        assert after["import_status"] == "checked"
+
+        # a new revision keeps the old model answer in its snapshot
+        post(c, f"/parent/tasks/{tid}/edit", text="Другое условие")
+        conn = db(tmp_path)
+        snap = conn.execute(
+            "SELECT snapshot FROM task_revision WHERE task_item_id = ? AND revision = 1", (tid,)
+        ).fetchone()[0]
+        assert json.loads(snap)["model_answer"]["answer"] == "Б"
+        assert row(tmp_path, tid)["model_answer"] is None
+        post(c, f"/parent/tasks/{tid}/confirm")
+        assert json.loads(row(tmp_path, tid)["model_answer"])["answer"] == "Г"
+        snap = conn.execute(
+            "SELECT snapshot FROM task_revision WHERE task_item_id = ? AND revision = 2", (tid,)
+        ).fetchone()[0]
+        assert json.loads(snap)["model_answer"]["answer"] == "Г"
+
+
+def test_a_forged_role_cookie_gets_nothing(tmp_path, monkeypatch, caplog):
+    url = "/parent/materials"
+    app = build_app(tmp_path, StubModel())
+    with TestClient(app) as c:
+        assert c.get(url, headers={"Cookie": "olymp_role=parent"}).status_code == 403
+        assert c.get(url, headers={"Cookie": "olymp_parent=" + "0" * 64}).status_code == 403
+        assert c.get(url, headers={"Cookie": "olymp_parent=parent"}).status_code == 403
+        other = parent_cookie("another-key")
+        assert c.get(url, headers={"Cookie": "olymp_parent=" + other}).status_code == 403
+        assert c.get(url, headers=PARENT).status_code == 200
+        assert c.get("/api/tasks").status_code == 200  # the child's side needs no key
+
+        # the login form: wrong key refused; right key sets an HttpOnly, SameSite=Strict cookie
+        assert c.get("/parent/login").status_code == 200
+        assert c.post("/parent/login", data={"key": "wrong"}).status_code == 403
+        ok = c.post("/parent/login", data={"key": TEST_PARENT_KEY}, follow_redirects=False)
+        assert ok.status_code == 303
+        cookie = ok.headers["set-cookie"]
+        assert "olymp_parent=" + parent_cookie(TEST_PARENT_KEY) in cookie
+        assert "httponly" in cookie.lower() and "samesite=strict" in cookie.lower()
+        assert c.get(url).status_code == 200  # the browser now carries the cookie
+        c.cookies.clear()
+
+    # No key configured: nobody is a parent, every parent route is refused (fail closed).
+    monkeypatch.delenv("OLYMP_PARENT_KEY")
+    routes = [
+        (m.upper(), path)
+        for path, item in app.openapi()["paths"].items()
+        if path != "/parent/login" and path.startswith(("/parent", "/materials"))
+        for m in item
+    ]
+    assert len(routes) >= 15
+    with TestClient(app) as c, caplog.at_level("WARNING"):
+        for method, path in routes:
+            concrete = path.replace("{task_id}", "1").replace("{material_id}", "1")
+            concrete = concrete.replace("{page}", "1")
+            r = c.request(method, concrete, headers=PARENT, json={} if method == "POST" else None)
+            assert r.status_code == 403, (method, path, r.status_code)
+        assert c.post("/parent/login", data={"key": TEST_PARENT_KEY}).status_code == 403
+    assert "OLYMP_PARENT_KEY" in caplog.text

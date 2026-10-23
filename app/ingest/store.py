@@ -58,6 +58,7 @@ def save_snapshot(conn: sqlite3.Connection, task_id: int) -> None:
         "figure": figure_of(task),
         "answer_key": json.loads(task["answer_key"]) if task["answer_key"] else None,
         "key_source": task["key_source"],
+        "model_answer": json.loads(task["model_answer"]) if task["model_answer"] else None,
     }
     conn.execute(
         "INSERT OR REPLACE INTO task_revision (task_item_id, revision, key_version, snapshot, "

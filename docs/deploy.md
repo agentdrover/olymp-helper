@@ -25,6 +25,7 @@
 | `OLYMP_TLS_CERT` | app | `/certs/server.pem` в compose | сертификат сервера; задан — приложение слушает HTTPS |
 | `OLYMP_TLS_KEY` | app | `/certs/server.key` в compose | ключ сервера |
 | `WHISPER_BIN`, `WHISPER_MODEL` | app | `/usr/local/bin/whisper-cli`, `/opt/whisper/ggml-small.bin` | заданы в образе, менять не нужно |
+| `OLYMP_PARENT_KEY` | app | нет (родительский доступ закрыт) | ключ входа родителя через `/parent/login` до PIN (OH-T08); cookie `olymp_parent` = HMAC ключа, HttpOnly, SameSite=Strict; передаётся при запуске, значение в compose не пишется; не задан — все родительские маршруты отвечают 403 |
 | `OLYMP_DATA_DIR` | app | каталог базы (`/srv/olymp`) | PDF материалов, PNG рисунков и кэш рендера страниц (лимит кэша 500 МБ) |
 | `EXECUTOR_CLAUDE_URL`, `EXECUTOR_CURSOR_URL` | app | `http://executor-claude:8099`, `http://executor-cursor:8099` | адреса исполнителей, к которым приложение обращается при разборе заданий |
 | `OLYMP_CERT_DIR` | хост | `/srv/olymp-certs` | каталог на хосте с `server.pem` и `server.key`, монтируется в `/certs` только для чтения |

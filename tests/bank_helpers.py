@@ -1,5 +1,7 @@
 """Shared builders for the task-bank tests: PDFs built on the fly, a stub model, app factory."""
 
+import hashlib
+import hmac
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -9,7 +11,15 @@ import pymupdf
 from app.main import create_app
 from app.model.types import ModelResult
 
-PARENT = {"Cookie": "olymp_role=parent"}
+TEST_PARENT_KEY = "test-parent-key"
+
+
+def parent_cookie(key: str) -> str:
+    """Independent of the app: what a correct parent cookie must be."""
+    return hmac.new(key.encode(), b"parent", hashlib.sha256).hexdigest()
+
+
+PARENT = {"Cookie": "olymp_parent=" + parent_cookie(TEST_PARENT_KEY)}
 CHILD: dict = {}
 FONT = pymupdf.Font("helv")
 
@@ -213,3 +223,14 @@ def row(tmp_path, task_id):
         return conn.execute("SELECT * FROM task_item WHERE id = ?", (task_id,)).fetchone()
     finally:
         conn.close()
+
+
+def raw_pdf(stream_entries: str, data: bytes) -> bytes:
+    """A PDF with one extra stream object whose dictionary is written as given."""
+    head = (
+        b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]>>endobj\n"
+    )
+    obj = b"4 0 obj<</Length %d %s>>stream\n" % (len(data), stream_entries.encode())
+    return head + obj + data + b"\nendstream endobj\ntrailer<</Root 1 0 R/Size 5>>\n%%EOF"

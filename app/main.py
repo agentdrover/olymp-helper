@@ -14,6 +14,7 @@ from app.ingest.web import parent as parent_router
 from app.ingest.web import public as public_router
 
 DEFAULT_DB_PATH = "/srv/olymp/olymp.db"
+INTERRUPTED = "прервано перезапуском"
 STATIC_DIR = Path(__file__).parent / "static"
 
 
@@ -36,6 +37,13 @@ def create_app(
     async def lifespan(app: FastAPI):
         conn = connect(path)
         migrate(conn)
+        # Потоки импорта и их таймеры живут только в памяти процесса: после перезапуска
+        # queued/running зависли бы навсегда. Повтор возможен для failed.
+        conn.execute(
+            "UPDATE material SET import_status = 'failed', import_error = ? "
+            "WHERE import_status IN ('queued', 'running')",
+            (INTERRUPTED,),
+        )
         conn.close()
         app.state.db_path = path
         yield

@@ -1,6 +1,10 @@
 """Проверка структуры ответа модели при разбиении страниц на задания."""
 
+import re
+
 TYPES = ("single", "multiple", "match", "open")
+# Номер задания: цифры, необязательные «.цифры» и необязательная буква; ничего другого.
+NUMBER = re.compile(r"^\d{1,4}(\.\d{1,3})?[A-Za-zА-Яа-я]?$")
 
 
 class InvalidStructure(Exception):
@@ -63,8 +67,8 @@ def validate_tasks(payload, pages: set[int]) -> list[dict]:
         number = raw.get("number")
         if isinstance(number, int) and not isinstance(number, bool):
             number = str(number)
-        if not isinstance(number, str) or not number.strip():
-            _fail(where, "нет номера")
+        if not isinstance(number, str) or not NUMBER.fullmatch(number.strip()):
+            _fail(where, "номер задания должен быть числом, например 12, 5.2 или 3а")
         text = raw.get("text")
         if not isinstance(text, str) or not text.strip():
             _fail(where, "пустое условие")

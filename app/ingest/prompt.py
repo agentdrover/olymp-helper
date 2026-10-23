@@ -102,7 +102,8 @@ def build_task_request(task) -> tuple[str, list[dict]]:
     if figure and figure.get("teacher_note"):
         parts.append("Пояснение к рисунку: " + neutralize(figure["teacher_note"]))
     content = (
-        f"Задание №{task['source_number']}\nТип: {task['type']}\n"
+        f"Задание №{' '.join(neutralize(str(task['source_number'])).split())}\n"
+        f"Тип: {task['type']}\n"
         "Ниже блок task_data с условием.\n<task_data>\n" + "\n".join(parts) + "\n</task_data>"
     )
     return ANSWER_SYSTEM_PROMPT, [{"role": "user", "content": content}]

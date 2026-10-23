@@ -213,6 +213,11 @@ def retry_model(ctx, conn, task_id: int) -> bool:
     task = _task(conn, task_id)
     if figure_of(task) is not None:
         raise Refusal("Для задания с рисунком ответ модели не вычисляется.")
+    if task["model_answer"] is not None:
+        raise Refusal(
+            "Ответ модели уже получен. Чтобы пересчитать, исправьте задание: это новая ревизия.",
+            409,
+        )
     return compute_model_answer(ctx, conn, task_id)
 
 
@@ -225,15 +230,14 @@ def _discrepancy(task, key, model) -> bool:
     return task["discrepancy_ack"] != json.dumps(model, ensure_ascii=False)
 
 
-def build_card(ctx, conn, task, *, compute: bool = True) -> dict | None:
-    """Карточка ленты или None, если по заданию родителю нечего делать."""
+def build_card(ctx, conn, task) -> dict | None:
+    """Карточка ленты или None, если по заданию родителю нечего делать.
+
+    Только чтение: ответ модели считается лишь после подтверждения условия (POST)."""
     if task["excluded"]:
         return None
     figure = figure_of(task)
     status = task["import_status"]
-    if compute and status == "draft" and figure is None and task["model_answer"] is None:
-        compute_model_answer(ctx, conn, task["id"])
-        task = get_task(conn, task["id"])
     key, source, _ = key_info(conn, task)
     model = model_value(task)
     kind, hint = None, ""
@@ -264,12 +268,12 @@ def build_card(ctx, conn, task, *, compute: bool = True) -> dict | None:
         kind, hint = "confirm", "Проверьте, что условие распознано верно."
     if kind is None:
         return None
-    agrees = key is not None and model is not None and key == model
+    agrees = None if key is None or model is None else key == model
     button = None
     if kind == "confirm":
         button = (
             f"Верно, ответ {display(key)} — подтвердить и дальше"
-            if key is not None and (agrees or model is None)
+            if key is not None
             else "Верно — подтвердить и дальше"
         )
     return {
@@ -301,8 +305,8 @@ def build_card(ctx, conn, task, *, compute: bool = True) -> dict | None:
     }
 
 
-def card_for(ctx, conn, task_id: int, *, compute: bool = True) -> dict | None:
-    return build_card(ctx, conn, _task(conn, task_id), compute=compute)
+def card_for(ctx, conn, task_id: int) -> dict | None:
+    return build_card(ctx, conn, _task(conn, task_id))
 
 
 def task_detail(ctx, conn, task_id: int) -> dict:
@@ -338,12 +342,7 @@ def task_detail(ctx, conn, task_id: int) -> dict:
 
 def queue(ctx, conn) -> list[dict]:
     rows = conn.execute("SELECT * FROM task_item WHERE excluded = 0 ORDER BY id").fetchall()
-    cards = [c for r in rows if (c := build_card(ctx, conn, r, compute=False))]
-    if cards:  # ответ модели считается для карточки, которую родитель увидит первой
-        first = build_card(ctx, conn, get_task(conn, cards[0]["task_id"]), compute=True)
-        if first:
-            cards[0] = first
-    return cards
+    return [c for r in rows if (c := build_card(ctx, conn, r))]
 
 
 def open_feed(ctx, conn) -> dict:
