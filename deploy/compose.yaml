@@ -1,0 +1,59 @@
+# Два контейнера (ADR 0001): приложение и исполнитель модели. Установка на K8 - home-infra (#2021).
+# Запуск: docker compose -f deploy/compose.yaml up -d  (переменные - в docs/deploy.md).
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Containerfile
+    image: olymp-app:local
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - /srv/olymp:/srv/olymp
+      - ${OLYMP_CERT_DIR:-/srv/olymp-certs}:/certs:ro
+    environment:
+      - OLYMP_DB=/srv/olymp/olymp.db
+      - OLYMP_PORT=8443
+      - OLYMP_TLS_CERT=/certs/server.pem
+      - OLYMP_TLS_KEY=/certs/server.key
+    healthcheck:
+      test: ["CMD", "python", "/app/deploy/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    mem_limit: 2g
+    cpus: 2.0
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # Исполнители моделей (OH-T03, #2013): по контейнеру на канал, у каждого только свой токен.
+  # Корень файловой системы только для чтения; рабочий каталог запуска - /work (tmpfs,
+  # без исполнения, с лимитом, владелец - uid исполнителя). Образ и параметры задаёт OH-T03.
+  executor-claude:
+    image: ${OLYMP_EXECUTOR_IMAGE:?образ исполнителя (OH-T03)}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /work:size=64m,noexec,nosuid,nodev,uid=${OLYMP_EXECUTOR_UID:-10002},gid=${OLYMP_EXECUTOR_UID:-10002},mode=0700
+    environment:
+      - EXECUTOR_WORKROOT=/work
+      - CLAUDE_CODE_OAUTH_TOKEN
+    mem_limit: 1g
+    cpus: 1.0
+
+  executor-cursor:
+    image: ${OLYMP_EXECUTOR_IMAGE:?образ исполнителя (OH-T03)}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /work:size=64m,noexec,nosuid,nodev,uid=${OLYMP_EXECUTOR_UID:-10002},gid=${OLYMP_EXECUTOR_UID:-10002},mode=0700
+    environment:
+      - EXECUTOR_WORKROOT=/work
+      - CURSOR_API_KEY
+    mem_limit: 1g
+    cpus: 1.0
