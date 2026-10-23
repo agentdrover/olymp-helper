@@ -60,7 +60,14 @@ def common() -> None:
         Path("/home/node/.cursor"),
         Path("/root/.claude"),
     ]
-    found = [str(p) for p in candidates if p.exists()]
+    found = []
+    for path in candidates:
+        try:
+            if path.exists():
+                found.append(str(path))
+        except PermissionError:
+            # Недоступно = нет: в закрытый каталог (например /root) процесс не заглянет.
+            print(f"OK   {path} недоступен", flush=True)
     check("нет настроек CLI и MCP-конфигов", not found, ",".join(found))
 
 
