@@ -90,38 +90,42 @@ def _hex(chunks: Iterable[bytes]) -> Iterator[bytes]:
 
 
 def _a85(chunks: Iterable[bytes]) -> Iterator[bytes]:
-    pending = b""
+    # carry: неполная группа и, возможно, одинокая «~» - начало маркера конца, разрезанного
+    # границей кусков; маркер распознаётся только целиком.
+    carry = b""
     first = True
     for chunk in _slices(chunks, A85_SLICE):
-        data = chunk.translate(None, WHITESPACE)
+        data = carry + chunk.translate(None, WHITESPACE)
         if first:
-            data = pending + data
             if data.startswith(b"<~"):
                 data = data[2:]
             elif len(data) < 2 and b"<~".startswith(data):
-                pending = data
+                carry = data
                 continue
-            first, pending = False, b""
-        else:
-            data = pending + data
+            first = False
         end = data.find(b"~>")
         done = end >= 0
+        tilde = b""
         if done:
             data = data[:end]
+        elif data.endswith(b"~"):
+            data, tilde = data[:-1], b"~"
         # «z» - четыре нулевых байта; вне группы из 5 знаков он равен «!!!!!».
         data = data.replace(b"z", b"!!!!!")
-        cut = len(data) // 5 * 5
-        body, pending = data[:cut], data[cut:]
+        cut = len(data) if done else len(data) // 5 * 5  # маркер конца закрывает и неполную группу
+        body, carry = data[:cut], data[cut:] + tilde
         try:
             if body:
                 yield base64.a85decode(body)
         except ValueError as exc:
             raise FilterError("повреждённый поток ASCII85") from exc
         if done:
-            break
-    if pending:
+            return
+    if carry.endswith(b"~"):
+        raise FilterError("повреждённый поток ASCII85: оборванный маркер конца")
+    if carry:
         try:
-            yield base64.a85decode(pending)
+            yield base64.a85decode(carry)
         except ValueError as exc:
             raise FilterError("повреждённый поток ASCII85") from exc
 
@@ -236,12 +240,20 @@ def _bounded(chunks: Iterable[bytes], budget: int) -> Iterator[bytes]:
 
 
 def decoded_chunks(raw: bytes, filters: list[str], budget: int) -> Iterator[bytes]:
-    """Куски результата полной цепочки. Бюджет проверяется на выходе каждого этапа;
-    неизвестный фильтр или ошибка потока - FilterError, превышение - OverBudget."""
+    """Куски результата полной цепочки. Бюджет проверяется на выходе каждого этапа.
+
+    После последнего этапа ВСЕ предыдущие дочитываются до конца под тем же бюджетом: декодер,
+    остановившийся на маркере конца, не оставляет за собой невидимый выход. Неизвестный фильтр
+    или ошибка потока - FilterError, превышение - OverBudget."""
     chunks: Iterable[bytes] = [raw]
+    stages = []
     for name in filters:
         decoder = DECODERS.get(canonical(name))
         if decoder is None:
             raise FilterError(f"неподдерживаемый фильтр {name}")
         chunks = _bounded(decoder(chunks), budget)
-    return iter(chunks)
+        stages.append(chunks)
+    yield from chunks
+    for stage in reversed(stages[:-1]):
+        for _ in stage:
+            pass

@@ -279,3 +279,36 @@ def test_decoders_stream_without_holding_their_input_or_output():
         produced, top = peak(raw, chain)
         assert produced >= 2_000_000, name
         assert top < limit, (name, top)
+
+
+def test_a_stage_nobody_reads_to_the_end_is_still_counted(monkeypatch):
+    # Flate gives 4 MB that starts with the run-length end marker: RunLength stops at once and
+    # never reads the rest; the unread output of the earlier stage must still be counted.
+    payload = zlib.compress(b"\x80" + b"x" * 4_000_000)
+    err = _check(payload, "[/FlateDecode /RunLengthDecode]", monkeypatch, limit=2_000_000)
+    assert err.status == 422 and "200 МБ" in err.message
+    with pytest.raises(OverBudget):
+        list(decoded_chunks(payload, ["FlateDecode", "RunLengthDecode"], 2_000_000))
+    # the same for a middle stage: Flate -> ASCIIHex (stops at '>') -> RunLength
+    hexed = zlib.compress(b"41>" + b" " * 4_000_000)
+    err = _check(hexed, "[/FlateDecode /ASCIIHexDecode /RunLengthDecode]", monkeypatch, 2_000_000)
+    assert err.status == 422
+    # within the budget the drained chain is accepted
+    small = zlib.compress(b"\x80" + b"x" * 1000)
+    ok = raw_pdf("/Filter [/FlateDecode /RunLengthDecode]", small)
+    monkeypatch.setattr(limits, "MAX_UNPACKED_BYTES", 2_000_000)
+    assert limits.check_pdf(ok) == 1
+
+
+def test_ascii85_end_marker_split_across_chunks():
+    raw = b"  " + b"!" * 8189 + b"~>"
+    expected = base64.a85decode(b"!" * 8189)
+    assert b"".join(decoded_chunks(raw, ["ASCII85Decode"], 10**9)) == expected
+    # the marker cut at every possible position of a small stream
+    body = base64.a85encode(b"Hello, world!!")
+    for pad in range(8185, 8195):
+        data = b" " * (pad - len(body) % 5) + body + b"~>"
+        assert b"".join(decoded_chunks(data, ["ASCII85Decode"], 10**9)) == b"Hello, world!!"
+    # a lone '~' that is not followed by '>' is malformed
+    with pytest.raises(FilterError):
+        b"".join(decoded_chunks(b'87cURD]i,"Ebo80~', ["ASCII85Decode"], 10**9))

@@ -432,3 +432,81 @@ def test_a_repeated_task_in_two_chunks_of_one_section_is_stored_once_other_secti
         assert "Раздел на начало порции: Вариант 1" in calls[1].messages[-1]["content"]
         sections = [r["section"] for r in [row(tmp_path, i) for i in task_ids(tmp_path)]]
         assert sections == [first, second]
+
+
+def test_the_full_section_state_is_carried_between_chunks(tmp_path):
+    def split(content):
+        if "[[стр. 2]]" not in content:
+            return reply(
+                make_task(1, pages=[1], section="Раздел А", variant="7", stage="заключительный")
+            )
+        return reply(make_task(2, "Продолжение", pages=[2]))  # no metadata of its own
+
+    model = StubModel(split=split)
+    with TestClient(build_app(tmp_path, model)) as c:
+        long = "а" * 7000
+        upload(c, text_pdf([["1. " + long], ["2. " + long]]), variant="", stage="")
+        carried = model.calls_of("tasks_split")[1].messages[-1]["content"]
+        assert "Раздел на начало порции: Раздел А" in carried
+        assert "вариант: 7" in carried and "этап: заключительный" in carried
+        rows = [row(tmp_path, i) for i in task_ids(tmp_path)]
+        got = [(r["source_number"], r["section"], r["variant"], r["stage"]) for r in rows]
+        assert got == [
+            ("1", "Раздел А", "7", "заключительный"),
+            ("2", "Раздел А", "7", "заключительный"),
+        ]
+
+
+def test_a_heading_after_the_last_task_of_a_chunk_is_carried_to_the_next_one(tmp_path):
+    def split(content):
+        if "[[стр. 2]]" not in content:
+            payload = reply(make_task(1, "Первый вариант", pages=[1], section="Вариант 1"))
+            payload["section_at_end"] = {"section": "Вариант 2", "variant": "2"}
+            return payload
+        return reply(make_task(1, "Задание второго варианта", pages=[2]))
+
+    model = StubModel(split=split)
+    with TestClient(build_app(tmp_path, model)) as c:
+        long = "а" * 7000
+        upload(c, text_pdf([["1. " + long], ["1. " + long]]), variant="")
+        assert (
+            "Раздел на начало порции: Вариант 2"
+            in (model.calls_of("tasks_split")[1].messages[-1]["content"])
+        )
+        rows = [row(tmp_path, i) for i in task_ids(tmp_path)]
+        assert [(r["section"], r["variant"]) for r in rows] == [
+            ("Вариант 1", "1"),
+            ("Вариант 2", "2"),
+        ]
+        assert [r["text"] for r in rows] == ["Первый вариант", "Задание второго варианта"]
+
+
+def test_section_at_end_is_validated_like_the_task_labels(tmp_path):
+    for bad in ({"section": 5}, "Вариант 2", {"section": "x" * 500}):
+        payload = reply(make_task(1, section="Вариант 1"))
+        payload["section_at_end"] = bad
+        with TestClient(
+            build_app(tmp_path / str(abs(hash(str(bad)))), StubModel(split=payload))
+        ) as c:
+            r = upload(c, text_pdf([["1. текст"]]))
+            st = c.get(f"/parent/materials/{r.json()['material_id']}", headers=PARENT).json()
+            assert st["import_status"] == "failed" and "структур" in st["import_error"], bad
+
+
+def test_a_new_section_does_not_inherit_the_old_variant_and_stage(tmp_path):
+    tasks = [
+        make_task(1, "А", section="Раздел А", variant="7", stage="заключительный"),
+        make_task(2, "Б", section="Раздел Б"),  # a new section without its own labels
+        make_task(3, "В"),  # continues Раздел Б
+        make_task(4, "Г", stage="отборочный"),  # same section, only the stage is stated
+    ]
+    with TestClient(build_app(tmp_path, StubModel(split=reply(*tasks)))) as c:
+        upload(c, text_pdf([["1. текст"]]), variant="", stage="")
+        rows = [row(tmp_path, i) for i in task_ids(tmp_path)]
+        got = [(r["section"], r["variant"], r["stage"]) for r in rows]
+        assert got == [
+            ("Раздел А", "7", "заключительный"),
+            ("Раздел Б", None, None),
+            ("Раздел Б", None, None),
+            ("Раздел Б", None, "отборочный"),
+        ]

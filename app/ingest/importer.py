@@ -11,7 +11,7 @@ from app.ingest.extract import chunk_pages, extract_pages
 from app.ingest.figures import suggest_rect
 from app.ingest.keys import parse_key_text
 from app.ingest.prompt import SYSTEM_PROMPT, TASKS_SCHEMA, build_chunk_message
-from app.ingest.schema import InvalidStructure, validate_tasks
+from app.ingest.schema import InvalidStructure, validate_section_at_end, validate_tasks
 from app.ingest.store import open_db, save_snapshot
 from app.search import index_pages
 
@@ -36,13 +36,30 @@ def _check(cancel: threading.Event):
         raise ImportAborted
 
 
+META = ("section", "variant", "stage")
+
+
+def _inherit(state: dict, task: dict) -> None:
+    """Задание без своих меток наследует все три; новый раздел заменяет состояние целиком,
+    одни variant/stage уточняют текущее."""
+    if task["section"]:
+        state.update({name: task[name] for name in META})
+    else:
+        for name in ("variant", "stage"):
+            if task[name]:
+                state[name] = task[name]
+    for name in META:
+        task[name] = task[name] or state[name]
+
+
 def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
-    """Задания из всех порций; повтор номера в соседних порциях отбрасывается."""
+    """Задания из всех порций. Номера повторяются по разделам: ключ дедупликации - (раздел,
+    номер); состояние раздела (раздел, вариант, этап) переходит между порциями."""
     seen: dict[tuple, dict] = {}
-    current = None  # раздел, действующий к концу предыдущей порции
+    state = dict.fromkeys(META)  # состояние на конец предыдущей порции
     for chunk in chunk_pages(pages):
         _check(cancel)
-        message = build_chunk_message(chunk, current)
+        message = build_chunk_message(chunk, state)
         result = ctx.model.complete(
             SYSTEM_PROMPT, [{"role": "user", "content": message}], TASKS_SCHEMA
         )
@@ -51,15 +68,14 @@ def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
             raise ImportFailure("Модель не ответила при разборе страниц. Повторите загрузку позже.")
         try:
             parsed = validate_tasks(result.json, {n for n, _ in chunk})
+            at_end = validate_section_at_end(result.json)
         except InvalidStructure as exc:
             raise ImportFailure(str(exc)) from exc
         for task in parsed:
-            if task["section"]:
-                current = task["section"]
-            else:
-                task["section"] = current  # продолжение раздела: назван раньше
-            # номера повторяются по разделам: ключ - (раздел, номер)
+            _inherit(state, task)
             seen.setdefault((task["section"], task["number"]), task)
+        if at_end:  # заголовок после последнего задания важнее состояния последнего задания
+            state = {name: at_end[name] for name in META}
     return list(seen.values())
 
 

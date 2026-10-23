@@ -59,6 +59,22 @@ def _label(raw, where: str, name: str, limit: int) -> str | None:
     return text or None
 
 
+def validate_section_at_end(payload) -> dict | None:
+    """Раздел, вариант и этап, действующие в конце порции; None, если модель их не назвала."""
+    raw = payload.get("section_at_end") if isinstance(payload, dict) else None
+    if raw is None:
+        return None
+    where = "section_at_end"
+    if not isinstance(raw, dict):
+        _fail(where, "ожидался объект")
+    state = {
+        "section": _label(raw.get("section"), where, "раздел", 120),
+        "variant": _label(raw.get("variant"), where, "вариант", 20),
+        "stage": _label(raw.get("stage"), where, "этап", 60),
+    }
+    return state if any(state.values()) else None
+
+
 def check_options(kind: str, value):
     """Варианты, введённые родителем: те же правила, что и для ответа модели."""
     return _options(kind, value, "варианты")

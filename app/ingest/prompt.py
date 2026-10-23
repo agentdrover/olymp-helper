@@ -17,7 +17,9 @@ SYSTEM_PROMPT = (
     "match, open), условие, варианты ответа, номера страниц и признак refers_to_figure, если "
     "условие ссылается на рисунок, схему или таблицу. Номера заданий повторяются в разных "
     "разделах (вариантах, этапах): для каждого задания укажи section - заголовок раздела, "
-    "например «Вариант 1, заключительный этап», а также variant и stage, если они названы."
+    "например «Вариант 1, заключительный этап», а также variant и stage, если они названы. "
+    "В поле section_at_end верни раздел, вариант и этап, действующие в КОНЦЕ порции "
+    "(включая заголовок нового раздела после последнего задания)."
 )
 
 ANSWER_SYSTEM_PROMPT = (
@@ -32,6 +34,14 @@ TASKS_SCHEMA = {
     "type": "object",
     "required": ["tasks"],
     "properties": {
+        "section_at_end": {
+            "type": "object",
+            "properties": {
+                "section": {"type": "string"},
+                "variant": {"type": "string"},
+                "stage": {"type": "string"},
+            },
+        },
         "tasks": {
             "type": "array",
             "items": {
@@ -51,7 +61,7 @@ TASKS_SCHEMA = {
                     "stage": {"type": "string"},
                 },
             },
-        }
+        },
     },
 }
 
@@ -74,10 +84,17 @@ def neutralize(text: str) -> str:
     return _TAGS.sub(lambda m: "‹" + m.group(1) + m.group(2), text)
 
 
-def build_chunk_message(pages: list[tuple[int, str]], section: str | None = None) -> str:
-    carried = (
-        f"Раздел на начало порции: {' '.join(neutralize(section).split())}\n" if section else ""
-    )
+def build_chunk_message(pages: list[tuple[int, str]], state: dict | None = None) -> str:
+    """state - раздел, вариант и этап на начало порции ({section, variant, stage})."""
+    parts = []
+    if state:
+        if state.get("section"):
+            parts.append(" ".join(neutralize(state["section"]).split()))
+        if state.get("variant"):
+            parts.append("вариант: " + " ".join(neutralize(state["variant"]).split()))
+        if state.get("stage"):
+            parts.append("этап: " + " ".join(neutralize(state["stage"]).split()))
+    carried = f"Раздел на начало порции: {'; '.join(parts)}\n" if parts else ""
     body = "\n".join(f"[[стр. {n}]]\n{neutralize(t)}" for n, t in pages)
     first, last = pages[0][0], pages[-1][0]
     return (
