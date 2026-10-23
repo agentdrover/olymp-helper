@@ -3,14 +3,34 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.db import connect, migrate, schema_version
+from app.ingest.context import AppContext, ExecutorModel
+from app.ingest.jobs import ImportJobs
+from app.ingest.limits import IMPORT_TIMEOUT_S
+from app.ingest.render import PageCache
+from app.ingest.web import parent as parent_router
+from app.ingest.web import public as public_router
 
 DEFAULT_DB_PATH = "/srv/olymp/olymp.db"
+STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(db_path: str | Path | None = None) -> FastAPI:
+def create_app(
+    db_path: str | Path | None = None,
+    *,
+    model=None,
+    data_dir: str | Path | None = None,
+    sync_imports: bool = False,
+    import_timeout: float = IMPORT_TIMEOUT_S,
+) -> FastAPI:
+    """model - объект с complete(system, messages, schema); тесты подменяют только его.
+
+    sync_imports=True выполняет импорт в потоке запроса (тесты); в работе импорт идёт фоном.
+    """
     path = Path(db_path or os.environ.get("OLYMP_DB", DEFAULT_DB_PATH))
+    data = Path(data_dir or os.environ.get("OLYMP_DATA_DIR") or path.parent)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -21,6 +41,14 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="olymp-helper", lifespan=lifespan)
+    app.state.model = model or ExecutorModel(path)
+    ctx = AppContext(path, data, app.state, PageCache(data / "cache" / "pages"))
+    app.state.ctx = ctx
+    app.state.page_cache = ctx.page_cache
+    app.state.imports = ImportJobs(ctx, sync=sync_imports, timeout=import_timeout)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.include_router(parent_router)
+    app.include_router(public_router)
 
     @app.get("/healthz")
     def healthz():

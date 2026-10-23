@@ -24,8 +24,8 @@ def _migration_files() -> list[tuple[int, Path]]:
 SCHEMA_VERSION = len(_migration_files())
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path), isolation_level=None)
+def connect(path: str | Path, check_same_thread: bool = True) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=check_same_thread)
     conn.execute("PRAGMA foreign_keys = ON")
     mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
     if mode.lower() != "wal":

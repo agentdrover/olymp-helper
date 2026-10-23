@@ -25,6 +25,8 @@
 | `OLYMP_TLS_CERT` | app | `/certs/server.pem` в compose | сертификат сервера; задан — приложение слушает HTTPS |
 | `OLYMP_TLS_KEY` | app | `/certs/server.key` в compose | ключ сервера |
 | `WHISPER_BIN`, `WHISPER_MODEL` | app | `/usr/local/bin/whisper-cli`, `/opt/whisper/ggml-small.bin` | заданы в образе, менять не нужно |
+| `OLYMP_DATA_DIR` | app | каталог базы (`/srv/olymp`) | PDF материалов, PNG рисунков и кэш рендера страниц (лимит кэша 500 МБ) |
+| `EXECUTOR_CLAUDE_URL`, `EXECUTOR_CURSOR_URL` | app | `http://executor-claude:8099`, `http://executor-cursor:8099` | адреса исполнителей, к которым приложение обращается при разборе заданий |
 | `OLYMP_CERT_DIR` | хост | `/srv/olymp-certs` | каталог на хосте с `server.pem` и `server.key`, монтируется в `/certs` только для чтения |
 | `OLYMP_EXECUTOR_IMAGE` | хост | обязательна | образ исполнителя (OH-T03) |
 | `OLYMP_EXECUTOR_UID` | хост | `10002` | uid исполнителя, владелец tmpfs `/work` |
