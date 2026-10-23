@@ -461,7 +461,7 @@ def test_a_heading_after_the_last_task_of_a_chunk_is_carried_to_the_next_one(tmp
     def split(content):
         if "[[стр. 2]]" not in content:
             payload = reply(make_task(1, "Первый вариант", pages=[1], section="Вариант 1"))
-            payload["section_at_end"] = {"section": "Вариант 2", "variant": "2"}
+            payload["section_at_end"] = {"section": "Раздел Б", "variant": "9"}
             return payload
         return reply(make_task(1, "Задание второго варианта", pages=[2]))
 
@@ -499,6 +499,7 @@ def test_a_new_section_does_not_inherit_the_old_variant_and_stage(tmp_path):
         make_task(2, "Б", section="Раздел Б"),  # a new section without its own labels
         make_task(3, "В"),  # continues Раздел Б
         make_task(4, "Г", stage="отборочный"),  # same section, only the stage is stated
+        make_task(5, "Д"),  # inherits the stage stated just before
     ]
     with TestClient(build_app(tmp_path, StubModel(split=reply(*tasks)))) as c:
         upload(c, text_pdf([["1. текст"]]), variant="", stage="")
@@ -508,5 +509,6 @@ def test_a_new_section_does_not_inherit_the_old_variant_and_stage(tmp_path):
             ("Раздел А", "7", "заключительный"),
             ("Раздел Б", None, None),
             ("Раздел Б", None, None),
+            ("Раздел Б", None, "отборочный"),
             ("Раздел Б", None, "отборочный"),
         ]

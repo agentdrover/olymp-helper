@@ -290,7 +290,7 @@ def test_a_stage_nobody_reads_to_the_end_is_still_counted(monkeypatch):
     with pytest.raises(OverBudget):
         list(decoded_chunks(payload, ["FlateDecode", "RunLengthDecode"], 2_000_000))
     # the same for a middle stage: Flate -> ASCIIHex (stops at '>') -> RunLength
-    hexed = zlib.compress(b"41>" + b" " * 4_000_000)
+    hexed = zlib.compress(b"80>" + b" " * 4_000_000)  # 0x80 = run-length end marker
     err = _check(hexed, "[/FlateDecode /ASCIIHexDecode /RunLengthDecode]", monkeypatch, 2_000_000)
     assert err.status == 422
     # within the budget the drained chain is accepted
