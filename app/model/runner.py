@@ -22,7 +22,7 @@ def kill_group(launcher, pid, run=subprocess.run):
     CAP_KILL), поэтому сигнал отправляет тот же launcher - от имени пользователя CLI."""
     if launcher:
         run(
-            [*launcher, "sh", "-c", f"kill -KILL -- -{int(pid)}"],
+            [*launcher, "python3", "-c", f"import os; os.killpg({int(pid)}, 9)"],
             capture_output=True,
             timeout=10,
             check=False,
@@ -221,7 +221,7 @@ def make_sweeper(launcher, user, attempts=3):
             if not cli_processes(uid):
                 return True
             subprocess.run(
-                [*launcher, "sh", "-c", "kill -KILL -1"],
+                [*launcher, "python3", "-c", "import os; os.kill(-1, 9)"],
                 capture_output=True,
                 timeout=10,
                 check=False,
