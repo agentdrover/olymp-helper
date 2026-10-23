@@ -25,7 +25,6 @@ for pair in "claude:CLAUDE_CODE_OAUTH_TOKEN" "cursor:CURSOR_API_KEY"; do
     name="olymp-exec-${channel}"
     docker run -d --init --ipc none --name "$name" --read-only \
         --tmpfs /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711 \
-        --tmpfs /dev/mqueue:ro,noexec,nosuid,nodev,size=4k,mode=0555 \
         --cap-drop ALL --cap-add SETUID --cap-add SETGID --pids-limit 256 \
         -e "EXECUTOR_CHANNEL=${channel}" \
         -e "EXECUTOR_SHARED_KEY=ci-placeholder-shared-key" \
@@ -38,6 +37,7 @@ for pair in "claude:CLAUDE_CODE_OAUTH_TOKEN" "cursor:CURSOR_API_KEY"; do
         fi
         sleep 1
     done
-    docker exec "$name" python3 /opt/executor/sandbox_check.py srv
+    docker exec -e "WANT_CLAUDE_VERSION=${want_claude}" -e "WANT_CURSOR_VERSION=${want_cursor}" \
+        "$name" python3 /opt/executor/sandbox_check.py srv
     docker exec --user exec-cli "$name" python3 /opt/executor/sandbox_check.py cli
 done

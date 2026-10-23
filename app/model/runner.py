@@ -24,6 +24,11 @@ CLEAN_SCRIPT = (
 )
 
 
+# Сброс всего, что оставляет за собой пользователь CLI вне процессов и файлов: очереди POSIX и
+# объекты SysV IPC (msg, shm, sem) в IPC-пространстве имён контейнера. Запускается через as_cli.
+RESET_SCRIPT = "rm -f /dev/mqueue/* 2>/dev/null; ipcrm --all 2>/dev/null; true"
+
+
 def cli_launcher(user: str) -> list[str]:
     """Префикс запуска под другим UID без привилегий: сервер, его /proc и токены недоступны."""
     return [
@@ -250,23 +255,68 @@ def cli_processes(uid: int) -> list[int]:
     return found
 
 
-def make_sweeper(launcher, user, attempts=3, *, processes=None, kill_cmd=None, uid=None):
-    """Убить всех процессов пользователя CLI (kill(-1) от его имени) и проверить /proc."""
+def parse_ipcs(output: str, uid: int, user: str) -> list[str]:
+    """Объекты SysV IPC, принадлежащие пользователю CLI, по выводу `ipcs`."""
+    found = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].startswith("0x") and parts[2] in (user, str(uid)):
+            found.append(" ".join(parts[:3]))
+    return found
+
+
+def sysv_objects(uid: int, user: str) -> list[str]:
+    found = []
+    for flag in ("-m", "-q", "-s"):
+        res = plain_spawn(["ipcs", flag], input="", env=minimal_env(), cwd=None, timeout=10)
+        if res.returncode != 0:
+            raise OSError("ipcs failed")  # не смогли проверить - значит нельзя считать чистым
+        found += parse_ipcs(res.stdout, uid, user)
+    return found
+
+
+def mqueue_entries(path="/dev/mqueue") -> list[str]:
+    try:
+        return os.listdir(path)
+    except FileNotFoundError:
+        return []
+
+
+def make_sweeper(
+    launcher, user, attempts=3, *, processes=None, kill_cmd=None, reset_cmd=None, mqueue=None,
+    ipc=None, uid=None,
+):  # fmt: skip
+    """Сброс всего, чем владеет пользователь CLI, и проверка «ничего не осталось».
+
+    Сброс (всегда, под as_cli): убить все процессы пользователя CLI, удалить очереди POSIX и
+    объекты SysV IPC. Проверка: процессов нет, /dev/mqueue пуст, объектов SysV нет. Если после
+    попыток что-то осталось, возвращается False: исполнитель неисправен.
+    """
     import pwd
 
     uid = pwd.getpwnam(user).pw_uid if uid is None else uid
     processes = processes or cli_processes
     kill_cmd = kill_cmd or ["python3", "-c", "import os; os.kill(-1, 9)"]
+    reset_cmd = reset_cmd or ["sh", "-c", RESET_SCRIPT]
+    mqueue = mqueue or mqueue_entries
+    ipc = ipc or sysv_objects
+
+    def clean() -> bool:
+        try:
+            return not processes(uid) and not mqueue() and not ipc(uid, user)
+        except Exception:  # noqa: BLE001 - не удалось проверить: не считаем чистым
+            return False
 
     def sweep() -> bool:
         for _ in range(attempts):
-            if not processes(uid):
-                return True
             as_cli(launcher, kill_cmd, minimal_env(), spawn=plain_spawn, timeout=10)
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline and processes(uid):
                 time.sleep(0.05)
-        return not processes(uid)
+            as_cli(launcher, reset_cmd, minimal_env(), spawn=plain_spawn, timeout=30)
+            if clean():
+                return True
+        return False
 
     return sweep
 

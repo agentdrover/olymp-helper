@@ -19,12 +19,11 @@ services:
       EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
     read_only: true
     # /dev/shm Docker монтирует отдельно с правами 1777, read_only его не закрывает: без него
-    # CLI негде оставить данные между запусками (ревью #2013, круг 4). /dev/mqueue - ниже, в tmpfs.
+    # CLI негде оставить данные между запусками (ревью #2013, круг 4). Очереди POSIX и объекты SysV
+    # IPC остаются в пространстве имён: их убирает и проверяет reset после каждого запуска (круг 5).
     ipc: none
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
-      # Очереди сообщений POSIX - тоже место записи, которое переживает запуск: закрыты.
-      - /dev/mqueue:ro,noexec,nosuid,nodev,size=4k,mode=0555
     cap_drop:
       - ALL
     cap_add:
@@ -52,12 +51,11 @@ services:
       EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
     read_only: true
     # /dev/shm Docker монтирует отдельно с правами 1777, read_only его не закрывает: без него
-    # CLI негде оставить данные между запусками (ревью #2013, круг 4). /dev/mqueue - ниже, в tmpfs.
+    # CLI негде оставить данные между запусками (ревью #2013, круг 4). Очереди POSIX и объекты SysV
+    # IPC остаются в пространстве имён: их убирает и проверяет reset после каждого запуска (круг 5).
     ipc: none
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
-      # Очереди сообщений POSIX - тоже место записи, которое переживает запуск: закрыты.
-      - /dev/mqueue:ro,noexec,nosuid,nodev,size=4k,mode=0555
     cap_drop:
       - ALL
     cap_add:

@@ -66,7 +66,7 @@ def test_timeout_kills_cli_through_launcher_when_server_cannot_signal(tmp_path, 
             None,
             env=env,
             workroot=str(work),
-            timeout=1,
+            timeout=3,
             launcher=["env", "--"],
             kill_wait=3,
         )
@@ -95,7 +95,7 @@ def test_failed_kill_marks_the_executor_faulty(tmp_path, monkeypatch):
             None,
             env=env,
             workroot=str(work),
-            timeout=1,
+            timeout=3,
             kill_wait=0.5,
             on_fault=faults.append,
         )
@@ -323,8 +323,8 @@ def test_compose_and_sandbox_carry_the_shared_key_and_restart_policy():
     # Без /dev/shm: иначе это место записи CLI, которое переживает запуск.
     assert compose.count("ipc: none") == 2
     assert "--ipc none" in (root / "sandbox.sh").read_text(encoding="utf-8")
-    assert compose.count("- /dev/mqueue:ro,") == 2
-    assert "--tmpfs /dev/mqueue:ro," in (root / "sandbox.sh").read_text(encoding="utf-8")
+    assert "/dev/mqueue" not in compose  # настоящий mqueue: очереди видно и сбрасывает reset
+    assert "/dev/mqueue:" not in (root / "sandbox.sh").read_text(encoding="utf-8")
     # Ключ не должен попасть в окружение CLI: белый список окружения его не содержит.
     from app.model.adapters import build_env
 
@@ -335,7 +335,15 @@ def test_compose_and_sandbox_carry_the_shared_key_and_restart_policy():
 
 def test_spec_records_one_run_key_and_faulty_state():
     spec = (Path(__file__).parent.parent / "docs" / "spec" / "SPEC-1.0.md").read_text("utf-8")
-    for phrase in ("Один запуск за раз", "X-Executor-Key", "неисправен", "«занят»"):
+    for phrase in (
+        "Один запуск за раз",
+        "X-Executor-Key",
+        "неисправен",
+        "«занят»",
+        "SysV IPC",
+        "/dev/mqueue",
+        "ничего не осталось",
+    ):
         assert phrase in spec, phrase
 
 
@@ -379,8 +387,10 @@ def test_every_helper_under_cli_user_gets_a_clean_environment(tmp_path, monkeypa
     )
     calls = iter([[1], []])
     sweeper = runner.make_sweeper(
-        launcher, "nobody", processes=lambda uid: next(calls, []), kill_cmd=["true"], uid=0
-    )
+        launcher, "nobody", processes=lambda uid: next(calls, []), kill_cmd=["true"],
+        reset_cmd=["true"], mqueue=list, ipc=lambda uid, user: [], uid=0,
+    )  # fmt: skip
+
     sweeper()  # sweeper: процесс найден, вызывается kill, затем пусто
     pid = None
     try:
@@ -392,7 +402,7 @@ def test_every_helper_under_cli_user_gets_a_clean_environment(tmp_path, monkeypa
             None,
             env=env,
             workroot=str(work),
-            timeout=1,
+            timeout=3,
             launcher=launcher,
             kill_wait=3,
             sweeper=lambda: True,
@@ -525,3 +535,88 @@ def test_fault_is_rechecked_after_taking_the_lock(tmp_path):
     gate.proceed.set()
     b.join(5)
     assert box[0]["error_kind"] == "faulty" and not calls
+
+
+# ---- Ревью #2013, раунд 5: один сброс и одна проверка «ничего не осталось» ---------------------
+
+
+def reset_sweeper(launcher, **over):
+    kw = {
+        "processes": lambda uid: [],
+        "kill_cmd": ["true"],
+        "reset_cmd": ["true"],
+        "mqueue": list,
+        "ipc": lambda uid, user: [],
+        "uid": 0,
+        "attempts": 1,
+    }
+    kw.update(over)
+    return runner.make_sweeper(launcher, "nobody", **kw)
+
+
+def test_reset_always_runs_kill_then_reset_even_if_everything_looks_clean(tmp_path):
+    log = tmp_path / "log"
+    sweeper = reset_sweeper(
+        ["env", "--"],
+        kill_cmd=["sh", "-c", f"echo kill >> {log}"],
+        reset_cmd=["sh", "-c", f"echo reset >> {log}"],
+    )
+    assert sweeper() is True
+    assert log.read_text().split() == ["kill", "reset"]
+
+
+@pytest.mark.parametrize(
+    "leftover",
+    [
+        {"processes": lambda uid: [42]},
+        {"mqueue": lambda: ["leaked-queue"]},
+        {"ipc": lambda uid, user: ["msq 1234 nobody"]},
+        {"ipc": lambda uid, user: (_ for _ in ()).throw(OSError("ipcs failed"))},
+    ],
+    ids=["process", "posix-mqueue", "sysv-ipc", "cannot-check"],
+)
+def test_verify_fails_when_anything_of_the_cli_user_is_left(leftover):
+    assert reset_sweeper(["env", "--"], **leftover)() is False
+
+
+def test_failed_reset_or_verify_after_a_run_makes_the_executor_faulty(tmp_path):
+    answers = iter([True, False])  # до запуска чисто, после запуска в IPC осталось
+    gate = Gate()
+    out = handle_request(
+        REQ,
+        env=ENV,
+        spawn=ok_spawn,
+        workroot=str(tmp_path),
+        gate=gate,
+        sweeper=lambda: next(answers),
+    )
+    assert out["text"] == "ok" and gate.fault_reason == "sweep"
+    again = handle_request(REQ, env=ENV, spawn=ok_spawn, workroot=str(tmp_path), gate=gate)
+    assert again["error_kind"] == "faulty"
+
+
+def test_reset_goes_through_as_cli_with_a_clean_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXECUTOR_SHARED_KEY", KEY)
+    launcher, dump = recording_launcher(tmp_path)
+    assert reset_sweeper(launcher)() is True
+    blocks = [b for b in dump.read_text().split("----\n") if b.strip()]
+    assert len(blocks) == 2  # kill и reset: оба под пользователем CLI
+    assert all(KEY not in b for b in blocks)
+    # Настоящий сброс: очереди POSIX, объекты SysV и всё, что осталось от пользователя CLI.
+    assert runner.RESET_SCRIPT and "/dev/mqueue" in runner.RESET_SCRIPT
+    assert "ipcrm" in runner.RESET_SCRIPT
+    import inspect
+
+    assert "RESET_SCRIPT" in inspect.getsource(runner.make_sweeper)
+
+
+def test_ipcs_output_is_parsed_by_owner():
+    sample = (
+        "\n------ Shared Memory Segments --------\n"
+        "key        shmid      owner      perms      bytes      nattch     status\n"
+        "0x4f4c0002 7          exec-cli   666        4096       0\n"
+        "0x00000000 9          exec-srv   600        4096       0\n"
+    )
+    assert runner.parse_ipcs(sample, uid=10002, user="exec-cli") == ["0x4f4c0002 7 exec-cli"]
+    assert runner.parse_ipcs(sample, uid=10001, user="exec-srv") == ["0x00000000 9 exec-srv"]
+    assert runner.parse_ipcs("", uid=1, user="x") == []

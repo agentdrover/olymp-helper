@@ -8,6 +8,8 @@
 
 import os
 import pwd
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -92,6 +94,28 @@ def server_mode() -> None:
     )
     check("/work с лимитом размера", any(f.startswith("size=") for f in flags))
     live_checks(channel)
+
+
+IPC_CREATE = """
+import ctypes, json, struct, sys
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+C = 0o1000
+q = libc.msgget(0x4F4C0001, C | 0o666)
+rs = [q, libc.msgsnd(q, struct.pack("l8s", 1, b"leakleak"), 8, 0),
+      libc.shmget(0x4F4C0002, 4096, C | 0o666), libc.semget(0x4F4C0003, 1, C | 0o666),
+      libc.mq_open(b"/olymp-leak", 0o102, 0o666, None)]
+ok = all(r != -1 for r in rs)
+print(json.dumps({"is_error": not ok, "result": "created" if ok else "failed %s" % rs}))
+"""
+
+IPC_PROBE = """
+import ctypes, json
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+rs = [libc.msgget(0x4F4C0001, 0), libc.shmget(0x4F4C0002, 0, 0), libc.semget(0x4F4C0003, 0, 0),
+      libc.mq_open(b"/olymp-leak", 2)]
+print(json.dumps({"is_error": False,
+                  "result": "found %s" % rs if any(r != -1 for r in rs) else "none"}))
+"""
 
 
 def ok_json(text):
@@ -220,6 +244,25 @@ def live_checks(channel):
         ",".join(faults),
     )
 
+    # Состояние IPC не переживает запуск: запуск 1 создаёт очередь и сегмент SysV, семафор и
+    # очередь POSIX с фиксированными ключами и именем; запуск 2 пытается их открыть (ревью #2013,
+    # круг 5). Оба прогона идут обычным путём сервера (as_cli, сброс и проверка после запуска).
+    faults = []
+    res1 = run_cli(
+        channel, "m", "s", payload["messages"], None, env=dict(os.environ),
+        spawn=fake_cli("python3 -c " + shlex.quote(IPC_CREATE)),
+        workroot="/work", launcher=launcher, on_fault=faults.append, sweeper=sweeper,
+    )  # fmt: skip
+    check("запуск 1 создал объекты IPC", res1.text == "created", str(res1.error_kind))
+    res2 = run_cli(
+        channel, "m", "s", payload["messages"], None, env=dict(os.environ),
+        spawn=fake_cli("python3 -c " + shlex.quote(IPC_PROBE)),
+        workroot="/work", launcher=launcher, on_fault=faults.append, sweeper=sweeper,
+    )  # fmt: skip
+    check("запуск 2 не находит объекты запуска 1", res2.text == "none", str(res2.text))
+    check("после IPC-запусков исполнитель исправен", not faults, ",".join(faults))
+    check("очереди POSIX убраны", not os.listdir("/dev/mqueue"))
+
     # Зависший CLI убивается через launcher (у сервера нет права сигналить чужому UID).
     faults = []
     res = run_cli(
@@ -288,6 +331,28 @@ def live_checks(channel):
     release.set()
     t.join(30)
     check("параллельный запрос получает «занят»", second.get("error_kind") == "busy")
+    # Настоящие CLI запускаются под пользователем CLI внутри этой же усиленной конфигурации.
+    from app.model.runner import CLEAN_SCRIPT
+
+    wanted = {"claude": os.environ.get("WANT_CLAUDE_VERSION", ""),
+              "cursor-agent": os.environ.get("WANT_CURSOR_VERSION", "")}  # fmt: skip
+    for binary, chan in (("claude", "claude"), ("cursor-agent", "cursor")):
+        root = tempfile.mkdtemp(prefix="run-", dir="/work")
+        os.chmod(root, 0o777)
+        work_dir, home_dir = os.path.join(root, "work"), os.path.join(root, "home")
+        as_cli(launcher, ["mkdir", "-m", "0700", work_dir, home_dir], minimal_env(dict(os.environ)),
+               spawn=plain_spawn, cwd=root)  # fmt: skip
+        cli_env = build_env(chan, {"PATH": os.environ["PATH"], TOKENS[chan]: "ci-placeholder"},
+                            home_dir)  # fmt: skip
+        res = as_cli(launcher, ["sh", "-c", 'cd -- "$0" && exec "$@"', work_dir, binary, "--version"],
+                     cli_env, spawn=plain_spawn, cwd=root, timeout=60)  # fmt: skip
+        check(f"{binary} --version под exec-cli в усиленном контейнере",
+              bool(wanted[binary]) and wanted[binary] in res.stdout,
+              (res.stdout + res.stderr).strip()[:200])  # fmt: skip
+        as_cli(launcher, ["sh", "-c", CLEAN_SCRIPT, root], minimal_env(dict(os.environ)),
+               spawn=plain_spawn, cwd=root)  # fmt: skip
+        shutil.rmtree(root, ignore_errors=True)
+    check("/work пуст после проверки CLI", not any(work.iterdir()))
     other = next(c for c in TOKENS if c != channel)
     out = handle_request(
         dict(payload, channel=other),
@@ -297,6 +362,29 @@ def live_checks(channel):
         launcher=launcher,
     )
     check("чужой канал отклонён", out.get("error_kind") == "bad_request")
+
+
+SKIPPED = ("/proc", "/sys", "/dev/mqueue")
+
+
+def skipped(path: str) -> bool:
+    return any(path == s or path.startswith(s + "/") for s in SKIPPED)
+
+
+def writable_outside_run_dir() -> list[str]:
+    """Каталоги (создание файла реально удаётся) и обычные файлы, доступные на запись."""
+    found = []
+    for root, dirs, files in os.walk("/", followlinks=False):
+        dirs[:] = [d for d in dirs if not skipped(os.path.join(root, d))]
+        if os.access(root, os.W_OK) and not cannot_write(root):
+            found.append(root)
+        if root == "/dev" or root.startswith("/dev/"):
+            continue  # устройства (/dev/null и т.п.) доступны на запись по определению
+        for name in files:
+            path = os.path.join(root, name)
+            if not os.path.islink(path) and os.access(path, os.W_OK):
+                found.append(path)
+    return found
 
 
 def cli_mode() -> None:
@@ -320,19 +408,11 @@ def cli_mode() -> None:
         ok = True
     check("CLI не может сменить UID через setpriv", ok)
     check("запись в /work закрыта для CLI", cannot_write("/work"))
-    # Вне каталога запуска CLI не пишет нигде: ни в одну точку монтирования, ни в обычные
-    # временные места. Иначе данные переживают запуск (ревью #2013, круг 4: /dev/shm).
-    mounts = {line.split()[1] for line in Path("/proc/mounts").read_text().splitlines()}
-    places = sorted(
-        (mounts | {"/tmp", "/var/tmp", "/dev/shm", "/run", "/run/lock", "/dev/mqueue"})
-        - {"/proc", "/sys"}
-    )
-    writable = [
-        p
-        for p in places
-        if os.path.isdir(p) and not p.startswith(("/proc/", "/sys/")) and not cannot_write(p)
-    ]
-    check("CLI не пишет ни в одно место вне каталога запуска", not writable, ",".join(writable))
+    # Вне каталога запуска CLI не пишет нигде - ни в каталоги любой глубины, ни в существующие
+    # файлы. Иначе данные переживают запуск (ревью #2013, круги 4-5). /proc, /sys и /dev/mqueue
+    # пропущены: последнее убирает и проверяет reset (live_checks).
+    writable = writable_outside_run_dir()
+    check("CLI не пишет нигде вне каталога запуска", not writable, ", ".join(writable[:20]))
     check("/dev/shm нет", not os.path.isdir("/dev/shm") or cannot_write("/dev/shm"))
     try:
         os.kill(1, 0)
