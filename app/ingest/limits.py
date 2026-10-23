@@ -23,7 +23,11 @@ class UploadRejected(Exception):
 
 
 _NAME = re.compile(r"/?([A-Za-z0-9]+)")
-_COMPONENTS = {"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}
+_COMPONENTS = {
+    "DeviceGray": 1, "G": 1, "CalGray": 1,
+    "DeviceRGB": 3, "RGB": 3, "CalRGB": 3, "Lab": 3,
+    "DeviceCMYK": 4, "CMYK": 4,
+}  # fmt: skip
 
 
 def _filters(doc, xref: int) -> list[str]:
@@ -33,16 +37,66 @@ def _filters(doc, xref: int) -> list[str]:
     return [m.group(1) for m in _NAME.finditer(value.strip("[]"))]
 
 
+def _object_text(doc, ref: str) -> str:
+    """Текст объекта по ссылке «N 0 R»; недоступный объект - FilterError."""
+    try:
+        return doc.xref_object(int(ref.split()[0]), compressed=False).strip()
+    except Exception as exc:
+        raise FilterError("ссылка в словаре изображения не ведёт к объекту") from exc
+
+
+def _positive_int(doc, xref: int, key: str, default: int | None = None) -> int:
+    """Положительное целое из словаря изображения, в том числе по косвенной ссылке.
+    Значение, которое нельзя определить, - ошибка: размер растра не угадывается."""
+    kind, value = doc.xref_get_key(xref, key)
+    if kind == "null":
+        if default is not None:
+            return default
+        raise FilterError(f"у изображения не задан параметр {key}")
+    if kind == "xref":
+        value = _object_text(doc, value)
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise FilterError(f"параметр {key} изображения не число") from exc
+    if number != int(number) or number <= 0:
+        raise FilterError(f"параметр {key} изображения не положительное целое")
+    return int(number)
+
+
+def _components(doc, xref: int) -> int:
+    """Число компонентов цвета; для ICCBased - N из профиля; неизвестное пространство - 4."""
+    kind, value = doc.xref_get_key(xref, "ColorSpace")
+    if kind == "null":
+        return 4
+    if kind == "xref":
+        value = _object_text(doc, value)
+    text = value.strip()
+    if text.startswith("["):
+        names = re.findall(r"/([A-Za-z0-9]+)", text)
+        head = names[0] if names else ""
+        if head == "ICCBased":
+            ref = re.search(r"(\d+)\s+\d+\s+R", text)
+            if ref is None:
+                raise FilterError("профиль ICCBased не найден")
+            return _positive_int(doc, int(ref.group(1)), "N")
+        if head == "Indexed":
+            return 1
+        return _COMPONENTS.get(head, 4)
+    return _COMPONENTS.get(text.lstrip("/").split()[0] if text else "", 4)
+
+
 def _image_estimate(doc, xref: int, raw_size: int) -> int:
-    """Распакованный размер растра по ширине, высоте и глубине; не меньше размера данных."""
-
-    def number(key):
-        kind, value = doc.xref_get_key(xref, key)
-        return int(float(value)) if kind == "int" else 0
-
-    cs = doc.xref_get_key(xref, "ColorSpace")[1].lstrip("/")
-    bpc = number("BitsPerComponent") or 8
-    pixels = number("Width") * number("Height") * _COMPONENTS.get(cs, 4) * bpc // 8
+    """Распакованный размер растра по ширине, высоте и глубине; не меньше размера данных.
+    Значения, которые не удалось определить, отвергаются (FilterError -> 422)."""
+    bpc = _positive_int(doc, xref, "BitsPerComponent", default=8)
+    pixels = (
+        _positive_int(doc, xref, "Width")
+        * _positive_int(doc, xref, "Height")
+        * _components(doc, xref)
+        * bpc
+        // 8
+    )
     return max(raw_size, pixels)
 
 

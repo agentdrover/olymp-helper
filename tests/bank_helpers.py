@@ -238,12 +238,13 @@ def row(tmp_path, task_id):
         conn.close()
 
 
-def raw_pdf(stream_entries: str, data: bytes) -> bytes:
-    """A PDF with one extra stream object whose dictionary is written as given."""
+def raw_pdf(stream_entries: str, data: bytes, extra: bytes = b"") -> bytes:
+    """A PDF with one extra stream object whose dictionary is written as given; `extra` is
+    raw text of further objects (5 0 obj ...)."""
     head = (
         b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
         b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
         b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]>>endobj\n"
     )
     obj = b"4 0 obj<</Length %d %s>>stream\n" % (len(data), stream_entries.encode())
-    return head + obj + data + b"\nendstream endobj\ntrailer<</Root 1 0 R/Size 5>>\n%%EOF"
+    return head + extra + obj + data + b"\nendstream endobj\ntrailer<</Root 1 0 R/Size 9>>\n%%EOF"

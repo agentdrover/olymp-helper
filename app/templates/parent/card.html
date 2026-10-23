@@ -22,6 +22,7 @@
       {% if card.model_answer %}<p>Ответ модели (не проверен): <b>{{ card.model_answer }}</b></p>{% endif %}
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
       <p class="hint">{{ card.hint }}</p>
+      {% if card.note %}<p class="err">Обратите внимание: {{ card.note }}.</p>{% endif %}
 
       {% if card.kind in ("confirm", "child_dispute") %}
         <button class="primary" data-action="confirm">{{ card.button or "Ключ прав — оставить" }}</button>

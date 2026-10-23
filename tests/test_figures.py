@@ -424,3 +424,24 @@ def test_every_figure_edit_makes_a_revision_and_unchecks(tmp_path):
         # the old PNG file is replaced by the one of the new revision
         files = sorted(p.name for p in (tmp_path / "figures").iterdir())
         assert files == [f"{tid}-r{rev + 3}.png"]
+
+
+def test_alt_rejects_short_option_texts_as_whole_words():
+    from app.ingest.figures import alt_problem
+
+    options = [
+        {"label": "А", "text": "ДНК"},
+        {"label": "Б", "text": "РНК"},
+        {"label": "В", "text": "АТФ"},
+        {"label": "Г", "text": "белок"},
+    ]
+    for text in ("ДНК", "РНК", "АТФ", "белок"):
+        problem = alt_problem(f"На схеме показана {text}", options, ["А"])
+        assert problem and text in problem, text
+    assert alt_problem("на схеме показана днк.", options, [])  # case and punctuation
+    # no option text as a whole word: passes (a longer word containing it is not a hit)
+    assert alt_problem("Схема строения клетки с ядром", options, ["А"]) is None
+    assert alt_problem("Схема показывает действие РНКазы", options, []) is None
+    # digits-only options are designations, covered by the label check, not compared as text
+    digit_opts = [{"label": "А", "text": "1, 2"}, {"label": "Б", "text": "3, 4"}]
+    assert alt_problem("Части обозначены цифрами 1–6", digit_opts, []) is None

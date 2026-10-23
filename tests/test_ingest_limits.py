@@ -312,3 +312,49 @@ def test_ascii85_end_marker_split_across_chunks():
     # a lone '~' that is not followed by '>' is malformed
     with pytest.raises(FilterError):
         b"".join(decoded_chunks(b'87cURD]i,"Ebo80~', ["ASCII85Decode"], 10**9))
+
+
+def test_image_size_keys_given_as_indirect_references_are_resolved_and_fail_closed(monkeypatch):
+    base = "/Filter /DCTDecode /ColorSpace /DeviceRGB /BitsPerComponent 8 "
+    nums = b"5 0 obj 8500 endobj\n6 0 obj 8500 endobj\n"
+    # the reviewer's case: 8500 x 8500 x 3 = 217 MB through indirect Width/Height
+    with pytest.raises(limits.UploadRejected) as err:
+        limits.check_pdf(raw_pdf(base + "/Width 5 0 R /Height 6 0 R", b"jpegbytes", nums))
+    assert err.value.status == 422 and "200 МБ" in err.value.message
+    # a small image with indirect numbers is fine, like direct ones
+    small = b"5 0 obj 100 endobj\n6 0 obj 100 endobj\n"
+    assert limits.check_pdf(raw_pdf(base + "/Width 5 0 R /Height 6 0 R", b"jpegbytes", small)) == 1
+    # indirect BitsPerComponent counts too (16 bits double the raster)
+    monkeypatch.setattr(limits, "MAX_UNPACKED_BYTES", 100_000_000)
+    wide = b"5 0 obj 5000 endobj\n6 0 obj 5000 endobj\n7 0 obj 16 endobj\n"
+    entries = "/Filter /DCTDecode /ColorSpace /DeviceRGB /Width 5 0 R /Height 6 0 R "
+    with pytest.raises(limits.UploadRejected):
+        limits.check_pdf(raw_pdf(entries + "/BitsPerComponent 7 0 R", b"jpegbytes", wide))
+    # ICCBased: the component count comes from the profile (N 1 = 36 MB, N 3 = 108 MB at 6000^2)
+    six = b"5 0 obj 6000 endobj\n6 0 obj 6000 endobj\n"
+    for n, accepted in ((1, True), (3, False)):
+        icc = six + b"7 0 obj<</N %d /Length 0>>stream\n\nendstream endobj\n" % n
+        pdf = raw_pdf(
+            "/Filter /DCTDecode /ColorSpace [/ICCBased 7 0 R] /BitsPerComponent 8 "
+            "/Width 5 0 R /Height 6 0 R",
+            b"jpegbytes",
+            icc,
+        )
+        if accepted:
+            assert limits.check_pdf(pdf) == 1
+        else:
+            with pytest.raises(limits.UploadRejected):
+                limits.check_pdf(pdf)
+    # fail closed: unresolvable, non-positive or missing values are rejected
+    broken = b"5 0 obj /Foo endobj\n6 0 obj 100 endobj\n"
+    cases = [
+        (base + "/Width 5 0 R /Height 6 0 R", broken),
+        (base + "/Width 0 /Height 100", b""),
+        (base + "/Width 100 /Height -4", b""),
+        (base + "/Width 100", b""),  # no Height at all
+        (base + "/Width 9 0 R /Height 100", b""),  # dangling reference
+    ]
+    for entries, extra in cases:
+        with pytest.raises(limits.UploadRejected) as err:
+            limits.check_pdf(raw_pdf(entries, b"jpegbytes", extra))
+        assert err.value.status == 422, entries

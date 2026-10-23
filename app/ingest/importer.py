@@ -48,6 +48,28 @@ def merge_labels(state: dict, labels: dict) -> dict:
     return {name: labels.get(name) or state.get(name) for name in META}
 
 
+COMBINED_NOTE = "условие собрано из двух порций"
+
+
+def _norm_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def merge_repeat(old: dict, new: dict) -> dict:
+    """Повтор (раздел, номер) в другой порции: остаётся более длинное условие (по нормализованной
+    длине), страницы объединяются. Тексты, из которых ни один не содержит другой, - пометка."""
+    a, b = _norm_text(old["text"]), _norm_text(new["text"])
+    keep = new if len(b) > len(a) else old
+    merged = dict(keep)
+    merged["pages"] = sorted(set(old["pages"]) | set(new["pages"]))
+    merged["refers_to_figure"] = old["refers_to_figure"] or new["refers_to_figure"]
+    note = old.get("review_note") or new.get("review_note")
+    if a.casefold() not in b.casefold() and b.casefold() not in a.casefold():
+        note = COMBINED_NOTE
+    merged["review_note"] = note
+    return merged
+
+
 def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
     """Задания из всех порций. Номера повторяются по разделам: ключ дедупликации - (раздел,
     номер); состояние раздела (раздел, вариант, этап) переходит между порциями."""
@@ -70,7 +92,8 @@ def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
         for task in parsed:
             state = merge_labels(state, task)
             task.update(state)
-            seen.setdefault((task["section"], task["number"]), task)
+            key = (task["section"], task["number"])
+            seen[key] = merge_repeat(seen[key], task) if key in seen else task
         if at_end:  # заголовок после последнего задания важнее состояния последнего задания
             state = merge_labels(state, at_end)
     return list(seen.values())
@@ -122,7 +145,7 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
             cur = conn.execute(
                 "INSERT INTO task_item (material_id, page_from, page_to, variant, source_number, "
                 "type, text, options, points, topic, import_status, figure, unsupported_reason, "
-                "section, stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "section, stage, review_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     material["id"],
                     min(task["pages"]),
@@ -141,6 +164,7 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
                     reason,
                     task["section"],
                     task["stage"] or material["stage"],
+                    task.get("review_note"),
                 ),
             )
             save_snapshot(conn, cur.lastrowid)

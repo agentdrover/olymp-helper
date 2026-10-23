@@ -289,6 +289,7 @@ def build_card(ctx, conn, task) -> dict | None:
         "kind": kind,
         "label": LABELS[kind],
         "hint": hint,
+        "note": task["review_note"] if status == "draft" else None,
         "button": button,
         "field": "answer" if kind == "no_key" else None,
         "retry": kind == "model_missing",

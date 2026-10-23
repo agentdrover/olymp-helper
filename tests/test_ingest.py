@@ -585,3 +585,45 @@ def test_labels_merge_for_tasks_and_for_section_at_end(tmp_path):
             # section_at_end with a new section resets
             "6": ("Раздел В", None, None),
         }
+
+
+def _two_chunk_task(tmp_path, first, second, figure_second=False):
+    """Page 1 and page 2 are separate chunks; the same section and number come back twice."""
+
+    def split(content):
+        if "[[стр. 1]]" in content:
+            return reply(make_task(12, first[0], pages=[1], section="Вариант 1"))
+        return reply(make_task(12, second[0], pages=[2], section="Вариант 1", figure=figure_second))
+
+    model = StubModel(split=split)
+    with TestClient(build_app(tmp_path, model)) as c:
+        long = "а" * 7000
+        upload(c, text_pdf([["12. " + long], ["12. " + long]]))
+        assert len(model.calls_of("tasks_split")) == 2
+        rows = [row(tmp_path, i) for i in task_ids(tmp_path)]
+        assert len(rows) == 1
+        card = c.get(f"/parent/tasks/{rows[0]['id']}", headers=PARENT).json()["card"]
+        return rows[0], card
+
+
+def test_a_repeated_task_keeps_the_longer_condition_and_the_union_of_pages(tmp_path):
+    full = "Какой органоид отвечает за синтез белка в клетке?"
+    got, card = _two_chunk_task(tmp_path / "a", ("Какой органоид", 1), (full, 2))
+    assert got["text"] == full and (got["page_from"], got["page_to"]) == (1, 2)
+    assert got["review_note"] is None and "собрано" not in (card["hint"] or "")
+    # the full text first, a truncated repeat later: the longer one stays, pages still unite
+    got, _ = _two_chunk_task(tmp_path / "b", (full, 1), ("Какой органоид", 2))
+    assert got["text"] == full and (got["page_from"], got["page_to"]) == (1, 2)
+    assert got["review_note"] is None
+    # a figure flag from either chunk counts
+    got, _ = _two_chunk_task(tmp_path / "c", (full, 1), (full, 2), figure_second=True)
+    assert got["import_status"] == "unsupported"
+
+
+def test_conflicting_texts_from_two_chunks_keep_the_longer_and_leave_a_note(tmp_path):
+    short = "Определите функцию митохондрии"
+    longer = "Назовите органоид, который синтезирует АТФ в клетке эукариот"
+    got, card = _two_chunk_task(tmp_path, (short, 1), (longer, 2))
+    assert got["text"] == longer and (got["page_from"], got["page_to"]) == (1, 2)
+    assert got["review_note"] == "условие собрано из двух порций"
+    assert "условие собрано из двух порций" in card["note"]

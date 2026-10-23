@@ -151,8 +151,10 @@ def alt_problem(alt: str, options, correct_labels: list[str]) -> str | None:
         texts = [o.get("text", "") for side in options.values() for o in side]
     for text in texts:
         phrase = _norm(text)
+        # Любой непустой текст варианта целой фразой (нормализация, ё = е), любой длины.
+        # Одиночные буквы и цифры - это обозначения, их закрывает проверка меток ниже.
         if (
-            len(phrase) >= 4
+            len(phrase) >= 2
             and re.search(r"[a-zа-я]", phrase)
             and _contains_phrase(normalized, phrase)
         ):
