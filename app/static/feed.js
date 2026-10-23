@@ -61,6 +61,13 @@
   }
 
   feed.addEventListener("click", async (e) => {
+    const link = e.target.closest("a.page-link");
+    if (link) {  // другая страница диапазона в той же панели
+      e.preventDefault();
+      const shown = document.getElementById("page-img");
+      if (shown) { shown.src = link.dataset.pageUrl; frame = null; }
+      return;
+    }
     const b = e.target.closest("button[data-action]");
     if (!b) return;
     if (b.dataset.action === "edit") return toggleEdit();

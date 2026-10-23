@@ -732,11 +732,11 @@ def test_the_figure_of_a_merged_task_is_searched_on_the_page_that_mentions_it(tm
     got, card = _two_chunk_task(tmp_path, (text, 1), (text, 2), figure_second=True)
     figure = json.loads(got["figure"])
     assert got["import_status"] == "unsupported"
-    assert figure["page"] == 2 and card["page"] == 2
-    assert card["page_url"].endswith("/pages/2.png")
+    assert figure["page"] == 2 and card["figure_page"] == 2
+    assert card["page_url"].endswith("/pages/2.png")  # the figure card shows the figure page
     # the flag only in the first chunk gives page 1
     got, card = _two_chunk_task(tmp_path / "b", (text, 1), (text, 2), figure_first=True)
-    assert json.loads(got["figure"])["page"] == 1 and card["page"] == 1
+    assert json.loads(got["figure"])["page"] == 1 and card["figure_page"] == 1
 
 
 def test_the_note_is_on_every_kind_of_parent_card(tmp_path):
@@ -746,3 +746,40 @@ def test_the_note_is_on_every_kind_of_parent_card(tmp_path):
     assert card["kind"] == "needs_figure"
     assert got["review_note"] == "условие собрано из двух порций"
     assert card["note"] == "условие собрано из двух порций"
+
+
+def test_text_cards_show_the_text_pages_and_figure_cards_the_figure_page(tmp_path):
+    long = "Какой органоид отвечает за синтез белка в клетке эукариот по рисунку?"
+
+    def split(content):
+        if "[[стр. 1]]" in content:
+            return reply(make_task(12, long, pages=[1], section="Вариант 1"))
+        return reply(make_task(12, "Какой органоид", pages=[2], section="Вариант 1", figure=True))
+
+    model = StubModel(split=split)
+    with TestClient(build_app(tmp_path, model)) as c:
+        filler = "а" * 7000
+        upload(c, text_pdf([["12. " + filler], ["12. " + filler]]))
+        tid = task_ids(tmp_path)[0]
+        card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
+        assert card["kind"] == "needs_figure" and card["figure_page"] == 2
+        assert card["page_url"].endswith("/pages/2.png")  # the figure card shows the figure page
+        assert card["page"] == 1 and card["pages"] == [1, 2]  # the text range
+
+        c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": "Б"})
+        r = c.post(
+            f"/parent/tasks/{tid}/figure",
+            headers=PARENT,
+            json={"rect": [10, 10, 200, 40], "alt": "Схема строения клетки", "no_answer_ack": True},
+        )
+        assert r.status_code == 200, r.text
+        card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
+        assert card["kind"] == "confirm" and card["text"] == long
+        # the text-checking card shows the text page and can reach every page of the range
+        assert card["page"] == 1 and card["pages"] == [1, 2] and card["figure_page"] == 2
+        assert card["page_url"].endswith("/pages/1.png")
+        assert [u["page"] for u in card["page_urls"]] == [1, 2]
+        assert card["page_urls"][1]["url"].endswith("/pages/2.png")
+        html = c.get(f"/parent/review/{tid}?fragment=1", headers=PARENT).text
+        assert "/pages/1.png" in html and "/pages/2.png" in html
+        assert c.get(card["page_urls"][1]["url"], headers=PARENT).status_code == 200
