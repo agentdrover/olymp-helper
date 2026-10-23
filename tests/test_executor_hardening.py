@@ -345,3 +345,178 @@ def test_unexpected_error_in_the_handler_is_a_run_error_and_releases_the_lock(tm
     assert out["error_kind"] == "internal" and "boom" not in json.dumps(out)
     assert gate.try_enter()  # замок отпущен
     gate.leave()
+
+
+# ---- Ревью #2013, раунд 3: один путь запуска под пользователем CLI -----------------------------
+
+KEY = "SHARED-KEY-MUST-NOT-LEAK-0123456789"
+
+
+def recording_launcher(tmp_path):
+    """Заглушка launcher: пишет окружение, с которым её запустили, затем исполняет команду."""
+    dump = tmp_path / "env-dump"
+    script = tmp_path / "rec-launcher"
+    script.write_text(f'#!/bin/sh\nenv >> {dump}\necho ---- >> {dump}\nexec "$@"\n')
+    script.chmod(0o755)
+    return [str(script)], dump
+
+
+def test_every_helper_under_cli_user_gets_a_clean_environment(tmp_path, monkeypatch):
+    """P1: kill, sweep, cleanup и сам запуск не наследуют окружение сервера (ключ приложения)."""
+    monkeypatch.setenv("EXECUTOR_SHARED_KEY", KEY)
+    monkeypatch.setenv("SOME_SERVER_SECRET", "server-only")
+    launcher, dump = recording_launcher(tmp_path)
+    bindir, pidfile = stuck_cli(tmp_path)
+    work = tmp_path / "w"
+    work.mkdir()
+    env = dict(
+        os.environ, PATH=f"{bindir}:/usr/bin:/bin", **{k: v for k, v in ENV.items() if k != "PATH"}
+    )
+    calls = iter([[1], []])
+    sweeper = runner.make_sweeper(
+        launcher, "nobody", processes=lambda uid: next(calls, []), kill_cmd=["true"], uid=0
+    )
+    sweeper()  # sweeper: процесс найден, вызывается kill, затем пусто
+    pid = None
+    try:
+        res = run_cli(
+            "claude",
+            "m",
+            "s",
+            MSGS,
+            None,
+            env=env,
+            workroot=str(work),
+            timeout=1,
+            launcher=launcher,
+            kill_wait=3,
+            sweeper=lambda: True,
+        )
+        pid = int(pidfile.read_text())
+        assert res.error_kind == "timeout" and not alive(pid)
+    finally:
+        if pid and alive(pid):
+            os.kill(pid, 9)
+    blocks = dump.read_text().split("----\n")
+    blocks = [b for b in blocks if b.strip()]
+    assert len(blocks) >= 4  # sweep-kill, mkdir, CLI, kill-group, cleanup
+    for block in blocks:
+        assert KEY not in block and "SOME_SERVER_SECRET" not in block
+    cli_blocks = [b for b in blocks if "CLAUDE_CODE_OAUTH_TOKEN" in b]
+    assert len(cli_blocks) == 1 and "CURSOR_API_KEY" not in cli_blocks[0]
+    for block in blocks:
+        names = {line.split("=", 1)[0] for line in block.splitlines() if "=" in line}
+        assert names <= {
+            "PATH",
+            "HOME",
+            "LANG",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "PWD",
+            "SHLVL",
+            "_",
+            "OLDPWD",
+            "LC_ALL",
+            "TZ",
+            "TMPDIR",
+        }, names
+
+
+def test_setpriv_is_started_only_by_the_single_entry_point():
+    """Структурно: запуск под пользователем CLI - одна функция as_cli; setpriv назван в одном месте."""
+    import inspect
+    import re as _re
+
+    root = Path(__file__).parent.parent / "app"
+    users = {}
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        users[path.name] = (text.count("setpriv"), len(_re.findall(r"\*launcher", text)))
+    assert {k: v[0] for k, v in users.items() if v[0]} == {"runner.py": 1} or all(
+        k == "runner.py" for k, v in users.items() if v[0]
+    )
+    assert sum(v[1] for v in users.values()) == 1  # `*launcher` - только внутри as_cli
+    assert "*launcher" in inspect.getsource(runner.as_cli)
+    assert "setpriv" in inspect.getsource(runner.cli_launcher)
+
+
+def test_cleanup_covers_the_whole_run_root_not_only_work_and_home(tmp_path, monkeypatch):
+    """P2: CLI создал ../stash (0700) - корень убран целиком, исполнитель не неисправен."""
+
+    # Сервер не может удалить чужое: rmtree умеет только пустой каталог (как под другим UID).
+    def empty_only(path, **kw):
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+    monkeypatch.setattr(runner.shutil, "rmtree", empty_only)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    cli = bindir / "claude"
+    cli.write_text(
+        "#!/bin/sh\ncat >/dev/null\nmkdir -m 700 ../stash && echo x > ../stash/f && chmod 500 ../stash\n"
+        f"echo '{OK}'\n"
+    )
+    cli.chmod(0o755)
+    work = tmp_path / "w"
+    work.mkdir()
+    env = dict(ENV, PATH=f"{bindir}:/usr/bin:/bin")
+    faults = []
+    res = run_cli(
+        "claude",
+        "m",
+        "s",
+        MSGS,
+        None,
+        env=env,
+        workroot=str(work),
+        launcher=["env", "--"],
+        on_fault=faults.append,
+    )
+    assert res.text == "ok"
+    assert os.listdir(work) == [] and faults == []
+
+
+def test_fault_is_rechecked_after_taking_the_lock(tmp_path):
+    """P2: B прошёл проверку неисправности, A сломал исполнитель и вышел - B не запускает CLI."""
+    calls = []
+
+    def spawn(argv, *, input, env, cwd, timeout):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stderr="", stdout=OK)
+
+    class RacyGate(Gate):
+        def __init__(self):
+            super().__init__()
+            self.first_read_done = threading.Event()
+            self.proceed = threading.Event()
+            self._first = True
+
+        @property
+        def fault_reason(self):
+            if self._first and threading.current_thread().name == "B":
+                self._first = False
+                value = self._reason
+                self.first_read_done.set()
+                self.proceed.wait(5)
+                return value
+            return self._reason
+
+        @fault_reason.setter
+        def fault_reason(self, value):
+            self._reason = value
+
+    gate = RacyGate()
+    box = []
+    b = threading.Thread(
+        target=lambda: box.append(
+            handle_request(REQ, env=ENV, spawn=spawn, workroot=str(tmp_path), gate=gate)
+        ),
+        name="B",
+    )
+    b.start()
+    assert gate.first_read_done.wait(5)
+    gate.fault("cleanup")  # A успел сломать исполнитель и отпустить замок
+    gate.proceed.set()
+    b.join(5)
+    assert box[0]["error_kind"] == "faulty" and not calls

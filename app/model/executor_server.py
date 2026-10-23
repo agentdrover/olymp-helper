@@ -14,13 +14,16 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app.model.adapters import ADAPTERS
-from app.model.runner import make_sweeper, run_cli
+from app.model.runner import cli_launcher, make_sweeper, run_cli
 from app.model.types import ModelResult
 
 log = logging.getLogger("app.model.executor")
 MAX_BODY = 1_000_000
 KEY_HEADER = "X-Executor-Key"
 RESTART_DELAY_S = 30
+
+
+__all__ = ["Gate", "cli_launcher", "handle_request", "main", "make_server"]
 
 
 class Gate:
@@ -31,8 +34,18 @@ class Gate:
         self._on_fault = on_fault
         self.fault_reason = None
 
-    def try_enter(self) -> bool:
-        return self._lock.acquire(blocking=False)
+    def try_enter(self) -> str:
+        """ "ok" - замок взят; "busy" - идёт другой запуск; "faulty" - исполнитель неисправен.
+
+        Неисправность проверяется ПОСЛЕ взятия замка: между быстрой проверкой и замком другой
+        запуск мог сломать исполнитель.
+        """
+        if not self._lock.acquire(blocking=False):
+            return "busy"
+        if self.fault_reason:
+            self._lock.release()
+            return "faulty"
+        return "ok"
 
     def leave(self) -> None:
         self._lock.release()
@@ -85,10 +98,11 @@ def handle_request(
         return _failure(channel, "bad_request")
     model, system, messages, schema = parts
     if gate is not None:
-        if gate.fault_reason:
+        if gate.fault_reason:  # быстрый ответ; окончательная проверка - под замком
             return _failure(channel, "faulty")
-        if not gate.try_enter():
-            return _failure(channel, "busy")
+        entered = gate.try_enter()
+        if entered != "ok":
+            return _failure(channel, entered)
     try:
         # Ничего от прежнего запуска не должно остаться живым.
         if sweeper is not None and not sweeper():
@@ -184,20 +198,6 @@ def make_server(
     server = ThreadingHTTPServer((host, port), Handler)
     server.gate = gate
     return server
-
-
-def cli_launcher(user: str) -> list[str]:
-    """Префикс запуска CLI под другим UID без привилегий: сервер, его /proc и токен недоступны."""
-    return [
-        "setpriv",
-        f"--reuid={user}",
-        f"--regid={user}",
-        "--clear-groups",
-        "--inh-caps=-all",
-        "--ambient-caps=-all",
-        "--no-new-privs",
-        "--",
-    ]
 
 
 def main() -> None:

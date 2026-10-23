@@ -17,15 +17,67 @@ TIMEOUT_S = 120
 log = logging.getLogger("app.model")
 
 
-def kill_group(launcher, pid, run=subprocess.run):
+SAFE_PATH = "/usr/local/bin:/usr/bin:/bin"
+CLEAN_SCRIPT = (
+    'find "$0" -mindepth 1 -maxdepth 1 -exec chmod -R u+rwX {} + 2>/dev/null; '
+    'find "$0" -mindepth 1 -maxdepth 1 -exec rm -rf {} +'
+)
+
+
+def cli_launcher(user: str) -> list[str]:
+    """Префикс запуска под другим UID без привилегий: сервер, его /proc и токены недоступны."""
+    return [
+        "setpriv",
+        f"--reuid={user}",
+        f"--regid={user}",
+        "--clear-groups",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+        "--no-new-privs",
+        "--",
+    ]
+
+
+def minimal_env(source=None, home="/nonexistent") -> dict:
+    """Окружение служебного процесса: ничего от сервера, кроме PATH и LANG."""
+    source = source or {}
+    env = {"PATH": source.get("PATH", SAFE_PATH), "HOME": home}
+    if "LANG" in source:
+        env["LANG"] = source["LANG"]
+    return env
+
+
+def plain_spawn(argv, *, input, env, cwd, timeout):
+    """Короткая служебная команда без собственной логики убийства."""
+    res = subprocess.run(
+        argv, input=input, env=env, cwd=cwd, timeout=timeout, capture_output=True,
+        text=True, encoding="utf-8", check=False,
+    )  # fmt: skip
+    return SimpleNamespace(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+
+
+def as_cli(launcher, argv, env, *, spawn, cwd=None, input="", timeout=30):
+    """ЕДИНСТВЕННЫЙ путь запуска чего-либо под пользователем CLI: сам CLI, kill, sweep, уборка.
+
+    env - полное окружение процесса, заданное вызывающим явным белым списком; окружение сервера
+    (общий ключ приложения и т.п.) никогда не наследуется: оно не попадает ни в setpriv, ни дальше.
+    Значения не кладутся в argv (его видно в /proc/<pid>/cmdline), поэтому окружение задаётся при
+    запуске процесса, а не через `env -i NAME=VALUE`.
+    """
+    full = [*launcher, *argv] if launcher else list(argv)
+    return spawn(full, input=input, env=dict(env), cwd=cwd, timeout=timeout)
+
+
+def kill_group(launcher, pid, run=plain_spawn):
     """Убить группу процессов CLI. При разделении UID сервер сигналить CLI не может (нет
-    CAP_KILL), поэтому сигнал отправляет тот же launcher - от имени пользователя CLI."""
+    CAP_KILL), поэтому сигнал отправляет тот же путь as_cli - от имени пользователя CLI."""
     if launcher:
-        run(
-            [*launcher, "python3", "-c", f"import os; os.killpg({int(pid)}, 9)"],
-            capture_output=True,
+        as_cli(
+            launcher,
+            ["python3", "-c", f"import os; os.killpg({int(pid)}, 9)"],
+            minimal_env(),
+            spawn=run,
             timeout=10,
-            check=False,
         )
     else:
         os.killpg(pid, signal.SIGKILL)
@@ -110,22 +162,22 @@ def run_cli(
     except OSError:  # нет места, нет каталога: ошибка запуска, а не падение сервера
         return _fail(channel, model, "workdir", elapsed())
     work, home = os.path.join(root, "work"), os.path.join(root, "home")
-    helper_env = {"PATH": env.get("PATH", "/usr/bin:/bin")}
+    helper_env = minimal_env(env)
     try:
         try:
             _make_dirs(spawn, launcher, helper_env, root, work, home)
             cli = adapter.build(model, system, schema)
+            stdin = adapter.stdin(system, messages, schema)
+            cli_env = build_env(channel, env, home)
             if launcher:
                 # Сервер не может зайти в каталог пользователя CLI (0700): в него переходит
                 # уже CLI-пользователь, процесс сервера стартует из корня запуска.
-                argv = [*launcher, "sh", "-c", 'cd -- "$0" && exec "$@"', work, *cli]
-                cwd = root
+                proc = as_cli(
+                    launcher, ["sh", "-c", 'cd -- "$0" && exec "$@"', work, *cli], cli_env,
+                    spawn=spawn, cwd=root, input=stdin, timeout=timeout,
+                )  # fmt: skip
             else:
-                argv, cwd = cli, work
-            stdin = adapter.stdin(system, messages, schema)
-            proc = spawn(
-                argv, input=stdin, env=build_env(channel, env, home), cwd=cwd, timeout=timeout
-            )
+                proc = spawn(cli, input=stdin, env=cli_env, cwd=work, timeout=timeout)
             if proc.returncode != 0:
                 raise ChannelError("exit_code")
             parsed = adapter.parse(proc.stdout, schema)
@@ -150,15 +202,9 @@ def _make_dirs(spawn, launcher, helper_env, root, work, home):
         os.mkdir(home)
         return
     # Каталоги принадлежат пользователю CLI и закрыты (0700); сервер в них не заглядывает.
-    # Корень запуска: пользователь CLI может в нём создавать (wx), но не читать список.
-    os.chmod(root, 0o733)
-    res = spawn(
-        [*launcher, "mkdir", "-m", "0700", work, home],
-        input="",
-        env=helper_env,
-        cwd=root,
-        timeout=30,
-    )
+    # Корень запуска открыт пользователю CLI: уборка (от его имени) проходит по всему корню.
+    os.chmod(root, 0o777)
+    res = as_cli(launcher, ["mkdir", "-m", "0700", work, home], helper_env, spawn=spawn, cwd=root)
     if res.returncode != 0:
         raise ChannelError("workdir")
 
@@ -177,21 +223,8 @@ def _cleanup(spawn, launcher, helper_env, root, work, home, sweeper, on_fault):
             fault("sweep")
     if launcher:
         try:
-            spawn(
-                [
-                    *launcher,
-                    "sh",
-                    "-c",
-                    'chmod -R u+rwX -- "$@" 2>/dev/null; rm -rf -- "$@"',
-                    "sh",
-                    work,
-                    home,
-                ],
-                input="",
-                env=helper_env,
-                cwd=root,
-                timeout=30,
-            )
+            # Весь корень запуска: CLI мог создать что угодно рядом с work и home (../stash).
+            as_cli(launcher, ["sh", "-c", CLEAN_SCRIPT, root], helper_env, spawn=spawn, cwd=root)
         except Exception:  # noqa: BLE001 - итог проверяется ниже
             log.warning("scrub failed")
     shutil.rmtree(root, ignore_errors=True)
@@ -217,26 +250,23 @@ def cli_processes(uid: int) -> list[int]:
     return found
 
 
-def make_sweeper(launcher, user, attempts=3):
-    """Убить всех процессов пользователя CLI (kill -KILL -1 от его имени) и проверить /proc."""
+def make_sweeper(launcher, user, attempts=3, *, processes=None, kill_cmd=None, uid=None):
+    """Убить всех процессов пользователя CLI (kill(-1) от его имени) и проверить /proc."""
     import pwd
 
-    uid = pwd.getpwnam(user).pw_uid
+    uid = pwd.getpwnam(user).pw_uid if uid is None else uid
+    processes = processes or cli_processes
+    kill_cmd = kill_cmd or ["python3", "-c", "import os; os.kill(-1, 9)"]
 
     def sweep() -> bool:
         for _ in range(attempts):
-            if not cli_processes(uid):
+            if not processes(uid):
                 return True
-            subprocess.run(
-                [*launcher, "python3", "-c", "import os; os.kill(-1, 9)"],
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
+            as_cli(launcher, kill_cmd, minimal_env(), spawn=plain_spawn, timeout=10)
             deadline = time.monotonic() + 2
-            while time.monotonic() < deadline and cli_processes(uid):
+            while time.monotonic() < deadline and processes(uid):
                 time.sleep(0.05)
-        return not cli_processes(uid)
+        return not processes(uid)
 
     return sweep
 

@@ -183,6 +183,43 @@ def live_checks(channel):
     left = [os.path.join(d, n) for d, dirs, files in os.walk("/work") for n in dirs + files]
     check("/work пуст после ответа", not left and not gate.fault_reason, "; ".join(left))
 
+    # Служебные процессы и сам CLI под пользователем CLI не наследуют окружение сервера.
+    from app.model.adapters import build_env
+    from app.model.runner import as_cli, minimal_env, plain_spawn
+
+    dump = ["python3", "-c", "import os,sys; sys.stdout.write(repr(sorted(os.environ)))"]
+    helper = as_cli(launcher, dump, minimal_env(dict(os.environ)), spawn=plain_spawn)
+    check(
+        "служебный процесс CLI-пользователя без ключа сервера",
+        "EXECUTOR_SHARED_KEY" not in helper.stdout
+        and not any(v in helper.stdout for v in TOKENS.values()),
+        helper.stdout,
+    )
+    cli_env = as_cli(
+        launcher, dump, build_env(channel, dict(os.environ), "/tmp"), spawn=plain_spawn
+    )
+    check(
+        "CLI получает только токен своего канала, без ключа сервера",
+        TOKENS[channel] in cli_env.stdout
+        and "EXECUTOR_SHARED_KEY" not in cli_env.stdout
+        and not any(v in cli_env.stdout for c, v in TOKENS.items() if c != channel),
+        cli_env.stdout,
+    )
+
+    # CLI создал каталог рядом с work и home: корень запуска убран целиком, исполнитель исправен.
+    faults = []
+    res = run_cli(
+        channel, "m", "s", payload["messages"], None, env=dict(os.environ),
+        spawn=fake_cli("mkdir -m 700 ../stash; echo x > ../stash/f; chmod 500 ../stash; "
+                       + ok_json("stash")),
+        workroot="/work", launcher=launcher, on_fault=faults.append, sweeper=sweeper,
+    )  # fmt: skip
+    check(
+        "каталог рядом с work убран",
+        res.text == "stash" and not any(work.iterdir()) and not faults,
+        ",".join(faults),
+    )
+
     # Зависший CLI убивается через launcher (у сервера нет права сигналить чужому UID).
     faults = []
     res = run_cli(
