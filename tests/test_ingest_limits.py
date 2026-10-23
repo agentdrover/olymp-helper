@@ -375,3 +375,18 @@ def test_image_size_keys_given_as_indirect_references_are_resolved_and_fail_clos
         with pytest.raises(limits.UploadRejected) as err:
             limits.check_pdf(raw_pdf(entries, b"jpegbytes", extra))
         assert err.value.status == 422, entries
+
+
+def test_unreadable_pdf_objects_are_a_422_not_a_500(tmp_path):
+    base = "/Filter /DCTDecode /BitsPerComponent 8 /Width 100 /Height 100 "
+    missing_icc = raw_pdf(base + "/ColorSpace [/ICCBased 9 0 R]", b"jpegbytes")
+    dangling = raw_pdf(base.replace("/Width 100", "/Width 9 0 R") + "/ColorSpace /DeviceRGB", b"x")
+    for pdf in (missing_icc, dangling):
+        with pytest.raises(limits.UploadRejected) as err:
+            limits.check_pdf(pdf)
+        assert err.value.status == 422
+    # over HTTP: an answer, not a crash
+    with TestClient(build_app(tmp_path, BlockingModel())) as c:
+        for name, pdf in (("icc.pdf", missing_icc), ("dangling.pdf", dangling)):
+            r = upload(c, pdf, name=name)
+            assert r.status_code == 422, (name, r.status_code)

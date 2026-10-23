@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -587,13 +588,26 @@ def test_labels_merge_for_tasks_and_for_section_at_end(tmp_path):
         }
 
 
-def _two_chunk_task(tmp_path, first, second, figure_second=False):
+def _two_chunk_task(
+    tmp_path, first, second, figure_second=False, options_first=None, options_second=None
+):
     """Page 1 and page 2 are separate chunks; the same section and number come back twice."""
 
     def split(content):
         if "[[стр. 1]]" in content:
-            return reply(make_task(12, first[0], pages=[1], section="Вариант 1"))
-        return reply(make_task(12, second[0], pages=[2], section="Вариант 1", figure=figure_second))
+            return reply(
+                make_task(12, first[0], pages=[1], section="Вариант 1", options=options_first)
+            )
+        return reply(
+            make_task(
+                12,
+                second[0],
+                pages=[2],
+                section="Вариант 1",
+                figure=figure_second,
+                options=options_second,
+            )
+        )
 
     model = StubModel(split=split)
     with TestClient(build_app(tmp_path, model)) as c:
@@ -627,3 +641,48 @@ def test_conflicting_texts_from_two_chunks_keep_the_longer_and_leave_a_note(tmp_
     assert got["text"] == longer and (got["page_from"], got["page_to"]) == (1, 2)
     assert got["review_note"] == "условие собрано из двух порций"
     assert "условие собрано из двух порций" in card["note"]
+
+
+OPTIONS_NOTE = "условие собрано из двух порций; проверьте варианты"
+
+
+def test_options_are_merged_by_label_not_taken_with_the_longer_condition(tmp_path):
+    two = [{"label": "А", "text": "митохондрия"}, {"label": "Б", "text": "рибосома"}]
+    four = two + [{"label": "В", "text": "ядро"}, {"label": "Г", "text": "лизосома"}]
+    full = "Какой органоид отвечает за синтез белка в клетке?"
+    # the longer condition comes with 2 options, the shorter one with all 4: all 4 survive
+    got, card = _two_chunk_task(
+        tmp_path / "a", ("Какой органоид", 1), (full, 2), options_first=four, options_second=two
+    )
+    assert got["text"] == full
+    assert [o["label"] for o in json.loads(got["options"])] == ["А", "Б", "В", "Г"]
+    assert got["review_note"] == OPTIONS_NOTE and OPTIONS_NOTE in card["note"]
+    # the reverse order gives the same four options
+    got, _ = _two_chunk_task(
+        tmp_path / "b", (full, 1), ("Какой органоид", 2), options_first=two, options_second=four
+    )
+    assert [o["label"] for o in json.loads(got["options"])] == ["А", "Б", "В", "Г"]
+    # identical option sets: no note
+    got, _ = _two_chunk_task(
+        tmp_path / "c", (full, 1), (full, 2), options_first=four, options_second=four
+    )
+    assert got["review_note"] is None
+
+
+def test_one_label_with_different_texts_keeps_the_longer_and_leaves_a_note(tmp_path):
+    a = [{"label": "А", "text": "митохондрия"}, {"label": "Б", "text": "рибосома"}]
+    b = [{"label": "А", "text": "митохондрия клетки"}, {"label": "Б", "text": "рибосома"}]
+    c = [{"label": "А", "text": "ядро"}, {"label": "Б", "text": "рибосома"}]
+    text = "Какой органоид отвечает за синтез белка?"
+    # one text contains the other: the longer wins, no note
+    got, _ = _two_chunk_task(
+        tmp_path / "a", (text, 1), (text, 2), options_first=a, options_second=b
+    )
+    assert json.loads(got["options"])[0]["text"] == "митохондрия клетки"
+    assert got["review_note"] is None
+    # neither contains the other: the longer wins and the parent is told
+    got, _ = _two_chunk_task(
+        tmp_path / "b", (text, 1), (text, 2), options_first=b, options_second=c
+    )
+    assert json.loads(got["options"])[0]["text"] == "митохондрия клетки"
+    assert got["review_note"] == OPTIONS_NOTE

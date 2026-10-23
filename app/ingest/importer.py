@@ -55,17 +55,64 @@ def _norm_text(text: str) -> str:
     return " ".join(text.split())
 
 
+OPTIONS_NOTE = "условие собрано из двух порций; проверьте варианты"
+
+
+def _contains(a: str, b: str) -> bool:
+    a, b = _norm_text(a).casefold(), _norm_text(b).casefold()
+    return a in b or b in a
+
+
+def _merge_option_list(old: list, new: list) -> tuple[list, bool]:
+    """Объединение по обозначению; для одного обозначения побеждает более длинный текст.
+    Второй результат - расхождение: обозначение есть только с одной стороны или тексты
+    одного обозначения не содержат друг друга."""
+    merged = {o["label"]: dict(o) for o in old}
+    differs = False
+    for option in new:
+        label = option["label"]
+        if label not in merged:
+            merged[label] = dict(option)
+            differs = True
+            continue
+        mine = merged[label]
+        if not _contains(mine["text"], option["text"]):
+            differs = True
+        if len(_norm_text(option["text"])) > len(_norm_text(mine["text"])):
+            merged[label] = dict(option)
+    differs = differs or {o["label"] for o in old} != {o["label"] for o in new}
+    return list(merged.values()), differs
+
+
+def merge_options(old, new) -> tuple[object, bool]:
+    if old is None or new is None:
+        return (old if new is None else new), False
+    if isinstance(old, dict) and isinstance(new, dict):
+        out, differs = {}, False
+        for side in ("left", "right"):
+            out[side], d = _merge_option_list(old.get(side, []), new.get(side, []))
+            differs = differs or d
+        return out, differs
+    if isinstance(old, list) and isinstance(new, list):
+        return _merge_option_list(old, new)
+    return old, False
+
+
 def merge_repeat(old: dict, new: dict) -> dict:
-    """Повтор (раздел, номер) в другой порции: остаётся более длинное условие (по нормализованной
-    длине), страницы объединяются. Тексты, из которых ни один не содержит другой, - пометка."""
+    """Повтор (раздел, номер) в другой порции, поля объединяются отдельно: условие - более
+    длинное (по нормализованной длине), варианты - по обозначению, страницы - объединение,
+    признак рисунка - ИЛИ. Расхождение условий или вариантов - пометка родителю."""
     a, b = _norm_text(old["text"]), _norm_text(new["text"])
     keep = new if len(b) > len(a) else old
     merged = dict(keep)
     merged["pages"] = sorted(set(old["pages"]) | set(new["pages"]))
     merged["refers_to_figure"] = old["refers_to_figure"] or new["refers_to_figure"]
+    merged["options"], options_differ = merge_options(old["options"], new["options"])
     note = old.get("review_note") or new.get("review_note")
-    if a.casefold() not in b.casefold() and b.casefold() not in a.casefold():
+    if not _contains(a, b):
         note = COMBINED_NOTE
+    if options_differ:
+        note = OPTIONS_NOTE
     merged["review_note"] = note
     return merged
 

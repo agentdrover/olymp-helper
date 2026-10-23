@@ -30,6 +30,17 @@ _COMPONENTS = {
 }  # fmt: skip
 
 
+def _read(call, *args):
+    """Единственный путь чтения объектов PDF: любое исключение PyMuPDF (битая ссылка, битый
+    объект) - FilterError, то есть отказ 422, а не сбой сервера."""
+    try:
+        return call(*args)
+    except FilterError:
+        raise
+    except Exception as exc:
+        raise FilterError("объект PDF не читается") from exc
+
+
 def _filters(doc, xref: int) -> list[str]:
     kind, value = doc.xref_get_key(xref, "Filter")
     if kind == "null":
@@ -39,16 +50,13 @@ def _filters(doc, xref: int) -> list[str]:
 
 def _object_text(doc, ref: str) -> str:
     """Текст объекта по ссылке «N 0 R»; недоступный объект - FilterError."""
-    try:
-        return doc.xref_object(int(ref.split()[0]), compressed=False).strip()
-    except Exception as exc:
-        raise FilterError("ссылка в словаре изображения не ведёт к объекту") from exc
+    return _read(doc.xref_object, int(ref.split()[0]), False).strip()
 
 
 def _positive_int(doc, xref: int, key: str, default: int | None = None) -> int:
     """Положительное целое из словаря изображения, в том числе по косвенной ссылке.
     Значение, которое нельзя определить, - ошибка: размер растра не угадывается."""
-    kind, value = doc.xref_get_key(xref, key)
+    kind, value = _read(doc.xref_get_key, xref, key)
     if kind == "null":
         if default is not None:
             return default
@@ -66,7 +74,7 @@ def _positive_int(doc, xref: int, key: str, default: int | None = None) -> int:
 
 def _components(doc, xref: int) -> int:
     """Число компонентов цвета; для ICCBased - N из профиля; неизвестное пространство - 4."""
-    kind, value = doc.xref_get_key(xref, "ColorSpace")
+    kind, value = _read(doc.xref_get_key, xref, "ColorSpace")
     if kind == "null":
         return 4
     if kind == "xref":
@@ -101,7 +109,7 @@ def _image_estimate(doc, xref: int, raw_size: int) -> int:
 
 
 def _stream_size(doc, xref: int, budget: int) -> int:
-    raw = doc.xref_stream_raw(xref)
+    raw = _read(doc.xref_stream_raw, xref)
     filters = [canonical(f) for f in _filters(doc, xref)]
     if filters and filters[-1] in IMAGE_CODECS:
         data_size = _count(raw, filters[:-1], budget)
@@ -124,9 +132,9 @@ def _unpacked_size(doc: pymupdf.Document) -> int:
     """Сумма размеров потоков после ПОЛНОЙ цепочки фильтров; считается кусками."""
     total = 0
     for xref in range(1, doc.xref_length()):
-        if not doc.xref_is_stream(xref):
-            continue
         try:
+            if not _read(doc.xref_is_stream, xref):
+                continue
             total += _stream_size(doc, xref, MAX_UNPACKED_BYTES - total)
         except FilterError as exc:
             raise UploadRejected(
