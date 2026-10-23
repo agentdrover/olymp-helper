@@ -82,7 +82,7 @@ def test_renew_server_without_ca_fails(tmp_path):
 
 def _entry(env_extra, tmp_path, timeout=5):
     env = {
-        "PATH": "/usr/bin:/bin:" + str(Path(sys.executable).parent),
+        "PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin",
         "PYTHONPATH": str(ROOT),
         "PYTHONDONTWRITEBYTECODE": "1",
         "OLYMP_DB": str(tmp_path / "olymp.db"),
