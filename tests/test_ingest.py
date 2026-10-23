@@ -238,3 +238,14 @@ def test_chunks_keep_page_numbers_and_the_size_limit():
     assert [n for n, _ in flat] == [1, 2, 4, 4, 4]  # page numbers kept; empty page skipped
     assert "".join(t for n, t in flat if n == 4) == "в" * 30_000
     assert chunks[0] == [(1, "а" * 9000)]
+
+
+def test_a_task_repeated_in_two_chunks_is_stored_once(tmp_path):
+    model = StubModel(
+        split=lambda content: reply(make_task(1, pages=[2 if "[[стр. 2]]" in content else 1]))
+    )
+    with TestClient(build_app(tmp_path, model)) as c:
+        long = "а" * 7000
+        upload(c, text_pdf([["1. " + long], ["1. " + long]]))
+        assert len(model.calls_of("tasks_split")) == 2  # two chunks, the same task in both
+        assert len(task_ids(tmp_path)) == 1
