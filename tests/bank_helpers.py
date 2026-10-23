@@ -160,14 +160,15 @@ def answer_by_number(mapping: dict):
 class BlockingModel:
     """A model that does not answer until released (hung import); then it answers fine."""
 
-    def __init__(self):
+    def __init__(self, text="Что изучает цитология?"):
+        self.text = text
         self.release = threading.Event()
         self.entered = threading.Event()
 
     def complete(self, system, messages, schema=None, session_id=None):
         self.entered.set()
         self.release.wait(30)
-        return ModelResult(None, reply(make_task(1)), "claude", "stub", 1, None)
+        return ModelResult(None, reply(make_task(1, self.text)), "claude", "stub", 1, None)
 
 
 # ------------------------------------------------------------------ app helpers
