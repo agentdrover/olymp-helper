@@ -142,11 +142,12 @@ def test_ac3(tmp_path):
         cand = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["key_candidate"]
         assert cand["answer"] == "Б"  # and by number: entry 2 is not task 1
 
-        # Newer keys of another year or another stage do not bind either.
+        # Newer keys of another year, stage or olympiad do not bind either.
         upload(c, key_pdf({"1": "В"}), kind="key", variant="1", year="2021", name="k21.pdf")
         upload(
             c, key_pdf({"1": "Г"}), kind="key", variant="1", stage="заключительный", name="ks.pdf"
         )
+        upload(c, key_pdf({"1": "А"}), kind="key", variant="1", olympiad="other", name="ko.pdf")
         cand = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["key_candidate"]
         assert cand["answer"] == "Б"
 
