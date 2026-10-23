@@ -476,7 +476,7 @@ def test_a_heading_after_the_last_task_of_a_chunk_is_carried_to_the_next_one(tmp
         rows = [row(tmp_path, i) for i in task_ids(tmp_path)]
         assert [(r["section"], r["variant"]) for r in rows] == [
             ("Вариант 1", "1"),
-            ("Вариант 2", "2"),
+            ("Раздел Б", "9"),
         ]
         assert [r["text"] for r in rows] == ["Первый вариант", "Задание второго варианта"]
 
