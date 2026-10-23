@@ -18,8 +18,13 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set at run time by home-infra}
       EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
     read_only: true
+    # /dev/shm Docker монтирует отдельно с правами 1777, read_only его не закрывает: без него
+    # CLI негде оставить данные между запусками (ревью #2013, круг 4). /dev/mqueue - ниже, в tmpfs.
+    ipc: none
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
+      # Очереди сообщений POSIX - тоже место записи, которое переживает запуск: закрыты.
+      - /dev/mqueue:ro,noexec,nosuid,nodev,size=4k,mode=0555
     cap_drop:
       - ALL
     cap_add:
@@ -46,8 +51,13 @@ services:
       CURSOR_API_KEY: ${CURSOR_API_KEY:?set at run time by home-infra}
       EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
     read_only: true
+    # /dev/shm Docker монтирует отдельно с правами 1777, read_only его не закрывает: без него
+    # CLI негде оставить данные между запусками (ревью #2013, круг 4). /dev/mqueue - ниже, в tmpfs.
+    ipc: none
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
+      # Очереди сообщений POSIX - тоже место записи, которое переживает запуск: закрыты.
+      - /dev/mqueue:ro,noexec,nosuid,nodev,size=4k,mode=0555
     cap_drop:
       - ALL
     cap_add:

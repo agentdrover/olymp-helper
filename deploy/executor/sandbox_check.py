@@ -320,6 +320,20 @@ def cli_mode() -> None:
         ok = True
     check("CLI не может сменить UID через setpriv", ok)
     check("запись в /work закрыта для CLI", cannot_write("/work"))
+    # Вне каталога запуска CLI не пишет нигде: ни в одну точку монтирования, ни в обычные
+    # временные места. Иначе данные переживают запуск (ревью #2013, круг 4: /dev/shm).
+    mounts = {line.split()[1] for line in Path("/proc/mounts").read_text().splitlines()}
+    places = sorted(
+        (mounts | {"/tmp", "/var/tmp", "/dev/shm", "/run", "/run/lock", "/dev/mqueue"})
+        - {"/proc", "/sys"}
+    )
+    writable = [
+        p
+        for p in places
+        if os.path.isdir(p) and not p.startswith(("/proc/", "/sys/")) and not cannot_write(p)
+    ]
+    check("CLI не пишет ни в одно место вне каталога запуска", not writable, ",".join(writable))
+    check("/dev/shm нет", not os.path.isdir("/dev/shm") or cannot_write("/dev/shm"))
     try:
         os.kill(1, 0)
         can_signal = True

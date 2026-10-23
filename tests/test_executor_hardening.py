@@ -320,6 +320,11 @@ def test_compose_and_sandbox_carry_the_shared_key_and_restart_policy():
     assert compose.count("restart: unless-stopped") == 2
     assert "EXECUTOR_SHARED_KEY" in (root / "sandbox.sh").read_text(encoding="utf-8")
     assert "--init" in (root / "sandbox.sh").read_text(encoding="utf-8")
+    # Без /dev/shm: иначе это место записи CLI, которое переживает запуск.
+    assert compose.count("ipc: none") == 2
+    assert "--ipc none" in (root / "sandbox.sh").read_text(encoding="utf-8")
+    assert compose.count("- /dev/mqueue:ro,") == 2
+    assert "--tmpfs /dev/mqueue:ro," in (root / "sandbox.sh").read_text(encoding="utf-8")
     # Ключ не должен попасть в окружение CLI: белый список окружения его не содержит.
     from app.model.adapters import build_env
 
