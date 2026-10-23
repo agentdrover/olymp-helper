@@ -48,6 +48,7 @@
     resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: val("answer") || null }),
     figure: () => post("figure", {
       rect_px: frame ? [frame.x0, frame.y0, frame.x1, frame.y1] : null, scale: PAGE_SCALE,
+      page: Number(card().dataset.figurePage) || null,
       alt: val("alt"), teacher_note: val("teacher_note"),
       no_answer_ack: checked("no_answer_ack"), teacher_note_ack: checked("teacher_note_ack"),
     }).then((d) => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter, reason: d.reason })),

@@ -1,14 +1,15 @@
 {% if card %}
 <article class="card" data-task-id="{{ card.task_id }}" data-kind="{{ card.kind }}"
-         data-counter="{{ counter or '' }}">
+         data-counter="{{ counter or '' }}" data-figure-page="{{ card.figure_page or '' }}">
   <p><span class="badge">{{ card.label }}</span></p>
   <div class="split">
     <div class="source">
       {% if card.page_url %}<img id="page-img" src="{{ card.page_url }}" alt="Исходная страница">{% endif %}
-      {% if card.page_urls|length > 1 or card.figure_page %}
+      {# Ссылки на страницы - только у карточек проверки текста: на карточке рисунка рамка
+         привязана к одной странице, переключать её нельзя. #}
+      {% if card.kind != "needs_figure" and card.page_urls|length > 1 %}
       <p class="hint">Страницы:
         {% for p in card.page_urls %}<a class="page-link" href="{{ p.url }}" data-page-url="{{ p.url }}">стр. {{ p.page }}</a> {% endfor %}
-        {% if card.figure_page and card.figure_page not in card.pages %}<a class="page-link" href="/materials/{{ card.material_id }}/pages/{{ card.figure_page }}.png" data-page-url="/materials/{{ card.material_id }}/pages/{{ card.figure_page }}.png">рисунок: стр. {{ card.figure_page }}</a>{% endif %}
       </p>
       {% endif %}
     </div>

@@ -57,6 +57,7 @@ def confirm_figure(
     rect=None,
     rect_px=None,
     scale=None,
+    page=None,
     alt="",
     teacher_note=None,
     no_answer_ack=False,
@@ -74,6 +75,14 @@ def confirm_figure(
     doc = pymupdf.open(str(ctx.material_path(material["file"])))
     try:
         page_no = figure["page"]
+        if rect_px is not None:
+            if page is None:
+                raise Refusal("Для нарисованной рамки нужна страница, на которой она нарисована.")
+            if page != page_no:
+                raise Refusal(
+                    f"Рамка нарисована на странице {page}, а рисунок задания на странице {page_no}.",
+                    409,
+                )
         stored = _rect_from(figure, doc[page_no - 1], rect, rect_px, scale)
         problem = figures.alt_problem(alt or "", options_of(task), _correct_labels(conn, task))
         if problem:

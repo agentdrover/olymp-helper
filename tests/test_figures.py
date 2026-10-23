@@ -71,6 +71,8 @@ def confirm_figure(c, tid, **kw):
     body = {"alt": "Рисунок: части объекта обозначены цифрами", "teacher_note": "1 2 3 4 5 6"}
     body.update(ACK)
     body.update(kw)
+    if "rect_px" in kw:
+        body.setdefault("page", 1)  # a drawn frame carries the page it was drawn on
     return c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=body)
 
 

@@ -231,6 +231,7 @@ class FigureBody(BaseModel):
     rect: list[float] | None = None
     rect_px: list[float] | None = None
     scale: float | None = None
+    page: int | None = None  # страница, на которой нарисована рамка
     alt: str = ""
     teacher_note: str | None = None
     no_answer_ack: bool = False
@@ -361,6 +362,7 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
         rect=body.rect,
         rect_px=body.rect_px,
         scale=body.scale,
+        page=body.page,
         alt=body.alt,
         teacher_note=body.teacher_note,
         no_answer_ack=body.no_answer_ack,

@@ -783,3 +783,76 @@ def test_text_cards_show_the_text_pages_and_figure_cards_the_figure_page(tmp_pat
         html = c.get(f"/parent/review/{tid}?fragment=1", headers=PARENT).text
         assert "/pages/1.png" in html and "/pages/2.png" in html
         assert c.get(card["page_urls"][1]["url"], headers=PARENT).status_code == 200
+
+
+def _reviewer_reverse_case(tmp_path):
+    short = "Какой органоид"
+    longer = "Какой органоид отвечает за синтез белка в клетке эукариот по рисунку?"
+
+    def split(content):
+        if "[[стр. 1]]" in content:
+            return reply(make_task(12, short, pages=[1], section="Вариант 1"))
+        return reply(make_task(12, longer, pages=[2], section="Вариант 1", figure=True))
+
+    return StubModel(split=split), longer
+
+
+def test_the_confirm_card_opens_the_page_of_the_kept_text(tmp_path):
+    model, longer = _reviewer_reverse_case(tmp_path)
+    with TestClient(build_app(tmp_path, model)) as c:
+        filler = "а" * 7000
+        upload(c, text_pdf([["12. " + filler], ["12. " + filler]]))
+        tid = task_ids(tmp_path)[0]
+        got = row(tmp_path, tid)
+        assert got["text"] == longer and got["text_page"] == 2  # a stored fact, not min(pages)
+        assert (got["page_from"], got["page_to"]) == (1, 2)
+        c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": "Б"})
+        r = c.post(
+            f"/parent/tasks/{tid}/figure",
+            headers=PARENT,
+            json={"rect": [10, 10, 200, 40], "alt": "Схема строения клетки", "no_answer_ack": True},
+        )
+        assert r.status_code == 200, r.text
+        card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
+        assert card["kind"] == "confirm" and card["text"] == longer
+        assert card["page"] == 2 and card["page_url"].endswith("/pages/2.png")
+        assert card["pages"] == [1, 2]  # the rest of the range stays reachable
+    # the straight case keeps page 1 (the long text is on page 1)
+    got, _ = _two_chunk_task(
+        tmp_path / "b", ("Какой органоид отвечает за синтез белка?", 1), ("Какой", 2)
+    )
+    assert got["text_page"] == 1
+
+
+def test_the_needs_figure_card_has_no_page_navigation_and_a_frame_page_is_checked(tmp_path):
+    model, _ = _reviewer_reverse_case(tmp_path)
+    with TestClient(build_app(tmp_path, model)) as c:
+        filler = "а" * 7000
+        upload(c, text_pdf([["12. " + filler], ["12. " + filler]]))
+        tid = task_ids(tmp_path)[0]
+        card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
+        assert card["kind"] == "needs_figure" and card["figure_page"] == 2
+        html = c.get(f"/parent/review/{tid}?fragment=1", headers=PARENT).text
+        assert "/pages/2.png" in html  # the figure page is shown
+        assert "page-link" not in html and "/pages/1.png" not in html
+        assert 'data-figure-page="2"' in html  # the page a drawn frame will report
+        assert "figurePage" in c.get("/static/feed.js").text
+
+        body = {
+            "rect_px": [15, 15, 300, 60],
+            "scale": 1.5,
+            "alt": "Схема строения клетки",
+            "no_answer_ack": True,
+        }
+        # a frame drawn on another page than the figure page is refused
+        wrong = c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json={**body, "page": 1})
+        assert wrong.status_code == 409, wrong.text
+        assert row(tmp_path, tid)["import_status"] == "unsupported"
+        # a drawn frame without its page is refused too
+        missing = c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=body)
+        assert missing.status_code == 422, missing.text
+        ok = c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json={**body, "page": 2})
+        assert ok.status_code == 200, ok.text
+        # text-checking cards keep the links (there is no frame on them)
+        html = c.get(f"/parent/review/{tid}?fragment=1", headers=PARENT)
+        assert html.status_code == 200 and "page-link" in html.text

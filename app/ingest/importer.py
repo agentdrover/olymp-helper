@@ -98,6 +98,10 @@ def merge_options(old, new) -> tuple[object, bool]:
     return old, True
 
 
+def _text_page(task: dict) -> int:
+    return task.get("text_page") or task["pages"][0]
+
+
 def _figure_pages(task: dict) -> list[int]:
     """Страницы порций, где модель отметила рисунок."""
     if "figure_pages" in task:
@@ -112,6 +116,7 @@ def merge_repeat(old: dict, new: dict) -> dict:
     a, b = _norm_text(old["text"]), _norm_text(new["text"])
     keep = new if len(b) > len(a) else old
     merged = dict(keep)
+    merged["text_page"] = _text_page(keep)  # факт: где начинается оставленное условие
     merged["pages"] = sorted(set(old["pages"]) | set(new["pages"]))
     merged["refers_to_figure"] = old["refers_to_figure"] or new["refers_to_figure"]
     merged["figure_pages"] = sorted(set(_figure_pages(old)) | set(_figure_pages(new)))
@@ -204,7 +209,8 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
             cur = conn.execute(
                 "INSERT INTO task_item (material_id, page_from, page_to, variant, source_number, "
                 "type, text, options, points, topic, import_status, figure, unsupported_reason, "
-                "section, stage, review_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "section, stage, review_note, text_page) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     material["id"],
                     min(task["pages"]),
@@ -224,6 +230,7 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
                     task["section"],
                     task["stage"] or material["stage"],
                     task.get("review_note"),
+                    _text_page(task),
                 ),
             )
             save_snapshot(conn, cur.lastrowid)

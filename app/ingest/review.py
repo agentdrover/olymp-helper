@@ -280,7 +280,8 @@ def build_card(ctx, conn, task) -> dict | None:
     first, last = task["page_from"], task["page_to"] or task["page_from"]
     pages = list(range(first, last + 1)) if first else []
     figure_page = figure["page"] if figure else None
-    shown = figure_page if kind == "needs_figure" and figure_page else first
+    text_page = task["text_page"] or first  # страница сохранённого условия
+    shown = figure_page if kind == "needs_figure" and figure_page else text_page
     material = task["material_id"]
     agrees = None if key is None or model is None else key == model
     button = None
@@ -304,7 +305,7 @@ def build_card(ctx, conn, task) -> dict | None:
         "text": task["text"],
         "options": options_of(task),
         "material_id": task["material_id"],
-        "page": first,
+        "page": text_page,
         "pages": pages,
         "figure_page": figure_page,
         "page_url": f"/materials/{material}/pages/{shown}.png" if shown else None,
