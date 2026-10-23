@@ -120,7 +120,13 @@ def server_mode() -> None:
         launcher=launcher,
     )
     check("CLI запущен под другим UID", out.get("text") == "uid=10002", str(out.get("text")))
-    check("/work пуст после ответа", not any(work.iterdir()))
+    left = [
+        f"{os.path.join(d, n)} uid={os.lstat(os.path.join(d, n)).st_uid} "
+        f"mode={oct(os.lstat(os.path.join(d, n)).st_mode & 0o7777)}"
+        for d, dirs, files in os.walk("/work")
+        for n in dirs + files
+    ]
+    check("/work пуст после ответа", not left, "; ".join(left))
     other = next(c for c in TOKENS if c != channel)
     out = handle_request(
         dict(payload, channel=other),
