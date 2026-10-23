@@ -512,3 +512,76 @@ def test_a_new_section_does_not_inherit_the_old_variant_and_stage(tmp_path):
             ("Раздел Б", None, "отборочный"),
             ("Раздел Б", None, "отборочный"),
         ]
+
+
+def test_merge_labels_rules():
+    from app.ingest.importer import merge_labels
+
+    state = {"section": "А", "variant": "7", "stage": "заключительный"}
+    # the same section repeated: missing fields inherited, present ones override
+    assert merge_labels(state, {"section": "А", "variant": None, "stage": None}) == state
+    assert merge_labels(state, {"section": "А", "variant": "8", "stage": None}) == {
+        "section": "А",
+        "variant": "8",
+        "stage": "заключительный",
+    }
+    # no section: only the stated fields change
+    assert merge_labels(state, {"section": None, "variant": None, "stage": "отборочный"}) == {
+        "section": "А",
+        "variant": "7",
+        "stage": "отборочный",
+    }
+    # a different section resets what it does not state
+    assert merge_labels(state, {"section": "Б", "variant": None, "stage": None}) == {
+        "section": "Б",
+        "variant": None,
+        "stage": None,
+    }
+    assert merge_labels(state, {"section": "Б", "variant": "1", "stage": None}) == {
+        "section": "Б",
+        "variant": "1",
+        "stage": None,
+    }
+    # nothing stated: nothing changes (and the input is not mutated)
+    assert merge_labels(state, {"section": None, "variant": None, "stage": None}) == state
+    assert state == {"section": "А", "variant": "7", "stage": "заключительный"}
+
+
+def test_labels_merge_for_tasks_and_for_section_at_end(tmp_path):
+    def split(content):
+        if "[[стр. 1]]" in content:
+            first = make_task(1, "А1", pages=[1], section="Раздел А", variant="7", stage="заключ")
+            repeat = make_task(2, "А2", pages=[1], section="Раздел А")  # the same section again
+            other = make_task(3, "Б3", pages=[1], section="Раздел Б")  # a different section
+            back = make_task(4, "А4", pages=[1], section="Раздел А", variant="7", stage="заключ")
+            payload = reply(first, repeat, other, back)
+            payload["section_at_end"] = {"stage": "отборочный"}  # incomplete: only the stage
+            return payload
+        if "[[стр. 2]]" in content:
+            payload = reply(make_task(5, "А5", pages=[2]))  # inherits from section_at_end
+            payload["section_at_end"] = {"section": "Раздел В"}  # a new section
+            return payload
+        return reply(make_task(6, "В6", pages=[3]))
+
+    model = StubModel(split=split)
+    with TestClient(build_app(tmp_path, model)) as c:
+        long = "а" * 7000
+        r = upload(
+            c, text_pdf([["1. " + long], ["5. " + long], ["6. " + long]]), variant="", stage=""
+        )
+        st = c.get(f"/parent/materials/{r.json()['material_id']}", headers=PARENT).json()
+        assert st["import_status"] == "done", st["import_error"]
+        assert len(model.calls_of("tasks_split")) == 3
+        rows = {r["source_number"]: r for r in (row(tmp_path, i) for i in task_ids(tmp_path))}
+        got = {n: (r["section"], r["variant"], r["stage"]) for n, r in rows.items()}
+        assert got == {
+            "1": ("Раздел А", "7", "заключ"),
+            "2": ("Раздел А", "7", "заключ"),  # repeating the section keeps variant and stage
+            "3": ("Раздел Б", None, None),  # a different section resets them
+            "4": ("Раздел А", "7", "заключ"),
+            # section_at_end with the stage only keeps the section and variant of the last task
+            # (which is task 4: Раздел А, 7) and refines the stage
+            "5": ("Раздел А", "7", "отборочный"),
+            # section_at_end with a new section resets
+            "6": ("Раздел В", None, None),
+        }

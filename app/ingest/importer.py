@@ -39,17 +39,13 @@ def _check(cancel: threading.Event):
 META = ("section", "variant", "stage")
 
 
-def _inherit(state: dict, task: dict) -> None:
-    """Задание без своих меток наследует все три; новый раздел заменяет состояние целиком,
-    одни variant/stage уточняют текущее."""
-    if task["section"]:
-        state.update({name: task[name] for name in META})
-    else:
-        for name in ("variant", "stage"):
-            if task[name]:
-                state[name] = task[name]
-    for name in META:
-        task[name] = task[name] or state[name]
+def merge_labels(state: dict, labels: dict) -> dict:
+    """Единственное правило слияния меток (раздел, вариант, этап): для заданий и для
+    section_at_end. Другой раздел - новое состояние (не названные variant и stage сбрасываются);
+    тот же раздел или раздел не назван - названное заменяет, не названное наследуется."""
+    if labels.get("section") and labels["section"] != state.get("section"):
+        return {name: labels.get(name) for name in META}
+    return {name: labels.get(name) or state.get(name) for name in META}
 
 
 def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
@@ -72,10 +68,11 @@ def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
         except InvalidStructure as exc:
             raise ImportFailure(str(exc)) from exc
         for task in parsed:
-            _inherit(state, task)
+            state = merge_labels(state, task)
+            task.update(state)
             seen.setdefault((task["section"], task["number"]), task)
         if at_end:  # заголовок после последнего задания важнее состояния последнего задания
-            state = {name: at_end[name] for name in META}
+            state = merge_labels(state, at_end)
     return list(seen.values())
 
 
