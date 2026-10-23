@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.model import runner
+from app.model.adapters import ClaudeAdapter
 from app.model.executor_server import Gate, handle_request, make_server
 from app.model.runner import run_cli
 
@@ -186,7 +187,10 @@ def test_cleanup_runs_as_cli_user_with_chmod_before_rm(tmp_path):
         workroot=str(tmp_path),
         launcher=launcher,
     )
-    assert [c[len(launcher)] for c in calls] == ["mkdir", "claude", "sh"]
+    assert [c[len(launcher)] for c in calls] == ["mkdir", "sh", "sh"]
+    cli = calls[1]
+    assert cli[-len(ClaudeAdapter().build("m", "s", None)) :][0] == "claude"
+    assert cli[len(launcher) + 3].endswith("/work")  # в каталог переходит пользователь CLI
     assert all(c[: len(launcher)] == launcher for c in calls)
     mkdir = calls[0]
     assert "-m" in mkdir and mkdir[mkdir.index("-m") + 1] == "0700"

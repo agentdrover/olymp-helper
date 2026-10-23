@@ -114,10 +114,17 @@ def run_cli(
     try:
         try:
             _make_dirs(spawn, launcher, helper_env, root, work, home)
-            argv = list(launcher or []) + adapter.build(model, system, schema)
+            cli = adapter.build(model, system, schema)
+            if launcher:
+                # Сервер не может зайти в каталог пользователя CLI (0700): в него переходит
+                # уже CLI-пользователь, процесс сервера стартует из корня запуска.
+                argv = [*launcher, "sh", "-c", 'cd -- "$0" && exec "$@"', work, *cli]
+                cwd = root
+            else:
+                argv, cwd = cli, work
             stdin = adapter.stdin(system, messages, schema)
             proc = spawn(
-                argv, input=stdin, env=build_env(channel, env, home), cwd=work, timeout=timeout
+                argv, input=stdin, env=build_env(channel, env, home), cwd=cwd, timeout=timeout
             )
             if proc.returncode != 0:
                 raise ChannelError("exit_code")

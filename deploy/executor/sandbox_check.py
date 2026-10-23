@@ -104,6 +104,16 @@ def is_helper(argv, launcher):
     return argv[len(launcher)] == "mkdir" or "rm -rf" in " ".join(argv)
 
 
+def in_work(argv, body):
+    """Подмена CLI: тот же запуск (launcher, переход в каталог CLI), но команда своя."""
+    n = len(launcher_of(argv))
+    return [*argv[:n], "sh", "-c", 'cd -- "$0" && ' + body, argv[n + 3]]
+
+
+def launcher_of(argv):
+    return argv[: argv.index("sh")]
+
+
 def http_status(path, key=None, payload=None):
     import json
     import urllib.error
@@ -154,7 +164,7 @@ def live_checks(channel):
         def run(argv, **kw):
             if is_helper(argv, launcher):
                 return spawn(argv, **kw)
-            return spawn([*launcher, "sh", "-c", body], **kw)
+            return spawn(in_work(argv, body), **kw)
 
         return run
 
@@ -210,7 +220,7 @@ def live_checks(channel):
             return spawn(argv, **kw)
         entered.set()
         release.wait(20)
-        return spawn([*launcher, "sh", "-c", ok_json("x")], **kw)
+        return spawn(in_work(argv, ok_json("x")), **kw)
 
     t = threading.Thread(
         target=lambda: box.append(

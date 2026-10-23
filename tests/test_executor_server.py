@@ -147,7 +147,7 @@ def test_cli_runs_under_launcher_and_workdir_is_scrubbed_by_cli_user(tmp_path):
     )
     assert res.text == "ok"
     assert calls[0][3] == "mkdir"
-    assert calls[1][:3] == launcher and calls[1][3] == "claude"
+    assert calls[1][:3] == launcher and "claude" in calls[1]
     # Уборка тем же пользователем, что запускал CLI: find ... -delete внутри рабочих каталогов.
     assert calls[2][:3] == launcher and calls[2][3] == "sh" and "rm -rf" in calls[2][5]
     assert os.listdir(tmp_path) == []
