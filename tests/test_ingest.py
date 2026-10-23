@@ -686,3 +686,29 @@ def test_one_label_with_different_texts_keeps_the_longer_and_leaves_a_note(tmp_p
     )
     assert json.loads(got["options"])[0]["text"] == "митохондрия клетки"
     assert got["review_note"] == OPTIONS_NOTE
+
+
+def test_a_type_change_between_chunks_keeps_type_and_options_as_one_pair():
+    from app.ingest.importer import merge_repeat
+
+    single = {
+        "text": "Какой органоид",
+        "pages": [1],
+        "refers_to_figure": False,
+        "type": "single",
+        "options": [{"label": "А", "text": "ядро"}, {"label": "Б", "text": "рибосома"}],
+    }
+    match = {
+        "text": "Сопоставьте органоид и его функцию в клетке",
+        "pages": [2],
+        "refers_to_figure": False,
+        "type": "match",
+        "options": {
+            "left": [{"label": "1", "text": "ядро"}],
+            "right": [{"label": "А", "text": "ДНК"}],
+        },
+    }
+    for first, second in ((single, match), (match, single)):
+        got = merge_repeat(dict(first), dict(second))
+        assert got["type"] == "match" and got["options"] == match["options"]
+        assert got["review_note"] == OPTIONS_NOTE

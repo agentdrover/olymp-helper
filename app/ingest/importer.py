@@ -95,7 +95,7 @@ def merge_options(old, new) -> tuple[object, bool]:
         return out, differs
     if isinstance(old, list) and isinstance(new, list):
         return _merge_option_list(old, new)
-    return old, False
+    return old, True
 
 
 def merge_repeat(old: dict, new: dict) -> dict:
@@ -107,7 +107,11 @@ def merge_repeat(old: dict, new: dict) -> dict:
     merged = dict(keep)
     merged["pages"] = sorted(set(old["pages"]) | set(new["pages"]))
     merged["refers_to_figure"] = old["refers_to_figure"] or new["refers_to_figure"]
-    merged["options"], options_differ = merge_options(old["options"], new["options"])
+    if old["type"] != new["type"]:
+        # Тип и варианты - одна пара: смешивать варианты разных типов нельзя.
+        merged["options"], options_differ = keep["options"], True
+    else:
+        merged["options"], options_differ = merge_options(old["options"], new["options"])
     note = old.get("review_note") or new.get("review_note")
     if not _contains(a, b):
         note = COMBINED_NOTE
