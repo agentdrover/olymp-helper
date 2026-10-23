@@ -68,7 +68,7 @@ def near(rect, expected, tol=1.5):
 
 
 def confirm_figure(c, tid, **kw):
-    body = {"alt": "Рисунок: части объекта обозначены цифрами 1–6", "teacher_note": "1 2 3 4 5 6"}
+    body = {"alt": "Рисунок: части объекта обозначены цифрами", "teacher_note": "1 2 3 4 5 6"}
     body.update(ACK)
     body.update(kw)
     return c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=body)
@@ -442,6 +442,25 @@ def test_alt_rejects_short_option_texts_as_whole_words():
     # no option text as a whole word: passes (a longer word containing it is not a hit)
     assert alt_problem("Схема строения клетки с ядром", options, ["А"]) is None
     assert alt_problem("Схема показывает действие РНКазы", options, []) is None
-    # digits-only options are designations, covered by the label check, not compared as text
+    # numeric option texts are compared too: strictness wins, the parent rephrases
+    for option, alt in (
+        ("46", "На графике число 46"),
+        ("36,6", "Температура 36,6 градуса"),
+        ("1, 2", "Части обозначены цифрами 1, 2"),
+    ):
+        problem = alt_problem(alt, [{"label": "А", "text": option}], [])
+        assert problem and option in problem, option
     digit_opts = [{"label": "А", "text": "1, 2"}, {"label": "Б", "text": "1, 6"}]
-    assert alt_problem("Части обозначены цифрами 1–6", digit_opts, []) is None
+    assert alt_problem("Части обозначены цифрами 1–6", digit_opts, [])  # «1, 6» is an option
+    assert alt_problem("Части обозначены цифрами", digit_opts, []) is None
+    # a longer number is not a hit for a shorter option, and the reverse
+    assert alt_problem("Число 146", [{"label": "А", "text": "46"}], []) is None
+    # a single-character option text is a designation, not compared as text
+    assert (
+        alt_problem(
+            "Показана часть 1 и буква в",
+            [{"label": "А", "text": "1"}, {"label": "Б", "text": "в"}],
+            [],
+        )
+        is None
+    )

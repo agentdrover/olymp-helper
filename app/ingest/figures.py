@@ -151,13 +151,9 @@ def alt_problem(alt: str, options, correct_labels: list[str]) -> str | None:
         texts = [o.get("text", "") for side in options.values() for o in side]
     for text in texts:
         phrase = _norm(text)
-        # Любой непустой текст варианта целой фразой (нормализация, ё = е), любой длины.
-        # Одиночные буквы и цифры - это обозначения, их закрывает проверка меток ниже.
-        if (
-            len(phrase) >= 2
-            and re.search(r"[a-zа-я]", phrase)
-            and _contains_phrase(normalized, phrase)
-        ):
+        # Любой текст варианта целой фразой (нормализация, ё = е), буквы и цифры. Пропускается
+        # только однознаковый текст: это обозначение, его закрывает проверка меток ниже.
+        if len(phrase.replace(" ", "")) >= 2 and _contains_phrase(normalized, phrase):
             return f"Описание рисунка содержит вариант ответа «{text}». Уберите его: в alt не должно быть ответа."
     for label in correct_labels:
         if label and re.search(rf"(?<!\w){re.escape(label)}(?!\w)", alt, re.IGNORECASE):

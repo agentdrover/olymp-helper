@@ -98,6 +98,13 @@ def merge_options(old, new) -> tuple[object, bool]:
     return old, True
 
 
+def _figure_pages(task: dict) -> list[int]:
+    """Страницы порций, где модель отметила рисунок."""
+    if "figure_pages" in task:
+        return task["figure_pages"]
+    return list(task["pages"]) if task["refers_to_figure"] else []
+
+
 def merge_repeat(old: dict, new: dict) -> dict:
     """Повтор (раздел, номер) в другой порции, поля объединяются отдельно: условие - более
     длинное (по нормализованной длине), варианты - по обозначению, страницы - объединение,
@@ -107,6 +114,7 @@ def merge_repeat(old: dict, new: dict) -> dict:
     merged = dict(keep)
     merged["pages"] = sorted(set(old["pages"]) | set(new["pages"]))
     merged["refers_to_figure"] = old["refers_to_figure"] or new["refers_to_figure"]
+    merged["figure_pages"] = sorted(set(_figure_pages(old)) | set(_figure_pages(new)))
     if old["type"] != new["type"]:
         # Тип и варианты - одна пара: смешивать варианты разных типов нельзя.
         merged["options"], options_differ = keep["options"], True
@@ -159,7 +167,7 @@ def _unsupported_reason(task: dict) -> str | None:
 
 
 def _figure_record(doc, material_id: int, task: dict) -> dict:
-    page = task["pages"][0]
+    page = (_figure_pages(task) or task["pages"])[0]
     rect = suggest_rect(doc, page, task["text"]) if doc is not None else None
     return {
         "material_id": material_id,

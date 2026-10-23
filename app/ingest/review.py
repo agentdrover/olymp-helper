@@ -276,6 +276,7 @@ def build_card(ctx, conn, task) -> dict | None:
         kind, hint = "confirm", "Проверьте, что условие распознано верно."
     if kind is None:
         return None
+    page = figure["page"] if figure else task["page_from"]  # рисунок может быть не на первой
     agrees = None if key is None or model is None else key == model
     button = None
     if kind == "confirm":
@@ -289,7 +290,7 @@ def build_card(ctx, conn, task) -> dict | None:
         "kind": kind,
         "label": LABELS[kind],
         "hint": hint,
-        "note": task["review_note"] if status == "draft" else None,
+        "note": task["review_note"],
         "button": button,
         "field": "answer" if kind == "no_key" else None,
         "retry": kind == "model_missing",
@@ -298,10 +299,8 @@ def build_card(ctx, conn, task) -> dict | None:
         "text": task["text"],
         "options": options_of(task),
         "material_id": task["material_id"],
-        "page": task["page_from"],
-        "page_url": f"/materials/{task['material_id']}/pages/{task['page_from']}.png"
-        if task["page_from"]
-        else None,
+        "page": page,
+        "page_url": f"/materials/{task['material_id']}/pages/{page}.png" if page else None,
         "key": None if key is None else display(key),
         "key_source": source,
         "model_answer": None if model is None else display(model),

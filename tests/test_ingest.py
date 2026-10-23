@@ -589,14 +589,27 @@ def test_labels_merge_for_tasks_and_for_section_at_end(tmp_path):
 
 
 def _two_chunk_task(
-    tmp_path, first, second, figure_second=False, options_first=None, options_second=None
+    tmp_path,
+    first,
+    second,
+    figure_second=False,
+    options_first=None,
+    options_second=None,
+    figure_first=False,
 ):
     """Page 1 and page 2 are separate chunks; the same section and number come back twice."""
 
     def split(content):
         if "[[стр. 1]]" in content:
             return reply(
-                make_task(12, first[0], pages=[1], section="Вариант 1", options=options_first)
+                make_task(
+                    12,
+                    first[0],
+                    pages=[1],
+                    section="Вариант 1",
+                    options=options_first,
+                    figure=figure_first,
+                )
             )
         return reply(
             make_task(
@@ -712,3 +725,24 @@ def test_a_type_change_between_chunks_keeps_type_and_options_as_one_pair():
         got = merge_repeat(dict(first), dict(second))
         assert got["type"] == "match" and got["options"] == match["options"]
         assert got["review_note"] == OPTIONS_NOTE
+
+
+def test_the_figure_of_a_merged_task_is_searched_on_the_page_that_mentions_it(tmp_path):
+    text = "Рассмотрите рисунок и ответьте на вопрос о строении клетки"
+    got, card = _two_chunk_task(tmp_path, (text, 1), (text, 2), figure_second=True)
+    figure = json.loads(got["figure"])
+    assert got["import_status"] == "unsupported"
+    assert figure["page"] == 2 and card["page"] == 2
+    assert card["page_url"].endswith("/pages/2.png")
+    # the flag only in the first chunk gives page 1
+    got, card = _two_chunk_task(tmp_path / "b", (text, 1), (text, 2), figure_first=True)
+    assert json.loads(got["figure"])["page"] == 1 and card["page"] == 1
+
+
+def test_the_note_is_on_every_kind_of_parent_card(tmp_path):
+    short = "Определите функцию митохондрии на рисунке"
+    longer = "Назовите органоид, который синтезирует АТФ в клетке эукариот по рисунку"
+    got, card = _two_chunk_task(tmp_path, (short, 1), (longer, 2), figure_second=True)
+    assert card["kind"] == "needs_figure"
+    assert got["review_note"] == "условие собрано из двух порций"
+    assert card["note"] == "условие собрано из двух порций"
