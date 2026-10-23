@@ -5,6 +5,7 @@ description = "Олимпиадный помощник: подготовка к 
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",
+    "tzdata>=2026.5",
     "uvicorn>=0.32",
 ]
 

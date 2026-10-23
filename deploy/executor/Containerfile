@@ -1,0 +1,52 @@
+# Контейнер-исполнитель модели (SPEC-1.0 1.4, ADR 0001): единственное место, где запускаются CLI.
+# Контейнер НА КАНАЛ (уточнение по ревью #2013): executor-claude держит только токен Claude,
+# executor-cursor - только ключ Cursor (deploy/compose.yaml). Один образ, канал задаёт
+# EXECUTOR_CHANNEL. Сервер работает под exec-srv, CLI запускается им под exec-cli через setpriv:
+# CLI не читает /proc/<pid>/environ сервера. Корень только для чтения, /work - ограниченный tmpfs
+# без тома данных; сеть наружу - только к API своего провайдера (задача HI-1).
+FROM node:22.11.0-bookworm-slim
+
+ARG CLAUDE_CODE_VERSION=2.1.296
+ARG CURSOR_AGENT_VERSION=2026.10.01-14929f9
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 ca-certificates curl libcap2-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && claude --version | grep -F "${CLAUDE_CODE_VERSION}"
+
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) arch=x64 ;; arm64) arch=arm64 ;; *) echo "unsupported arch $arch"; exit 1 ;; esac; \
+    mkdir -p /opt/cursor-agent; \
+    curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_AGENT_VERSION}/linux/${arch}/agent-cli-package.tar.gz" \
+        | tar --strip-components=1 -xz -C /opt/cursor-agent; \
+    ln -s /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent; \
+    cursor-agent --version | grep -F "${CURSOR_AGENT_VERSION}"
+
+# Следы сборки (кэши, домашние каталоги CLI) в образе не остаются.
+RUN rm -rf /root/.claude /root/.claude.json /root/.cursor /root/.config /root/.npm /home/node/.npm
+
+COPY app/__init__.py /opt/executor/app/__init__.py
+COPY app/model /opt/executor/app/model
+COPY deploy/executor/sandbox_check.py /opt/executor/sandbox_check.py
+
+# Два пользователя с разными UID. Перейти с exec-srv на exec-cli может только процесс сервера:
+# setpriv получает CAP_SETUID/CAP_SETGID из file capabilities и закрыт для всех, кроме группы
+# exec-srv (CLI в неё не входит и запустить setpriv не может).
+RUN groupadd --gid 10001 exec-srv \
+    && groupadd --gid 10002 exec-cli \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin exec-srv \
+    && useradd --system --uid 10002 --gid 10002 --no-create-home --shell /usr/sbin/nologin exec-cli \
+    && chgrp exec-srv /usr/bin/setpriv \
+    && chmod 0750 /usr/bin/setpriv \
+    && setcap cap_setuid,cap_setgid+ep /usr/bin/setpriv \
+    && mkdir /work && chown exec-srv:exec-srv /work
+
+ENV PYTHONDONTWRITEBYTECODE=1 EXECUTOR_WORKROOT=/work EXECUTOR_PORT=8099 EXECUTOR_CLI_USER=exec-cli
+USER exec-srv
+# Рабочий каталог процесса - в образе (только чтение), а не в /work.
+WORKDIR /opt/executor
+EXPOSE 8099
+CMD ["python3", "-m", "app.model.executor_server"]

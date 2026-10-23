@@ -69,6 +69,12 @@ jobs:
         id: tests
         run: uv run --frozen pytest -q
 
+      # AC-5 and AC-8 of OH-T03 (#2013): builds the model-executor image and checks its sandbox
+      # from the inside. No secrets, no real CLI calls. BEFORE the reporter below.
+      - name: executor-sandbox
+        id: executor-sandbox
+        run: bash deploy/executor/sandbox.sh
+
       # OH-T04 (#2014): the application image is built, started on a temporary volume and
       # checked (healthz over HTTPS, data survives recreation, speech recognition of a WAV
       # sample without network, token patterns in the image). Needs no secrets; the container

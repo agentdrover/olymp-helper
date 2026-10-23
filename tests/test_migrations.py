@@ -2,8 +2,17 @@ import sqlite3
 
 from app.db import SCHEMA_VERSION, connect, migrate
 
-TABLES = {"material", "task_item", "study_session", "event", "settings", "material_page"}
+TABLES = {
+    "material",
+    "task_item",
+    "study_session",
+    "event",
+    "settings",
+    "material_page",
+    "model_run",
+}
 INDEXES = {
+    "idx_model_run_day",
     "idx_task_item_material",
     "idx_task_item_status",
     "idx_event_session",
@@ -37,7 +46,7 @@ def test_ac2(tmp_path):
     assert INDEXES <= idx
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
     # FTS5: virtual table of the expected module and tokenizer, and it really matches.
     fts_sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='material_page'").fetchone()[0]
@@ -80,13 +89,15 @@ def test_ac2(tmp_path):
 
     before = _dump(conn)
     versions = conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert versions == [(1,)]
+    assert versions == [(v,) for v in range(1, SCHEMA_VERSION + 1)]
     conn.close()
 
     conn2 = connect(path)
     migrate(conn2)
     assert _dump(conn2) == before
-    assert conn2.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+    assert conn2.execute("SELECT version FROM schema_migrations").fetchall() == [
+        (v,) for v in range(1, SCHEMA_VERSION + 1)
+    ]
     conn2.close()
 
 

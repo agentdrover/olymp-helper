@@ -29,6 +29,8 @@
 | `OLYMP_EXECUTOR_IMAGE` | хост | обязательна | образ исполнителя (OH-T03) |
 | `OLYMP_EXECUTOR_UID` | хост | `10002` | uid исполнителя, владелец tmpfs `/work` |
 | `EXECUTOR_WORKROOT` | executor-* | `/work` | рабочий корень запусков CLI; задан в compose |
+| `EXECUTOR_CHANNEL` | executor-* | нет | канал контейнера: `claude` или `cursor`; задан в compose |
+| `EXECUTOR_SHARED_KEY` | app, executor-* | нет | общий ключ приложения и исполнителей (заголовок `X-Executor-Key`); передаётся при запуске, в окружение CLI не попадает |
 | `CLAUDE_CODE_OAUTH_TOKEN` | executor-claude | нет | токен подписки Claude; передаётся при запуске, значение в compose не пишется |
 | `CURSOR_API_KEY` | executor-cursor | нет | ключ Cursor; передаётся при запуске, значение в compose не пишется |
 

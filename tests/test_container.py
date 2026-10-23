@@ -102,7 +102,7 @@ def test_compose_executors_have_writable_limited_work_tmpfs_and_read_only_root()
         svc = services[name]
         assert svc.get("read_only") is True
         assert not svc.get("volumes")
-        assert "EXECUTOR_WORKROOT=/work" in svc["environment"]
+        assert svc["environment"]["EXECUTOR_WORKROOT"] == "/work"
         work = [t for t in svc["tmpfs"] if str(t).startswith("/work")]
         assert len(work) == 1, name
         opts = str(work[0]).split(":", 1)[1].split(",")
@@ -113,7 +113,9 @@ def test_compose_executors_have_writable_limited_work_tmpfs_and_read_only_root()
 
 def test_compose_has_no_literal_secret_values():
     text = (ROOT / "deploy" / "compose.yaml").read_text(encoding="utf-8")
-    assert not re.search(r"(TOKEN|API_KEY)\s*[:=]\s*\S", text)
+    # Только подстановка из окружения хоста (${VAR:?...}); любое иное значение - литерал.
+    literal = r"^\s*-?\s*\w*(TOKEN|API_KEY|SHARED_KEY)\s*[:=]\s*(?!\$\{)\S"
+    assert not re.search(literal, text, re.MULTILINE)
 
 
 HUB_ACTION = "agentdrover/haiplane/.github/actions/hub-ci-report"

@@ -17,6 +17,7 @@ services:
       - OLYMP_PORT=8443
       - OLYMP_TLS_CERT=/certs/server.pem
       - OLYMP_TLS_KEY=/certs/server.key
+      - EXECUTOR_SHARED_KEY
     healthcheck:
       test: ["CMD", "python", "/app/deploy/healthcheck.py"]
       interval: 30s
@@ -30,30 +31,91 @@ services:
       - /tmp
 
   # Исполнители моделей (OH-T03, #2013): по контейнеру на канал, у каждого только свой токен.
-  # Корень файловой системы только для чтения; рабочий каталог запуска - /work (tmpfs,
-  # без исполнения, с лимитом, владелец - uid исполнителя). Образ и параметры задаёт OH-T03.
+  # Единственное описание исполнителей (сверка #2013 и #2014): корень только для чтения, /work -
+  # tmpfs сервера исполнителя (uid 10001, 0711), без /tmp и /dev/shm, нулевые лимиты IPC, общий
+  # ключ с приложением. Почему каждая строка такая - SPEC-1.0 §1.4 и deploy/executor/sandbox.sh.
   executor-claude:
-    image: ${OLYMP_EXECUTOR_IMAGE:?образ исполнителя (OH-T03)}
-    restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /work:size=64m,noexec,nosuid,nodev,uid=${OLYMP_EXECUTOR_UID:-10002},gid=${OLYMP_EXECUTOR_UID:-10002},mode=0700
+    build:
+      context: ..
+      dockerfile: deploy/executor/Containerfile
+    image: ${OLYMP_EXECUTOR_IMAGE:-olymp-executor:local}
     environment:
-      - EXECUTOR_WORKROOT=/work
-      - CLAUDE_CODE_OAUTH_TOKEN
+      EXECUTOR_CHANNEL: claude
+      EXECUTOR_WORKROOT: /work
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set at run time by home-infra}
+      EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
+    read_only: true
+    # /dev/shm Docker монтирует отдельно с правами 1777, read_only его не закрывает: без него
+    # CLI негде оставить данные между запусками (ревью #2013, круг 4). Очереди POSIX и объекты SysV
+    # IPC остаются в пространстве имён: их убирает и проверяет reset после каждого запуска (круг 5).
+    ipc: none
+    # Лимиты пространства имён IPC: с нулевыми лимитами объект IPC создать нельзя, значит никакое
+    # состояние IPC не может пережить запуск (ревью #2013, круг 6). reset и проверка - страховка.
+    sysctls:
+      kernel.msgmni: "0"
+      kernel.sem: "0 0 0 0"
+      kernel.shmmni: "0"
+      kernel.shm_rmid_forced: "1"
+      fs.mqueue.queues_max: "0"
+    tmpfs:
+      - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    pids_limit: 256
     mem_limit: 1g
     cpus: 1.0
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8099/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    expose:
+      - "8099"
 
   executor-cursor:
-    image: ${OLYMP_EXECUTOR_IMAGE:?образ исполнителя (OH-T03)}
-    restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /work:size=64m,noexec,nosuid,nodev,uid=${OLYMP_EXECUTOR_UID:-10002},gid=${OLYMP_EXECUTOR_UID:-10002},mode=0700
+    build:
+      context: ..
+      dockerfile: deploy/executor/Containerfile
+    image: ${OLYMP_EXECUTOR_IMAGE:-olymp-executor:local}
     environment:
-      - EXECUTOR_WORKROOT=/work
-      - CURSOR_API_KEY
+      EXECUTOR_CHANNEL: cursor
+      EXECUTOR_WORKROOT: /work
+      CURSOR_API_KEY: ${CURSOR_API_KEY:?set at run time by home-infra}
+      EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
+    read_only: true
+    # /dev/shm Docker монтирует отдельно с правами 1777, read_only его не закрывает: без него
+    # CLI негде оставить данные между запусками (ревью #2013, круг 4). Очереди POSIX и объекты SysV
+    # IPC остаются в пространстве имён: их убирает и проверяет reset после каждого запуска (круг 5).
+    ipc: none
+    # Лимиты пространства имён IPC: с нулевыми лимитами объект IPC создать нельзя, значит никакое
+    # состояние IPC не может пережить запуск (ревью #2013, круг 6). reset и проверка - страховка.
+    sysctls:
+      kernel.msgmni: "0"
+      kernel.sem: "0 0 0 0"
+      kernel.shmmni: "0"
+      kernel.shm_rmid_forced: "1"
+      fs.mqueue.queues_max: "0"
+    tmpfs:
+      - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    pids_limit: 256
     mem_limit: 1g
     cpus: 1.0
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8099/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    expose:
+      - "8099"
