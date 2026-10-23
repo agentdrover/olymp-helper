@@ -62,46 +62,6 @@ def test_script_refuses_to_overwrite_existing_ca(certs):
     assert "уже" in res.stderr
 
 
-def test_app_serves_https_verified_by_ca_for_lan_address(certs, tmp_path):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    env = {
-        "OLYMP_DB": str(tmp_path / "olymp.db"),
-        "OLYMP_TLS_CERT": str(certs / "server.pem"),
-        "OLYMP_TLS_KEY": str(certs / "server.key"),
-        "OLYMP_PORT": str(port),
-        "OLYMP_HOST": "127.0.0.1",
-        "PATH": "/usr/bin:/bin:" + str(Path(sys.executable).parent),
-        "PYTHONPATH": str(ROOT),
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
-    proc = subprocess.Popen(["bash", str(ROOT / "deploy" / "entrypoint.sh")], env=env, cwd=ROOT)
-    try:
-        ctx = ssl.create_default_context(cafile=str(certs / "ca.pem"))
-        body = b""
-        for _ in range(100):
-            try:
-                with (
-                    socket.create_connection(("127.0.0.1", port), timeout=1) as raw,
-                    ctx.wrap_socket(raw, server_hostname="192.168.0.138") as tls,
-                ):
-                    tls.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-                    while chunk := tls.recv(4096):
-                        body += chunk
-                break
-            except OSError:
-                time.sleep(0.1)
-        assert b"200 OK" in body and b'"status":"ok"' in body.replace(b" ", b"")
-        # HTTP-рукопожатие на TLS-порту исключением не является
-        with socket.create_connection(("127.0.0.1", port), timeout=2) as raw:
-            raw.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-            assert b"200 OK" not in raw.recv(4096)
-    finally:
-        proc.terminate()
-        proc.wait(timeout=10)
-
-
 def test_renew_server_keeps_ca_and_reissues_server(tmp_path):
     assert _run("bash", str(SCRIPT), str(tmp_path)).returncode == 0
     ca_before = (tmp_path / "ca.pem").read_bytes()
@@ -158,28 +118,85 @@ def test_entrypoint_with_only_one_tls_variable_exits_with_error(certs, tmp_path)
     assert proc.returncode != 0
 
 
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _stop(proc) -> str:
+    """Останавливает сервер всегда и возвращает его вывод."""
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        out, _ = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+    return out or ""
+
+
+def _get_until_status(proc, port, ctx=None, hostname=None, deadline_s=30.0) -> bytes:
+    """Повторяет GET /healthz, пока не придёт ответ со строкой статуса или не выйдет срок."""
+    deadline = time.monotonic() + deadline_s
+    last_error = ""
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as raw:
+                conn = ctx.wrap_socket(raw, server_hostname=hostname) if ctx else raw
+                with conn:
+                    conn.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    body = b""
+                    while chunk := conn.recv(4096):
+                        body += chunk
+            if body.startswith(b"HTTP/1."):
+                return body
+            last_error = f"ответ без строки статуса: {body[:60]!r}"
+        except OSError as exc:
+            last_error = repr(exc)
+        time.sleep(0.2)
+    out = _stop(proc)
+    pytest.fail(f"нет ответа за {deadline_s} с ({last_error}); вывод сервера:\n{out}")
+
+
+def test_app_serves_https_verified_by_ca_for_lan_address(certs, tmp_path):
+    port = _free_port()
+    proc = _entry(
+        {
+            "OLYMP_TLS_CERT": str(certs / "server.pem"),
+            "OLYMP_TLS_KEY": str(certs / "server.key"),
+            "OLYMP_PORT": str(port),
+            "OLYMP_HOST": "127.0.0.1",
+        },
+        tmp_path,
+    )
+    try:
+        ctx = ssl.create_default_context(cafile=str(certs / "ca.pem"))
+        body = _get_until_status(proc, port, ctx, "192.168.0.138")
+        assert b"200 OK" in body and b'"status":"ok"' in body.replace(b" ", b"")
+        # HTTP на TLS-порту исключением не является
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as raw:
+            raw.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            try:
+                assert b"200 OK" not in raw.recv(4096)
+            except OSError:
+                pass  # сброс соединения тоже отказ
+    finally:
+        _stop(proc)
+
+
 def test_entrypoint_insecure_http_only_when_explicit_and_warns(tmp_path):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    port = _free_port()
     proc = _entry(
         {"OLYMP_INSECURE_HTTP": "1", "OLYMP_PORT": str(port), "OLYMP_HOST": "127.0.0.1"}, tmp_path
     )
     try:
-        body = b""
-        for _ in range(100):
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1) as raw:
-                    raw.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-                    while chunk := raw.recv(4096):
-                        body += chunk
-                break
-            except OSError:
-                time.sleep(0.1)
+        body = _get_until_status(proc, port)
         assert b"200 OK" in body
     finally:
-        proc.terminate()
-        out, _ = proc.communicate(timeout=10)
+        out = _stop(proc)
     assert "OLYMP_INSECURE_HTTP" in out and "WARNING" in out
 
 
