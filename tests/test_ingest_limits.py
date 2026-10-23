@@ -345,6 +345,23 @@ def test_image_size_keys_given_as_indirect_references_are_resolved_and_fail_clos
         else:
             with pytest.raises(limits.UploadRejected):
                 limits.check_pdf(pdf)
+    # the ColorSpace itself may be a reference to an array
+    for n, accepted in ((1, True), (3, False)):
+        icc = (
+            six
+            + b"7 0 obj<</N %d /Length 0>>stream\n\nendstream endobj\n8 0 obj [/ICCBased 7 0 R] endobj\n"
+            % n
+        )
+        pdf = raw_pdf(
+            "/Filter /DCTDecode /ColorSpace 8 0 R /BitsPerComponent 8 /Width 5 0 R /Height 6 0 R",
+            b"jpegbytes",
+            icc,
+        )
+        if accepted:
+            assert limits.check_pdf(pdf) == 1
+        else:
+            with pytest.raises(limits.UploadRejected):
+                limits.check_pdf(pdf)
     # fail closed: unresolvable, non-positive or missing values are rejected
     broken = b"5 0 obj /Foo endobj\n6 0 obj 100 endobj\n"
     cases = [

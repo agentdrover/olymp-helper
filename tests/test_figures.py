@@ -443,5 +443,5 @@ def test_alt_rejects_short_option_texts_as_whole_words():
     assert alt_problem("Схема строения клетки с ядром", options, ["А"]) is None
     assert alt_problem("Схема показывает действие РНКазы", options, []) is None
     # digits-only options are designations, covered by the label check, not compared as text
-    digit_opts = [{"label": "А", "text": "1, 2"}, {"label": "Б", "text": "3, 4"}]
+    digit_opts = [{"label": "А", "text": "1, 2"}, {"label": "Б", "text": "1, 6"}]
     assert alt_problem("Части обозначены цифрами 1–6", digit_opts, []) is None
