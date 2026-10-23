@@ -40,6 +40,17 @@ def start(tmp_path, numbers, answers, keys=None, variant="1"):
     return c, model, task_ids(tmp_path)
 
 
+def seed_model_answer(tmp_path, tid, answer):
+    """The model does not run for keyed tasks; a stored answer next to a key is what a later
+    recheck (T06) can produce: seed it to test the discrepancy handling."""
+    import sqlite3
+
+    raw = sqlite3.connect(str(tmp_path / "olymp.db"), isolation_level=None)
+    value = json.dumps({"answer": answer, "value": answer, "explanation": "", "unverified": True})
+    raw.execute("UPDATE task_item SET model_answer = ? WHERE id = ?", (value, tid))
+    raw.close()
+
+
 def post(c, url, **body):
     r = c.post(url, headers=PARENT, json=body)
     assert r.status_code == 200, (url, r.text)
@@ -179,6 +190,7 @@ def test_ac19(tmp_path):
         for tid in (keep, mine):
             card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
             assert card["kind"] == "confirm" and card["model_answer"] is None
+            seed_model_answer(tmp_path, tid, "Г")  # a model answer next to the key
             post(c, f"/parent/tasks/{tid}/confirm")
             card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
             assert card["kind"] == "discrepancy"
@@ -426,6 +438,7 @@ def test_confirm_returns_the_card_that_still_needs_the_parent(tmp_path):
     )
     with c:
         c.get("/parent/review/queue", headers=PARENT)
+        seed_model_answer(tmp2, b, "Г")
         r = post(c, f"/parent/tasks/{a}/confirm", answer="А")
         assert r["next"]["task_id"] == b and r["counter"] == "2 из 3"
         r = post(c, f"/parent/tasks/{b}/confirm")  # key Б, model Г
@@ -438,18 +451,6 @@ def test_confirm_returns_the_card_that_still_needs_the_parent(tmp_path):
         # skipping a card does move on
         r = post(c, f"/parent/tasks/{third}/skip")
         assert r["next"] is None or r["next"]["task_id"] != third
-
-
-def test_resolve_keeps_the_task_on_screen_when_the_new_model_answer_reopens_the_conflict(tmp_path):
-    c, _model, (tid,) = start(tmp_path, [1], {"1": "Г"}, keys={"1": "Б"})
-    with c:
-        c.get("/parent/review/queue", headers=PARENT)
-        r = post(c, f"/parent/tasks/{tid}/confirm")
-        assert r["next"]["kind"] == "discrepancy"  # key Б, model Г
-        c.app.state.model.answer = answer_by_number({"1": "Д"})  # the model changes its mind
-        r = post(c, f"/parent/tasks/{tid}/resolve", choice="mine", answer="А")
-        assert r["next"]["task_id"] == tid and r["next"]["kind"] == "discrepancy"
-        assert r["next"]["key"] == "А" and r["next"]["model_answer"] == "Д"
 
 
 def test_a_late_failure_of_an_old_run_does_not_touch_the_current_run(tmp_path):
@@ -469,3 +470,30 @@ def test_a_late_failure_of_an_old_run_does_not_touch_the_current_run(tmp_path):
     )
     fail_material(conn, 1, "run-b", "сбой текущего")
     assert conn.execute("SELECT import_status FROM material").fetchone()[0] == "failed"
+
+
+def test_the_model_runs_only_for_tasks_without_a_key(tmp_path):
+    answers = {"1": "Б", "2": "В", "3": "А"}
+    c, model, (cand, typed, bare) = start(tmp_path, [1, 2, 3], answers, keys={"1": "Б"})
+    with c:
+        post(c, f"/parent/tasks/{typed}/key", answer="В")
+        from app.ingest.model_answer import compute_model_answer
+        from app.ingest.store import open_db
+
+        conn = open_db(tmp_path / "olymp.db")
+        # a draft whose key is only an uploaded candidate does not get a model call either
+        assert compute_model_answer(c.app.state.ctx, conn, cand) is False
+        conn.close()
+        assert model.calls_of("task_answer") == []
+        post(c, f"/parent/tasks/{cand}/confirm")  # key = uploaded candidate
+        post(c, f"/parent/tasks/{typed}/confirm")  # key = parent's own
+        assert model.calls_of("task_answer") == []
+        assert row(tmp_path, cand)["model_answer"] is None
+        assert child_ids(c) == [cand, typed]  # published by their keys
+        # no "model missing" card for keyed tasks
+        assert c.get("/parent/review/queue", headers=PARENT).json()["cards"][0]["task_id"] == bare
+        assert c.post(f"/parent/tasks/{cand}/retry-model", headers=PARENT).status_code == 409
+
+        post(c, f"/parent/tasks/{bare}/confirm")  # no key: exactly one call
+        assert len(model.calls_of("task_answer")) == 1
+        assert row(tmp_path, bare)["model_answer"] is not None

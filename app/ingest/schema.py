@@ -47,6 +47,18 @@ def _options(kind: str, value, where: str):
     return _option_list(value, where, 2)
 
 
+def _label(raw, where: str, name: str, limit: int) -> str | None:
+    """Необязательная короткая метка (раздел, вариант, этап): одна строка, не длиннее limit."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        _fail(where, f"{name} должен быть строкой")
+    text = " ".join(raw.split())
+    if len(text) > limit:
+        _fail(where, f"{name} длиннее {limit} знаков")
+    return text or None
+
+
 def check_options(kind: str, value):
     """Варианты, введённые родителем: те же правила, что и для ответа модели."""
     return _options(kind, value, "варианты")
@@ -94,6 +106,9 @@ def validate_tasks(payload, pages: set[int]) -> list[dict]:
                 "refers_to_figure": bool(raw.get("refers_to_figure", False)),
                 "points": points,
                 "topic": raw.get("topic") if isinstance(raw.get("topic"), str) else None,
+                "section": _label(raw.get("section"), where, "раздел", 120),
+                "variant": _label(raw.get("variant"), where, "вариант", 20),
+                "stage": _label(raw.get("stage"), where, "этап", 60),
             }
         )
     return out

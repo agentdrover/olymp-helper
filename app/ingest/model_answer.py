@@ -3,6 +3,7 @@
 import json
 
 from app.ingest.answers import display, normalize_answer
+from app.ingest.keys import candidate
 from app.ingest.prompt import ANSWER_SCHEMA, build_task_request
 from app.ingest.store import figure_of, get_task, save_snapshot
 
@@ -15,6 +16,8 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
     task = get_task(conn, task_id)
     if task is None or figure_of(task) is not None or task["type"] == "open":
         return False
+    if task["answer_key"] is not None or candidate(conn, task) is not None:
+        return False  # ключ (в том числе загруженный) есть: ответ модели не нужен
     system, messages = build_task_request(task)
     result = ctx.model.complete(system, messages, ANSWER_SCHEMA)
     payload = getattr(result, "json", None)

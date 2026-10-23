@@ -38,10 +38,11 @@ def _check(cancel: threading.Event):
 
 def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
     """Задания из всех порций; повтор номера в соседних порциях отбрасывается."""
-    seen: dict[str, dict] = {}
+    seen: dict[tuple, dict] = {}
+    current = None  # раздел, действующий к концу предыдущей порции
     for chunk in chunk_pages(pages):
         _check(cancel)
-        message = build_chunk_message(chunk)
+        message = build_chunk_message(chunk, current)
         result = ctx.model.complete(
             SYSTEM_PROMPT, [{"role": "user", "content": message}], TASKS_SCHEMA
         )
@@ -53,7 +54,12 @@ def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
         except InvalidStructure as exc:
             raise ImportFailure(str(exc)) from exc
         for task in parsed:
-            seen.setdefault(task["number"], task)
+            if task["section"]:
+                current = task["section"]
+            else:
+                task["section"] = current  # продолжение раздела: назван раньше
+            # номера повторяются по разделам: ключ - (раздел, номер)
+            seen.setdefault((task["section"], task["number"]), task)
     return list(seen.values())
 
 
@@ -82,6 +88,16 @@ def _figure_record(doc, material_id: int, task: dict) -> dict:
     }
 
 
+_VARIANT_IN_SECTION = re.compile(r"вариант\s*№?\s*(\d+)", re.IGNORECASE)
+
+
+def _task_variant(task: dict, material) -> str | None:
+    if task["variant"]:
+        return task["variant"]
+    found = _VARIANT_IN_SECTION.search(task["section"] or "")
+    return found.group(1) if found else material["variant"]
+
+
 def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
     doc = pymupdf.open("pdf", pdf)
     try:
@@ -92,13 +108,13 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
                 figure = _figure_record(doc, material["id"], task)
             cur = conn.execute(
                 "INSERT INTO task_item (material_id, page_from, page_to, variant, source_number, "
-                "type, text, options, points, topic, import_status, figure, unsupported_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "type, text, options, points, topic, import_status, figure, unsupported_reason, "
+                "section, stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     material["id"],
                     min(task["pages"]),
                     max(task["pages"]),
-                    material["variant"],
+                    _task_variant(task, material),
                     task["number"],
                     task["type"],
                     task["text"],
@@ -110,6 +126,8 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
                     "unsupported" if reason else "draft",
                     None if figure is None else json.dumps(figure, ensure_ascii=False),
                     reason,
+                    task["section"],
+                    task["stage"] or material["stage"],
                 ),
             )
             save_snapshot(conn, cur.lastrowid)

@@ -15,7 +15,9 @@ SYSTEM_PROMPT = (
     "Не решай задания и не называй правильные ответы. "
     "Верни только JSON по заданной схеме: для каждого задания номер, тип (single, multiple, "
     "match, open), условие, варианты ответа, номера страниц и признак refers_to_figure, если "
-    "условие ссылается на рисунок, схему или таблицу."
+    "условие ссылается на рисунок, схему или таблицу. Номера заданий повторяются в разных "
+    "разделах (вариантах, этапах): для каждого задания укажи section - заголовок раздела, "
+    "например «Вариант 1, заключительный этап», а также variant и stage, если они названы."
 )
 
 ANSWER_SYSTEM_PROMPT = (
@@ -44,6 +46,9 @@ TASKS_SCHEMA = {
                     "refers_to_figure": {"type": "boolean"},
                     "points": {"type": "number"},
                     "topic": {"type": "string"},
+                    "section": {"type": "string"},
+                    "variant": {"type": "string"},
+                    "stage": {"type": "string"},
                 },
             },
         }
@@ -69,11 +74,15 @@ def neutralize(text: str) -> str:
     return _TAGS.sub(lambda m: "‹" + m.group(1) + m.group(2), text)
 
 
-def build_chunk_message(pages: list[tuple[int, str]]) -> str:
+def build_chunk_message(pages: list[tuple[int, str]], section: str | None = None) -> str:
+    carried = (
+        f"Раздел на начало порции: {' '.join(neutralize(section).split())}\n" if section else ""
+    )
     body = "\n".join(f"[[стр. {n}]]\n{neutralize(t)}" for n, t in pages)
     first, last = pages[0][0], pages[-1][0]
     return (
         "Ниже блок pdf_data с текстом страниц сборника. Выдели из него задания.\n"
+        f"{carried}"
         f'<pdf_data pages="{first}-{last}">\n{body}\n</pdf_data>'
     )
 

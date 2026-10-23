@@ -219,6 +219,8 @@ def retry_model(ctx, conn, task_id: int) -> bool:
             "затем повторяйте запрос к модели.",
             409,
         )
+    if key_info(conn, task)[0] is not None:
+        raise Refusal("У задания есть ключ: ответ модели не нужен.", 409)
     if task["model_answer"] is not None:
         raise Refusal(
             "Ответ модели уже получен. Чтобы пересчитать, исправьте задание: это новая ревизия.",
@@ -258,7 +260,7 @@ def build_card(ctx, conn, task) -> dict | None:
                 "Нужен рисунок: подтвердите найденный или поправьте рамку и alt, либо впишите "
                 "самодостаточное условие."
             )
-    elif status == "checked" and figure is None and task["model_answer"] is None:
+    elif status == "checked" and figure is None and key is None and task["model_answer"] is None:
         kind, hint = "model_missing", "Ответ модели не получен. Повторите запрос."
     elif key is None and (figure is not None or status == "draft"):
         kind = "no_key"
@@ -302,7 +304,7 @@ def build_card(ctx, conn, task) -> dict | None:
         "key": None if key is None else display(key),
         "key_source": source,
         "model_answer": None if model is None else display(model),
-        "model_explanation": json.loads(task["model_answer"])["explanation"]
+        "model_explanation": json.loads(task["model_answer"]).get("explanation")
         if task["model_answer"]
         else None,
         "model_agrees": agrees,

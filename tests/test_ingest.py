@@ -373,3 +373,62 @@ def test_a_stale_worker_cannot_overwrite_a_newer_run(tmp_path):
             assert [r[0] for r in rows] == ["Условие запуска B"]
             mat = db(tmp_path).execute("SELECT import_status, run_id FROM material").fetchone()
             assert (mat[0], mat[1]) == ("done", run_b)
+
+
+def test_the_same_numbers_in_two_sections_are_all_kept_and_keys_bind_per_section(tmp_path):
+    import sqlite3
+
+    one = "Вариант 1, заключительный этап"
+    two = "Вариант 2, заключительный этап"
+    tasks = [
+        make_task("1.1", "Вопрос первого варианта", section=one),
+        make_task("1.2", "Второй вопрос первого варианта", section=one),
+        make_task("1.1", "Вопрос второго варианта", section=two, stage="заключительный"),
+    ]
+    model = StubModel(split=reply(*tasks))
+    with TestClient(build_app(tmp_path, model)) as c:
+        # the material itself carries no variant: it is per task now
+        upload(c, text_pdf([["1.1 вопрос", "1.2 вопрос", "1.1 вопрос"]]), variant="", stage="")
+        raw = sqlite3.connect(str(tmp_path / "olymp.db"))
+        rows = raw.execute(
+            "SELECT source_number, section, variant, stage FROM task_item ORDER BY id"
+        ).fetchall()
+        assert rows == [
+            ("1.1", one, "1", None),
+            ("1.2", one, "1", None),
+            ("1.1", two, "2", "заключительный"),
+        ]
+        ids = task_ids(tmp_path)
+
+        # the key of variant 2 (dotted numbers) binds to the variant-2 task only
+        upload(c, key_pdf({"1.1": "Б"}), kind="key", variant="2", stage="заключительный")
+        cands = [c.get(f"/parent/tasks/{i}", headers=PARENT).json()["key_candidate"] for i in ids]
+        assert cands[0] is None and cands[1] is None
+        assert cands[2]["answer"] == "Б"
+        # a newer key of variant 2 but another stage does not bind either
+        upload(c, key_pdf({"1.1": "Г"}), kind="key", variant="2", stage="отборочный", name="k3.pdf")
+        cand = c.get(f"/parent/tasks/{ids[2]}", headers=PARENT).json()["key_candidate"]
+        assert cand["answer"] == "Б"
+
+
+def test_a_repeated_task_in_two_chunks_of_one_section_is_stored_once_other_sections_kept(tmp_path):
+    first, second = "Вариант 1", "Вариант 2"
+
+    def split(content):
+        if "[[стр. 2]]" not in content:
+            return reply(make_task(1, pages=[1], section=first))
+        return reply(
+            make_task(1, pages=[2]),  # continuation: no section named, inherits "Вариант 1"
+            make_task(1, "Задание второго варианта", pages=[2], section=second),
+        )
+
+    model = StubModel(split=split)
+    with TestClient(build_app(tmp_path, model)) as c:
+        long = "а" * 7000
+        upload(c, text_pdf([["1. " + long], ["1. " + long]]))
+        calls = model.calls_of("tasks_split")
+        assert len(calls) == 2
+        # the section in force at the start of a chunk is handed to the next call
+        assert "Раздел на начало порции: Вариант 1" in calls[1].messages[-1]["content"]
+        sections = [r["section"] for r in [row(tmp_path, i) for i in task_ids(tmp_path)]]
+        assert sections == [first, second]

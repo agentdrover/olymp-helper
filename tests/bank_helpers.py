@@ -98,9 +98,17 @@ def figure_pdf(kind: str, task_y=400, labels_size=None, text=True) -> bytes:
 
 
 def make_task(
-    number, text="Что изучает цитология?", type="single", pages=(1,), figure=False, options=None
+    number,
+    text="Что изучает цитология?",
+    type="single",
+    pages=(1,),
+    figure=False,
+    options=None,
+    section=None,
+    variant=None,
+    stage=None,
 ):
-    return {
+    task = {
         "number": str(number),
         "type": type,
         "text": text,
@@ -108,6 +116,10 @@ def make_task(
         "pages": list(pages),
         "refers_to_figure": figure,
     }
+    for name, value in (("section", section), ("variant", variant), ("stage", stage)):
+        if value is not None:
+            task[name] = value
+    return task
 
 
 def reply(*tasks) -> dict:
