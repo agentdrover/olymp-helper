@@ -23,7 +23,10 @@ for pair in "claude:CLAUDE_CODE_OAUTH_TOKEN" "cursor:CURSOR_API_KEY"; do
     channel="${pair%%:*}"
     token_var="${pair##*:}"
     name="olymp-exec-${channel}"
+    # Лимиты IPC нулевые: объект IPC создать нельзя, значит никакое состояние IPC не переживёт запуск.
     docker run -d --init --ipc none --name "$name" --read-only \
+        --sysctl "kernel.msgmni=0" --sysctl "kernel.sem=0 0 0 0" --sysctl "kernel.shmmni=0" \
+        --sysctl "kernel.shm_rmid_forced=1" --sysctl "fs.mqueue.queues_max=0" \
         --tmpfs /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711 \
         --cap-drop ALL --cap-add SETUID --cap-add SETGID --pids-limit 256 \
         -e "EXECUTOR_CHANNEL=${channel}" \

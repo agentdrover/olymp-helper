@@ -97,15 +97,16 @@ def server_mode() -> None:
 
 
 IPC_CREATE = """
-import ctypes, json, struct, sys
+import ctypes, json, struct
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 C = 0o1000
 q = libc.msgget(0x4F4C0001, C | 0o666)
 rs = [q, libc.msgsnd(q, struct.pack("l8s", 1, b"leakleak"), 8, 0),
       libc.shmget(0x4F4C0002, 4096, C | 0o666), libc.semget(0x4F4C0003, 1, C | 0o666),
       libc.mq_open(b"/olymp-leak", 0o102, 0o666, None)]
-ok = all(r != -1 for r in rs)
-print(json.dumps({"is_error": not ok, "result": "created" if ok else "failed %s" % rs}))
+blocked = all(r == -1 for r in rs)
+print(json.dumps({"is_error": False,
+                  "result": "blocked" if blocked else "created %s" % rs}))
 """
 
 IPC_PROBE = """
@@ -244,8 +245,8 @@ def live_checks(channel):
         ",".join(faults),
     )
 
-    # Состояние IPC не переживает запуск: запуск 1 создаёт очередь и сегмент SysV, семафор и
-    # очередь POSIX с фиксированными ключами и именем; запуск 2 пытается их открыть (ревью #2013,
+    # Состояние IPC не переживает запуск: запуск 1 пытается создать очередь и сегмент SysV, семафор и
+    # очередь POSIX с фиксированными ключами и именем (нулевые лимиты IPC не дают); запуск 2 пытается их открыть (ревью #2013,
     # круг 5). Оба прогона идут обычным путём сервера (as_cli, сброс и проверка после запуска).
     faults = []
     res1 = run_cli(
@@ -253,7 +254,7 @@ def live_checks(channel):
         spawn=fake_cli("python3 -c " + shlex.quote(IPC_CREATE)),
         workroot="/work", launcher=launcher, on_fault=faults.append, sweeper=sweeper,
     )  # fmt: skip
-    check("запуск 1 создал объекты IPC", res1.text == "created", str(res1.error_kind))
+    check("запуск 1 не смог создать ни один объект IPC", res1.text == "blocked", str(res1.text))
     res2 = run_cli(
         channel, "m", "s", payload["messages"], None, env=dict(os.environ),
         spawn=fake_cli("python3 -c " + shlex.quote(IPC_PROBE)),
@@ -414,6 +415,12 @@ def cli_mode() -> None:
     writable = writable_outside_run_dir()
     check("CLI не пишет нигде вне каталога запуска", not writable, ", ".join(writable[:20]))
     check("/dev/shm нет", not os.path.isdir("/dev/shm") or cannot_write("/dev/shm"))
+    # Объекты IPC невозможны: каждый вид создать от имени CLI не удаётся (нулевые лимиты).
+    code = IPC_CREATE.replace("print(", "import sys; sys.exit(0 if blocked else 1)\nprint(", 1)
+    res = subprocess.run(
+        [sys.executable, "-c", code], check=False, capture_output=True, text=True, timeout=30
+    )
+    check("exec-cli не создаёт msg/shm/sem/mq", res.returncode == 0, res.stdout.strip()[:200])
     try:
         os.kill(1, 0)
         can_signal = True

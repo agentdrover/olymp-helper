@@ -22,6 +22,14 @@ services:
     # CLI негде оставить данные между запусками (ревью #2013, круг 4). Очереди POSIX и объекты SysV
     # IPC остаются в пространстве имён: их убирает и проверяет reset после каждого запуска (круг 5).
     ipc: none
+    # Лимиты пространства имён IPC: с нулевыми лимитами объект IPC создать нельзя, значит никакое
+    # состояние IPC не может пережить запуск (ревью #2013, круг 6). reset и проверка - страховка.
+    sysctls:
+      kernel.msgmni: "0"
+      kernel.sem: "0 0 0 0"
+      kernel.shmmni: "0"
+      kernel.shm_rmid_forced: "1"
+      fs.mqueue.queues_max: "0"
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
     cap_drop:
@@ -54,6 +62,14 @@ services:
     # CLI негде оставить данные между запусками (ревью #2013, круг 4). Очереди POSIX и объекты SysV
     # IPC остаются в пространстве имён: их убирает и проверяет reset после каждого запуска (круг 5).
     ipc: none
+    # Лимиты пространства имён IPC: с нулевыми лимитами объект IPC создать нельзя, значит никакое
+    # состояние IPC не может пережить запуск (ревью #2013, круг 6). reset и проверка - страховка.
+    sysctls:
+      kernel.msgmni: "0"
+      kernel.sem: "0 0 0 0"
+      kernel.shmmni: "0"
+      kernel.shm_rmid_forced: "1"
+      fs.mqueue.queues_max: "0"
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
     cap_drop:

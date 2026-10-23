@@ -610,13 +610,51 @@ def test_reset_goes_through_as_cli_with_a_clean_environment(tmp_path, monkeypatc
     assert "RESET_SCRIPT" in inspect.getsource(runner.make_sweeper)
 
 
-def test_ipcs_output_is_parsed_by_owner():
-    sample = (
-        "\n------ Shared Memory Segments --------\n"
-        "key        shmid      owner      perms      bytes      nattch     status\n"
-        "0x4f4c0002 7          exec-cli   666        4096       0\n"
-        "0x00000000 9          exec-srv   600        4096       0\n"
+MSG_HEADER = (
+    "       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  cgid"
+    "      stime      rtime      ctime\n"
+)
+
+
+def test_sysvipc_files_are_read_whoever_owns_the_object(tmp_path):
+    """Объект, у которого creator - пользователь CLI, а uid и mode поменяли (IPC_SET), виден."""
+    (tmp_path / "msg").write_text(
+        MSG_HEADER
+        + "1329397761      0     0          0          0     0     0     0     0 10002 10002 0 0 0\n"
     )
-    assert runner.parse_ipcs(sample, uid=10002, user="exec-cli") == ["0x4f4c0002 7 exec-cli"]
-    assert runner.parse_ipcs(sample, uid=10001, user="exec-srv") == ["0x00000000 9 exec-srv"]
-    assert runner.parse_ipcs("", uid=1, user="x") == []
+    (tmp_path / "shm").write_text(
+        "       key      shmid perms size cpid lpid nattch uid gid cuid cgid\n"
+    )
+    (tmp_path / "sem").write_text(
+        "       key      semid perms nsems uid gid cuid cgid otime ctime\n"
+    )
+    found = runner.sysv_objects(10002, "exec-cli", root=str(tmp_path))
+    assert len(found) == 1 and found[0].startswith("msg ")
+    assert "10002" in found[0]  # в отчёте видно cuid
+    assert runner.parse_sysvipc(MSG_HEADER, "msg") == []
+    for name in ("msg", "shm", "sem"):
+        (tmp_path / name).write_text("key id perms\n")
+    assert runner.sysv_objects(10002, "exec-cli", root=str(tmp_path)) == []
+    (tmp_path / "sem").unlink()
+    with pytest.raises(OSError):  # не смогли прочитать - нельзя считать чистым
+        runner.sysv_objects(10002, "exec-cli", root=str(tmp_path))
+
+
+SYSCTLS = {
+    "kernel.msgmni": "0",
+    "kernel.sem": "0 0 0 0",
+    "kernel.shmmni": "0",
+    "kernel.shm_rmid_forced": "1",
+    "fs.mqueue.queues_max": "0",
+}
+
+
+def test_zero_ipc_limits_are_pinned_in_compose_and_sandbox():
+    """Слабый тест, но он закрепляет конфигурацию: объекты IPC невозможны по построению."""
+    root = Path(__file__).parent.parent / "deploy" / "executor"
+    compose = (root / "compose.yaml").read_text(encoding="utf-8")
+    sandbox = (root / "sandbox.sh").read_text(encoding="utf-8")
+    assert compose.count("    sysctls:\n") == 2
+    for name, value in SYSCTLS.items():
+        assert compose.count(f'      {name}: "{value}"\n') == 2, name
+        assert sandbox.count(f'--sysctl "{name}={value}"') == 1, name

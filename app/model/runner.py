@@ -255,23 +255,22 @@ def cli_processes(uid: int) -> list[int]:
     return found
 
 
-def parse_ipcs(output: str, uid: int, user: str) -> list[str]:
-    """Объекты SysV IPC, принадлежащие пользователю CLI, по выводу `ipcs`."""
-    found = []
-    for line in output.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0].startswith("0x") and parts[2] in (user, str(uid)):
-            found.append(" ".join(parts[:3]))
-    return found
+def parse_sysvipc(text: str, kind: str) -> list[str]:
+    """Объекты из /proc/sysvipc/{msg,shm,sem}: все строки после заголовка, чей бы ни был объект.
+
+    Файл перечисляет каждый объект с uid И cuid независимо от прав доступа к нему (объект с
+    mode 000 и uid 0, который создал пользователь CLI, виден так же). Нулевые лимиты IPC
+    (compose: sysctls) делают объекты невозможными, поэтому любая строка - непорядок.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    return [f"{kind} {' '.join(line.split())}" for line in lines[1:]]
 
 
-def sysv_objects(uid: int, user: str) -> list[str]:
+def sysv_objects(uid: int, user: str, root: str = "/proc/sysvipc") -> list[str]:
     found = []
-    for flag in ("-m", "-q", "-s"):
-        res = plain_spawn(["ipcs", flag], input="", env=minimal_env(), cwd=None, timeout=10)
-        if res.returncode != 0:
-            raise OSError("ipcs failed")  # не смогли проверить - значит нельзя считать чистым
-        found += parse_ipcs(res.stdout, uid, user)
+    for kind in ("msg", "shm", "sem"):
+        with open(os.path.join(root, kind), encoding="utf-8") as fh:  # нет файла - не чисто
+            found += parse_sysvipc(fh.read(), kind)
     return found
 
 
