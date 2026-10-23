@@ -4,7 +4,7 @@ import re
 
 import pymupdf
 
-from app.ingest.filters import IMAGE_CODECS, FilterError, canonical, decoded_chunks
+from app.ingest.filters import IMAGE_CODECS, FilterError, OverBudget, canonical, decoded_chunks
 
 MB = 1024 * 1024
 MAX_PDF_BYTES = 50 * MB
@@ -56,11 +56,13 @@ def _stream_size(doc, xref: int, budget: int) -> int:
 
 
 def _count(raw: bytes, filters: list[str], budget: int) -> int:
+    """Размер результата цепочки; бюджет проверяется на каждом этапе, превышение = budget + 1."""
     total = 0
-    for chunk in decoded_chunks(raw, filters):
-        total += len(chunk)
-        if total > budget:
-            break
+    try:
+        for chunk in decoded_chunks(raw, filters, budget):
+            total += len(chunk)
+    except OverBudget:
+        return budget + 1
     return total
 
 

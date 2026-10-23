@@ -237,8 +237,17 @@ class FigureBody(BaseModel):
     teacher_note_ack: bool = False
 
 
-def _advance(request: Request, conn, task_id: int) -> dict:
-    card, counter = review.next_card(ctx_of(request), conn, task_id)
+def _advance(request: Request, conn, task_id: int, *, stay_if_open: bool = False) -> dict:
+    """Следующая карточка. После подтверждения задание, которому ещё нужен родитель
+    (расхождение, нет ответа модели, нет ключа), остаётся на экране той же карточкой."""
+    ctx = ctx_of(request)
+    if stay_if_open:
+        card = review.card_for(ctx, conn, task_id)
+        if card is not None:
+            order = ctx.feed.order
+            counter = f"{order.index(task_id) + 1} из {len(order)}" if task_id in order else None
+            return {"ok": True, "next": card, "counter": counter}
+    card, counter = review.next_card(ctx, conn, task_id)
     return {"ok": True, "next": card, "counter": counter}
 
 
@@ -294,7 +303,7 @@ def _action(handler):
 @_action
 def task_confirm(task_id: int, request: Request, conn: Db, body: ConfirmBody | None = None):
     review.confirm(ctx_of(request), conn, task_id, (body or ConfirmBody()).answer)
-    return _advance(request, conn, task_id)
+    return _advance(request, conn, task_id, stay_if_open=True)
 
 
 @parent.post("/parent/tasks/{task_id}/skip")
@@ -326,7 +335,7 @@ def task_key(task_id: int, body: KeyBody, conn: Db):
 @_action
 def task_resolve(task_id: int, body: ResolveBody, request: Request, conn: Db):
     review.resolve(ctx_of(request), conn, task_id, body.choice, body.answer)
-    return _advance(request, conn, task_id)
+    return _advance(request, conn, task_id, stay_if_open=True)
 
 
 @parent.post("/parent/tasks/{task_id}/exclude")

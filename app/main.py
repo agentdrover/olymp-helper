@@ -40,7 +40,8 @@ def create_app(
         # Потоки импорта и их таймеры живут только в памяти процесса: после перезапуска
         # queued/running зависли бы навсегда. Повтор возможен для failed.
         conn.execute(
-            "UPDATE material SET import_status = 'failed', import_error = ? "
+            "UPDATE material SET import_status = 'failed', import_error = ?, "
+            "run_id = lower(hex(randomblob(16))) "
             "WHERE import_status IN ('queued', 'running')",
             (INTERRUPTED,),
         )

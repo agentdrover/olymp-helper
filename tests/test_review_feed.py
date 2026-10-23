@@ -346,3 +346,126 @@ def test_a_forged_role_cookie_gets_nothing(tmp_path, monkeypatch, caplog):
             assert r.status_code == 403, (method, path, r.status_code)
         assert c.post("/parent/login", data={"key": TEST_PARENT_KEY}).status_code == 403
     assert "OLYMP_PARENT_KEY" in caplog.text
+
+
+def test_model_answer_and_its_snapshot_are_written_in_one_transaction(tmp_path):
+    import sqlite3
+
+    from app.ingest import model_answer
+    from app.ingest.store import open_db
+
+    c, _model, (tid,) = start(tmp_path, [1], {"1": "Б"})
+    with c:
+        conn = open_db(tmp_path / "olymp.db")
+        conn.execute("UPDATE task_item SET import_status = 'checked' WHERE id = ?", (tid,))
+        real = model_answer.save_snapshot
+        seen = {}
+
+        def hook(conn_, task_id):
+            # Between the UPDATE and the snapshot nobody else may write (no revision can slip in).
+            other = open_db(tmp_path / "olymp.db")
+            other.execute("PRAGMA busy_timeout = 100")
+            try:
+                other.execute(
+                    "UPDATE task_item SET revision = revision + 1 WHERE id = ?", (task_id,)
+                )
+                seen["raced"] = True
+            except sqlite3.OperationalError:
+                seen["raced"] = False
+            finally:
+                other.close()
+            real(conn_, task_id)
+
+        model_answer.save_snapshot = hook
+        try:
+            assert model_answer.compute_model_answer(c.app.state.ctx, conn, tid) is True
+        finally:
+            model_answer.save_snapshot = real
+        assert seen["raced"] is False
+        snap = conn.execute(
+            "SELECT snapshot FROM task_revision WHERE task_item_id = ? AND revision = 1", (tid,)
+        ).fetchone()[0]
+        assert json.loads(snap)["model_answer"]["answer"] == "Б"
+        assert row(tmp_path, tid)["model_answer"] is not None
+        conn.close()
+
+
+def test_retry_needs_the_condition_confirmed_for_the_current_revision(tmp_path):
+    c, _model, (tid,) = start(tmp_path, [1], {"1": None})  # the model never answers
+    with c:
+        r = c.post(f"/parent/tasks/{tid}/retry-model", headers=PARENT)
+        assert r.status_code == 409  # draft: condition not confirmed
+        assert row(tmp_path, tid)["model_answer"] is None
+
+        post(c, f"/parent/tasks/{tid}/confirm")  # checked, model_answer missing
+        c.app.state.model.answer = answer_by_number({"1": "Б"})
+        post(c, f"/parent/tasks/{tid}/edit", text="Другое условие")  # unchecks
+        r = c.post(f"/parent/tasks/{tid}/retry-model", headers=PARENT)
+        assert r.status_code == 409 and row(tmp_path, tid)["model_answer"] is None
+
+        c.app.state.model.answer = None
+        post(c, f"/parent/tasks/{tid}/confirm")  # confirmed again; model still silent
+        c.app.state.model.answer = answer_by_number({"1": "Б"})
+        r = c.post(f"/parent/tasks/{tid}/retry-model", headers=PARENT)
+        assert r.status_code == 200 and row(tmp_path, tid)["model_answer"] is not None
+
+
+def test_confirm_returns_the_card_that_still_needs_the_parent(tmp_path):
+    # a single task whose model stays silent
+    c, _model, (only,) = start(tmp_path, [1], {"1": None})
+    with c:
+        c.get("/parent/review/queue", headers=PARENT)
+        r = post(c, f"/parent/tasks/{only}/confirm")
+        assert r["next"] and r["next"]["task_id"] == only
+        assert r["next"]["kind"] == "model_missing" and r["counter"] == "1 из 1"
+
+    # several: a discrepancy on the second task keeps the feed on it
+    tmp2 = tmp_path / "second"
+    c, _model, (a, b, third) = start(
+        tmp2, [1, 2, 3], {"1": "А", "2": "Г", "3": None}, keys={"2": "Б"}
+    )
+    with c:
+        c.get("/parent/review/queue", headers=PARENT)
+        r = post(c, f"/parent/tasks/{a}/confirm", answer="А")
+        assert r["next"]["task_id"] == b and r["counter"] == "2 из 3"
+        r = post(c, f"/parent/tasks/{b}/confirm")  # key Б, model Г
+        assert r["next"]["task_id"] == b and r["next"]["kind"] == "discrepancy"
+        assert r["counter"] == "2 из 3"
+        r = post(c, f"/parent/tasks/{b}/resolve", choice="key")
+        assert r["next"]["task_id"] == third
+        r = post(c, f"/parent/tasks/{third}/confirm")  # model silent for the third
+        assert r["next"]["task_id"] == third and r["next"]["kind"] == "model_missing"
+        # skipping a card does move on
+        r = post(c, f"/parent/tasks/{third}/skip")
+        assert r["next"] is None or r["next"]["task_id"] != third
+
+
+def test_resolve_keeps_the_task_on_screen_when_the_new_model_answer_reopens_the_conflict(tmp_path):
+    c, _model, (tid,) = start(tmp_path, [1], {"1": "Г"}, keys={"1": "Б"})
+    with c:
+        c.get("/parent/review/queue", headers=PARENT)
+        r = post(c, f"/parent/tasks/{tid}/confirm")
+        assert r["next"]["kind"] == "discrepancy"  # key Б, model Г
+        c.app.state.model.answer = answer_by_number({"1": "Д"})  # the model changes its mind
+        r = post(c, f"/parent/tasks/{tid}/resolve", choice="mine", answer="А")
+        assert r["next"]["task_id"] == tid and r["next"]["kind"] == "discrepancy"
+        assert r["next"]["key"] == "А" and r["next"]["model_answer"] == "Д"
+
+
+def test_a_late_failure_of_an_old_run_does_not_touch_the_current_run(tmp_path):
+    from app.db import connect, migrate
+    from app.ingest.importer import fail_material
+
+    conn = connect(tmp_path / "olymp.db")
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO material (file, sha256, kind, import_status, run_id) "
+        "VALUES ('f', 'h', 'tasks', 'running', 'run-b')"
+    )
+    fail_material(conn, 1, "run-a", "поздний сбой старого запуска")
+    assert conn.execute("SELECT import_status, import_error FROM material").fetchone() == (
+        "running",
+        None,
+    )
+    fail_material(conn, 1, "run-b", "сбой текущего")
+    assert conn.execute("SELECT import_status FROM material").fetchone()[0] == "failed"

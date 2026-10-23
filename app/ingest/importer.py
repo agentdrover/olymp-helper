@@ -118,14 +118,14 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
     return len(tasks)
 
 
-def _finish(conn, material_id: int, pages_total: int, write) -> bool:
-    """Записать результат и status=done одной транзакцией, если импорт ещё running."""
+def _finish(conn, material_id: int, run_id: str, pages_total: int, write) -> bool:
+    """Записать результат и status=done одной транзакцией, если запуск run_id ещё running."""
     conn.execute("BEGIN IMMEDIATE")
     try:
-        status = conn.execute(
-            "SELECT import_status FROM material WHERE id = ?", (material_id,)
-        ).fetchone()[0]
-        if status != "running":
+        owner = conn.execute(
+            "SELECT import_status, run_id FROM material WHERE id = ?", (material_id,)
+        ).fetchone()
+        if (owner[0], owner[1]) != ("running", run_id):
             conn.execute("ROLLBACK")
             return False
         write()
@@ -142,23 +142,29 @@ def _finish(conn, material_id: int, pages_total: int, write) -> bool:
         raise
 
 
-def fail_material(conn, material_id: int, message: str) -> None:
+def fail_material(conn, material_id: int, run_id: str, message: str) -> None:
+    """Пометить failed только свой запуск: чужой (новый) run_id не трогается."""
     conn.execute(
         "UPDATE material SET import_status = 'failed', import_error = ? "
-        "WHERE id = ? AND import_status IN ('queued', 'running')",
-        (message, material_id),
+        "WHERE id = ? AND run_id = ? AND import_status IN ('queued', 'running')",
+        (message, material_id, run_id),
     )
 
 
-def run_import(ctx, material_id: int, cancel: threading.Event) -> None:
+def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> None:
     conn = open_db(ctx.db_path)
     try:
         conn.execute(
-            "UPDATE material SET import_status = 'running' WHERE id = ? AND import_status = 'queued'",
-            (material_id,),
+            "UPDATE material SET import_status = 'running' "
+            "WHERE id = ? AND run_id = ? AND import_status = 'queued'",
+            (material_id, run_id),
         )
         material = conn.execute("SELECT * FROM material WHERE id = ?", (material_id,)).fetchone()
-        if material is None or material["import_status"] != "running":
+        if (
+            material is None
+            or material["import_status"] != "running"
+            or material["run_id"] != run_id
+        ):
             return
         try:
             pdf = ctx.material_path(material["file"]).read_bytes()
@@ -168,7 +174,11 @@ def run_import(ctx, material_id: int, cancel: threading.Event) -> None:
             _check(cancel)
             if material["kind"] == "textbook":
                 _finish(
-                    conn, material_id, len(pages), lambda: index_pages(conn, material_id, pages)
+                    conn,
+                    material_id,
+                    run_id,
+                    len(pages),
+                    lambda: index_pages(conn, material_id, pages),
                 )
             elif material["kind"] == "key":
                 entries = parse_key_text(pages)
@@ -182,22 +192,26 @@ def run_import(ctx, material_id: int, cancel: threading.Event) -> None:
                         [(material_id, n, a) for n, a in entries.items()],
                     )
 
-                _finish(conn, material_id, len(pages), write_key)
+                _finish(conn, material_id, run_id, len(pages), write_key)
             else:
                 tasks = split_tasks(ctx, pages, cancel)
                 if not tasks:
                     raise ImportFailure("Модель не нашла в файле ни одного задания.")
                 _finish(
-                    conn, material_id, len(pages), lambda: _write_tasks(conn, material, tasks, pdf)
+                    conn,
+                    material_id,
+                    run_id,
+                    len(pages),
+                    lambda: _write_tasks(conn, material, tasks, pdf),
                 )
         except ImportAborted:
             log.info("import %s aborted", material_id)
         except ImportFailure as exc:
-            fail_material(conn, material_id, str(exc))
+            fail_material(conn, material_id, run_id, str(exc))
         except Exception:
             log.exception("import %s failed", material_id)
             fail_material(
-                conn, material_id, "Не удалось обработать PDF. Проверьте файл и повторите."
+                conn, material_id, run_id, "Не удалось обработать PDF. Проверьте файл и повторите."
             )
     finally:
         conn.close()

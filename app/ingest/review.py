@@ -213,6 +213,12 @@ def retry_model(ctx, conn, task_id: int) -> bool:
     task = _task(conn, task_id)
     if figure_of(task) is not None:
         raise Refusal("Для задания с рисунком ответ модели не вычисляется.")
+    if task["import_status"] != "checked":
+        raise Refusal(
+            "Условие этой ревизии ещё не подтверждено: сначала подтвердите его, "
+            "затем повторяйте запрос к модели.",
+            409,
+        )
     if task["model_answer"] is not None:
         raise Refusal(
             "Ответ модели уже получен. Чтобы пересчитать, исправьте задание: это новая ревизия.",

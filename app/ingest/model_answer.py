@@ -32,15 +32,23 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
         else "high",
         "unverified": True,
     }
-    # Только в пустое поле и только если за время запроса ревизия не изменилась: заполненный
-    # ответ не заменяется (смена эталона - это новая ревизия).
-    cur = conn.execute(
-        "UPDATE task_item SET model_answer = ? WHERE id = ? AND revision = ? "
-        "AND model_answer IS NULL",
-        (json.dumps(record, ensure_ascii=False), task_id, task["revision"]),
-    )
-    if cur.rowcount == 1:
-        save_snapshot(conn, task_id)
+    # Запись ответа и снимок ревизии - одна транзакция: между ними не может появиться новая
+    # ревизия. Пишем только в пустое поле и только если ревизия не изменилась за время запроса;
+    # заполненный ответ не заменяется (смена эталона - новая ревизия).
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        cur = conn.execute(
+            "UPDATE task_item SET model_answer = ? WHERE id = ? AND revision = ? "
+            "AND model_answer IS NULL",
+            (json.dumps(record, ensure_ascii=False), task_id, task["revision"]),
+        )
+        if cur.rowcount == 1:
+            save_snapshot(conn, task_id)
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
     return cur.rowcount == 1
 
 

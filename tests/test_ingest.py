@@ -333,3 +333,36 @@ def test_imports_left_running_by_a_restart_are_failed_and_can_be_retried(tmp_pat
         assert again.json()["duplicate"] is True and again.json()["requeued"] is True
         st = c.get(f"/parent/materials/{mid}", headers=PARENT).json()
         assert st["import_status"] == "done" and st["tasks"] == 1
+
+
+def test_a_stale_worker_cannot_overwrite_a_newer_run(tmp_path):
+    from tests.bank_helpers import BlockingModel
+
+    pdf = text_pdf([["1. задание"]])
+    blocker = BlockingModel()  # run A: hangs, then answers with a task of its own
+    app_a = build_app(tmp_path, blocker, sync_imports=False, import_timeout=600)
+    model_b = StubModel(split=reply(make_task(1, "Условие запуска B")))
+    with TestClient(app_a) as client_a:
+        mid = upload(client_a, pdf).json()["material_id"]
+        assert blocker.entered.wait(5)  # run A is running
+        run_a = db(tmp_path).execute("SELECT run_id FROM material").fetchone()[0]
+        assert run_a
+
+        # the process "restarts": recovery fails run A, the parent retries -> run B
+        with TestClient(build_app(tmp_path, model_b)) as client_b:
+            st = client_b.get(f"/parent/materials/{mid}", headers=PARENT).json()
+            assert st["import_status"] == "failed" and st["import_error"] == "прервано перезапуском"
+            again = upload(client_b, pdf)
+            assert again.json()["requeued"] is True
+            st = client_b.get(f"/parent/materials/{mid}", headers=PARENT).json()
+            assert st["import_status"] == "done" and st["tasks"] == 1
+            run_b = db(tmp_path).execute("SELECT run_id FROM material").fetchone()[0]
+            assert run_b and run_b != run_a
+
+        # A's late finish must change nothing
+        blocker.release.set()
+        app_a.state.imports.wait_idle(5)
+        rows = db(tmp_path).execute("SELECT text FROM task_item").fetchall()
+        assert [r[0] for r in rows] == ["Условие запуска B"]
+        mat = db(tmp_path).execute("SELECT import_status, run_id FROM material").fetchone()
+        assert (mat[0], mat[1]) == ("done", run_b)

@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.ingest import limits
-from app.ingest.filters import FilterError, decoded_chunks
+from app.ingest.filters import FilterError, LzwDecoder, OverBudget, decoded_chunks
 from tests.bank_helpers import (
     PARENT,
     BlockingModel,
@@ -139,7 +139,7 @@ def test_image_codecs_are_bounded_by_their_pixels():
 
 def test_stream_decoders():
     def run(data, *names):
-        return b"".join(decoded_chunks(data, list(names)))
+        return b"".join(decoded_chunks(data, list(names), 10**9))
 
     assert run(b"48 65 6C6c 6F>", "ASCIIHexDecode") == b"Hello"
     assert run(b"4865 6C6C 6F7>", "ASCIIHexDecode") == b"Hello\x70"  # odd digit padded with 0
@@ -155,7 +155,7 @@ def test_stream_decoders():
         run(b"not zlib", "FlateDecode")
 
 
-def _lzw_encode(data: bytes) -> bytes:
+def _lzw_encode(data: bytes, reset: bool = True) -> bytes:
     """PDF LZW encoder (EarlyChange=1) used to check the decoder on long inputs."""
     out, buf, bits = bytearray(), 0, 0
 
@@ -178,11 +178,12 @@ def _lzw_encode(data: bytes) -> bytes:
             current = candidate
             continue
         put(table[current], width)
-        table[candidate] = next_code
-        next_code += 1
-        if next_code + 1 > (1 << width) and width < 12:
-            width += 1
-        if next_code >= 4094:
+        if reset or next_code < 4096:  # a full table is never extended (and never reset)
+            table[candidate] = next_code
+            next_code += 1
+            if next_code + 1 > (1 << width) and width < 12:
+                width += 1
+        if reset and next_code >= 4094:
             put(256, width)
             table = {bytes([i]): i for i in range(256)}
             next_code, width = 258, 9
@@ -198,4 +199,83 @@ def _lzw_encode(data: bytes) -> bytes:
 def test_lzw_decoder_round_trips_long_data_with_width_changes_and_table_resets():
     data = bytes((i * 7 + i // 3) % 251 for i in range(30_000)) + b"abc" * 5000
     encoded = _lzw_encode(data)
-    assert b"".join(decoded_chunks(encoded, ["LZWDecode"])) == data
+    assert b"".join(decoded_chunks(encoded, ["LZWDecode"], 10**9)) == data
+
+
+def test_lzw_dictionary_never_grows_past_4096_entries():
+    state = 12345
+    noise = bytearray()
+    for _ in range(150_000):  # incompressible enough to fill the table, never cleared
+        state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+        noise.append((state >> 16) & 0xFF)
+    data = bytes(noise)
+    decoder = LzwDecoder()
+    out = b"".join(decoder.decode([_lzw_encode(data, reset=False)]))
+    assert out == data
+    assert len(decoder.table) <= 4096
+    # a code that is not defined yet is a decode error, not a silent guess
+    with pytest.raises(FilterError):
+        b"".join(LzwDecoder().decode([b"\x80\x40\x80"]))
+
+
+def _check(data, chain, monkeypatch, limit=1000):
+    monkeypatch.setattr(limits, "MAX_UNPACKED_BYTES", limit)
+    with pytest.raises(limits.UploadRejected) as err:
+        limits.check_pdf(raw_pdf(f"/Filter {chain}", data))
+    return err.value
+
+
+def test_the_budget_holds_at_every_stage_not_only_at_the_end(monkeypatch):
+    # Flate -> ASCIIHex: a 100 KB intermediate of ignorable blanks, a 1-byte final result.
+    blanks = zlib.compress(b" " * 100_000 + b"41>")
+    err = _check(blanks, "[/FlateDecode /ASCIIHexDecode]", monkeypatch)
+    assert err.status == 422 and "200 МБ" in err.message
+    # Flate -> RunLength: the end-of-data marker comes first, the intermediate is large.
+    big = zlib.compress(b"\x80" + b"x" * 100_000)
+    err = _check(big, "[/FlateDecode /RunLengthDecode]", monkeypatch)
+    assert err.status == 422 and "200 МБ" in err.message
+    # the same small intermediate is fine
+    monkeypatch.setattr(limits, "MAX_UNPACKED_BYTES", 1000)
+    ok = zlib.compress(b" " * 100 + b"41>")
+    assert limits.check_pdf(raw_pdf("/Filter [/FlateDecode /ASCIIHexDecode]", ok)) == 1
+    # the stage budget itself, below the PDF layer
+    with pytest.raises(OverBudget):
+        list(decoded_chunks(blanks, ["FlateDecode", "ASCIIHexDecode"], 1000))
+
+
+def test_malformed_run_length_is_rejected(monkeypatch):
+    for bad in (b"\x05ab", b"\x02abc\xfd", b"\x81"):  # short literal, cut repeat
+        with pytest.raises(FilterError):
+            b"".join(decoded_chunks(bad, ["RunLengthDecode"], 10**9))
+        err = _check(bad, "/RunLengthDecode", monkeypatch, limit=10**9)
+        assert err.status == 422
+
+
+def test_decoders_stream_without_holding_their_input_or_output():
+    import tracemalloc
+
+    def peak(raw, chain):
+        tracemalloc.start()
+        tracemalloc.reset_peak()
+        produced = sum(len(c) for c in decoded_chunks(raw, chain, 10**12))
+        _, top = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return produced, top
+
+    # name: (input, chain, peak limit). The limits sit above the streaming peak and below what
+    # holding the input (a85, hex) or the output (run-length, flate) would cost.
+    cases = {
+        "run-length": (b"\x81\x00" * 100_000, ["RunLengthDecode"], 4_500_000),  # 0.2 -> 12.8 MB
+        "flate": (zlib.compress(b"\0" * 16_000_000), ["FlateDecode"], 4_500_000),  # -> 16 MB
+        "a85": (b"z" * 1_200_000, ["ASCII85Decode"], 1_900_000),  # 1.2 MB -> 4.8 MB
+        "hex": (b"00" * 2_600_000 + b">", ["ASCIIHexDecode"], 1_500_000),  # 5 MB -> 2.6 MB
+        "chain": (
+            zlib.compress(b"\x81\x00" * 100_000),
+            ["FlateDecode", "RunLengthDecode"],
+            4_500_000,
+        ),
+    }
+    for name, (raw, chain, limit) in cases.items():
+        produced, top = peak(raw, chain)
+        assert produced >= 2_000_000, name
+        assert top < limit, (name, top)

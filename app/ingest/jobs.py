@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import uuid
 
 from app.ingest.importer import fail_material, run_import
 from app.ingest.limits import IMPORT_TIMEOUT_S
@@ -18,18 +19,29 @@ class ImportJobs:
         self.timeout = timeout
         self._threads: list[threading.Thread] = []
 
+    def _new_run(self, material_id: int) -> str:
+        """Новый запуск получает свой run_id: результат пишет только его владелец."""
+        run_id = uuid.uuid4().hex
+        conn = open_db(self.ctx.db_path)
+        try:
+            conn.execute("UPDATE material SET run_id = ? WHERE id = ?", (run_id, material_id))
+        finally:
+            conn.close()
+        return run_id
+
     def submit(self, material_id: int) -> None:
+        run_id = self._new_run(material_id)
         if self.sync:
-            run_import(self.ctx, material_id, threading.Event())
+            run_import(self.ctx, material_id, threading.Event(), run_id)
             return
         cancel = threading.Event()
         worker = threading.Thread(
             target=run_import,
-            args=(self.ctx, material_id, cancel),
+            args=(self.ctx, material_id, cancel, run_id),
             daemon=True,
             name=f"import-{material_id}",
         )
-        watchdog = threading.Timer(self.timeout, self._expire, args=(material_id, cancel))
+        watchdog = threading.Timer(self.timeout, self._expire, args=(material_id, cancel, run_id))
         watchdog.daemon = True
         self._threads.append(worker)
         worker.start()
@@ -42,11 +54,11 @@ class ImportJobs:
         worker.join()
         watchdog.cancel()
 
-    def _expire(self, material_id: int, cancel: threading.Event) -> None:
+    def _expire(self, material_id: int, cancel: threading.Event, run_id: str) -> None:
         cancel.set()
         conn = open_db(self.ctx.db_path)
         try:
-            fail_material(conn, material_id, TIMEOUT_MESSAGE)
+            fail_material(conn, material_id, run_id, TIMEOUT_MESSAGE)
         finally:
             conn.close()
 
