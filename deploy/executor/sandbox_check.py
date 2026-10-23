@@ -7,6 +7,7 @@
 """
 
 import os
+import pwd
 import subprocess
 import sys
 import tempfile
@@ -90,50 +91,162 @@ def server_mode() -> None:
         "/work noexec,nosuid,nodev", {"noexec", "nosuid", "nodev"} <= flags, ",".join(sorted(flags))
     )
     check("/work с лимитом размера", any(f.startswith("size=") for f in flags))
-    # Следы CLI и права: настоящий переход на UID CLI и уборка его файлов после ответа.
-    from app.model.executor_server import cli_launcher, handle_request
-    from app.model.runner import default_spawn
+    live_checks(channel)
 
-    launcher = cli_launcher(os.environ.get("EXECUTOR_CLI_USER", "exec-cli"))
-    script = (
-        "echo log > cli.log; mkdir d; echo x > d/f; chmod 700 d; "
-        'echo "{\\"is_error\\":false,\\"result\\":\\"uid=$(id -u)\\"}"'
-    )
 
-    def spawn(argv, **kw):
-        if argv[len(launcher)] == "find":  # уборка - как есть, под тем же пользователем
-            return default_spawn(argv, **kw)
-        return default_spawn([*launcher, "sh", "-c", script], **kw)
+def ok_json(text):
+    """Команда shell, печатающая успешный JSON-ответ CLI."""
+    return 'echo "{\\"is_error\\":false,\\"result\\":\\"' + text + '\\"}"'
 
+
+def is_helper(argv, launcher):
+    """Служебные команды сервера (создание и уборка каталогов) идут как есть."""
+    return argv[len(launcher)] == "mkdir" or "rm -rf" in " ".join(argv)
+
+
+def http_status(path, key=None, payload=None):
+    import json
+    import urllib.error
+    import urllib.request
+
+    headers = {"Content-Type": "application/json"}
+    if key is not None:
+        headers["X-Executor-Key"] = key
+    data = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:8099{path}", data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.load(resp)
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.load(exc)
+
+
+def live_checks(channel):
+    """То, что проверяется только в контейнере: UID, живые процессы, ключ, уборка."""
+    from app.model.executor_server import Gate, cli_launcher, handle_request
+    from app.model.runner import cli_processes, make_spawn, make_sweeper, run_cli
+
+    work = Path("/work")
+    user = os.environ.get("EXECUTOR_CLI_USER", "exec-cli")
+    launcher = cli_launcher(user)
+    uid = pwd.getpwnam(user).pw_uid
+    sweeper = make_sweeper(launcher, user)
     payload = {
         "channel": channel,
         "model": "m",
         "system": "s",
         "messages": [{"role": "user", "content": "q"}],
     }
+    # Ключ приложения: без него и с чужим - 401, с верным запрос принят (проверка формы, без CLI).
+    key = os.environ.get("EXECUTOR_SHARED_KEY", "")
+    check("ключ исполнителя задан", len(key) >= 8)
+    check("без ключа 401", http_status("/run", None, payload)[0] == 401)
+    check("с чужим ключом 401", http_status("/run", "wrong-key-wrong", payload)[0] == 401)
+    code, body = http_status("/run", key, {"channel": channel})
+    check("с верным ключом запрос принят", code == 200 and body.get("error_kind") == "bad_request")
+    check("healthz без ключа", http_status("/healthz")[0] == 200)
+
+    # CLI под другим UID; уборка файлов, созданных им (в том числе каталог с правами 700).
+    script = "echo log > cli.log; mkdir d; echo x > d/f; chmod 700 d; " + ok_json("uid=$(id -u)")
+    spawn = make_spawn(launcher)
+
+    def fake_cli(body):
+        def run(argv, **kw):
+            if is_helper(argv, launcher):
+                return spawn(argv, **kw)
+            return spawn([*launcher, "sh", "-c", body], **kw)
+
+        return run
+
+    gate = Gate()
     out = handle_request(
         payload,
         env=dict(os.environ),
-        spawn=spawn,
+        spawn=fake_cli(script),
         workroot="/work",
         only_channel=channel,
         launcher=launcher,
+        gate=gate,
+        sweeper=sweeper,
     )
-    check("CLI запущен под другим UID", out.get("text") == "uid=10002", str(out.get("text")))
-    left = [
-        f"{os.path.join(d, n)} uid={os.lstat(os.path.join(d, n)).st_uid} "
-        f"mode={oct(os.lstat(os.path.join(d, n)).st_mode & 0o7777)}"
-        for d, dirs, files in os.walk("/work")
-        for n in dirs + files
-    ]
-    check("/work пуст после ответа", not left, "; ".join(left))
+    check("CLI запущен под другим UID", out.get("text") == f"uid={uid}", str(out.get("error_kind")))
+    left = [os.path.join(d, n) for d, dirs, files in os.walk("/work") for n in dirs + files]
+    check("/work пуст после ответа", not left and not gate.fault_reason, "; ".join(left))
+
+    # Зависший CLI убивается через launcher (у сервера нет права сигналить чужому UID).
+    faults = []
+    res = run_cli(
+        channel, "m", "s", payload["messages"], None, env=dict(os.environ),
+        spawn=fake_cli("sleep 300"), workroot="/work", timeout=2, launcher=launcher,
+        on_fault=faults.append, sweeper=sweeper, kill_wait=5,
+    )  # fmt: skip
+    check("зависший CLI: таймаут", res.error_kind == "timeout", str(res.error_kind))
+    check(
+        "зависший CLI убит, исполнитель исправен",
+        not cli_processes(uid) and not faults,
+        ",".join(faults),
+    )
+
+    # Фоновый процесс CLI не переживает запуск.
+    bg = "sleep 300 >/dev/null 2>&1 & " + ok_json("bg")
+    res = run_cli(
+        channel, "m", "s", payload["messages"], None, env=dict(os.environ),
+        spawn=fake_cli(bg), workroot="/work", launcher=launcher, on_fault=faults.append,
+        sweeper=sweeper,
+    )  # fmt: skip
+    check("фоновый запуск завершён", res.text == "bg", str(res.error_kind))
+    check("фоновый процесс CLI убран", not cli_processes(uid) and not faults, ",".join(faults))
+    check("/work пуст после фонового запуска", not any(work.iterdir()))
+
+    # Занят: параллельный запрос получает «занят».
+    import threading
+
+    gate = Gate()
+    entered, release = threading.Event(), threading.Event()
+    box = []
+
+    def slow(argv, **kw):
+        if is_helper(argv, launcher):
+            return spawn(argv, **kw)
+        entered.set()
+        release.wait(20)
+        return spawn([*launcher, "sh", "-c", ok_json("x")], **kw)
+
+    t = threading.Thread(
+        target=lambda: box.append(
+            handle_request(
+                payload,
+                env=dict(os.environ),
+                spawn=slow,
+                workroot="/work",
+                only_channel=channel,
+                launcher=launcher,
+                gate=gate,
+                sweeper=sweeper,
+            )
+        )
+    )
+    t.start()
+    entered.wait(20)
+    second = handle_request(
+        payload,
+        env=dict(os.environ),
+        spawn=slow,
+        workroot="/work",
+        only_channel=channel,
+        launcher=launcher,
+        gate=gate,
+        sweeper=sweeper,
+    )
+    release.set()
+    t.join(30)
+    check("параллельный запрос получает «занят»", second.get("error_kind") == "busy")
     other = next(c for c in TOKENS if c != channel)
     out = handle_request(
         dict(payload, channel=other),
         env=dict(os.environ),
-        spawn=spawn,
-        workroot="/work",
         only_channel=channel,
+        workroot="/work",
         launcher=launcher,
     )
     check("чужой канал отклонён", out.get("error_kind") == "bad_request")
@@ -160,6 +273,12 @@ def cli_mode() -> None:
         ok = True
     check("CLI не может сменить UID через setpriv", ok)
     check("запись в /work закрыта для CLI", cannot_write("/work"))
+    try:
+        os.kill(1, 0)
+        can_signal = True
+    except PermissionError:
+        can_signal = False
+    check("CLI не может сигналить серверу", not can_signal)
 
 
 def main() -> int:

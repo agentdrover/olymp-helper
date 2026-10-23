@@ -55,6 +55,7 @@ def test_http_roundtrip(tmp_path):
     srv = make_server(
         "127.0.0.1",
         0,
+        shared_key="k" * 16,
         env=ENV,
         workroot=str(tmp_path),
         spawn=lambda *a, **k: SimpleNamespace(
@@ -68,7 +69,7 @@ def test_http_roundtrip(tmp_path):
         req = urllib.request.Request(
             url + "/run",
             data=json.dumps(REQ).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "X-Executor-Key": "k" * 16},
         )
         body = json.load(urllib.request.urlopen(req, timeout=5))
         assert body["text"] == "hi"
@@ -145,9 +146,10 @@ def test_cli_runs_under_launcher_and_workdir_is_scrubbed_by_cli_user(tmp_path):
         launcher=launcher,
     )
     assert res.text == "ok"
-    assert calls[0][:3] == launcher and calls[0][3] == "claude"
+    assert calls[0][3] == "mkdir"
+    assert calls[1][:3] == launcher and calls[1][3] == "claude"
     # Уборка тем же пользователем, что запускал CLI: find ... -delete внутри рабочих каталогов.
-    assert calls[1][:3] == launcher and calls[1][3] == "find" and "-delete" in calls[1]
+    assert calls[2][:3] == launcher and calls[2][3] == "sh" and "rm -rf" in calls[2][5]
     assert os.listdir(tmp_path) == []
 
 
@@ -162,6 +164,7 @@ def test_http_server_passes_channel_limit_and_launcher_to_the_runner(tmp_path):
     srv = make_server(
         "127.0.0.1",
         0,
+        shared_key="k" * 16,
         env=ENV,
         workroot=str(tmp_path),
         spawn=spawn,
@@ -175,7 +178,9 @@ def test_http_server_passes_channel_limit_and_launcher_to_the_runner(tmp_path):
 
         def post(payload):
             req = urllib.request.Request(
-                url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
+                url,
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json", "X-Executor-Key": "k" * 16},
             )
             return json.load(urllib.request.urlopen(req, timeout=5))
 

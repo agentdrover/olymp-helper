@@ -31,7 +31,7 @@ def test_ac6(tmp_path, caplog):
 
     seen_payloads = []
 
-    def post(url, payload, timeout):
+    def post(url, payload, timeout, headers=None):
         # Путь «приложение -> исполнитель»: ответ исполнителя целиком проходит как JSON.
         body = handle_request(payload, env=ENV, spawn=leaky_spawn)
         seen_payloads.append(json.dumps(body, ensure_ascii=False))

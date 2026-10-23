@@ -4,6 +4,8 @@
 # (только к API своего провайдера) задаёт HI-1; порт наружу не публикуется, приложение ходит по
 # внутренней сети. no-new-privileges здесь НЕ включён намеренно: setpriv сервера получает
 # CAP_SETUID/CAP_SETGID из file capabilities, а CLI запускается уже с no-new-privs (setpriv).
+# Один запуск за раз; при неисправности (/healthz 503) процесс выходит, restart поднимает контейнер.
+# Общий ключ EXECUTOR_SHARED_KEY приложения и исполнителя; в окружение CLI он не передаётся.
 # Сверка с deploy/compose.yaml из OH-T04 (#2014) - при слиянии.
 services:
   executor-claude:
@@ -14,6 +16,7 @@ services:
     environment:
       EXECUTOR_CHANNEL: claude
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set at run time by home-infra}
+      EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
     read_only: true
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
@@ -24,6 +27,12 @@ services:
       - SETGID
     pids_limit: 256
     restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8099/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     expose:
       - "8099"
 
@@ -35,6 +44,7 @@ services:
     environment:
       EXECUTOR_CHANNEL: cursor
       CURSOR_API_KEY: ${CURSOR_API_KEY:?set at run time by home-infra}
+      EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
     read_only: true
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0711
@@ -45,5 +55,11 @@ services:
       - SETGID
     pids_limit: 256
     restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8099/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     expose:
       - "8099"
