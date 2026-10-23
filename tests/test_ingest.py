@@ -108,6 +108,20 @@ def test_ac2(tmp_path):
         assert r.status_code == 200, r.text
         assert row(tmp_path, ids[0])["key_source"] == "official"
         assert child_ids(c) == [ids[0]]
+        listing = c.get("/tasks", headers=CHILD)
+        assert listing.status_code == 200 and "Задание 1" in listing.text
+        assert "Задание 2" not in listing.text and "Задание 3" not in listing.text
+        # An edited task is a draft again; it has a key but stays hidden.
+        c.post(f"/parent/tasks/{ids[0]}/edit", headers=PARENT, json={"text": "Новое условие"})
+        assert row(tmp_path, ids[0])["import_status"] == "draft"
+        assert row(tmp_path, ids[0])["answer_key"] is not None
+        assert child_ids(c) == []
+        assert c.get(f"/api/tasks/{ids[0]}", headers=CHILD).status_code == 404
+        assert c.get(f"/tasks/{ids[0]}", headers=CHILD).status_code == 404
+        c.post(f"/parent/tasks/{ids[0]}/confirm", headers=PARENT, json={})
+        assert child_ids(c) == [ids[0]]
+        # an open task cannot be confirmed as it stands
+        assert c.post(f"/parent/tasks/{ids[1]}/confirm", headers=PARENT, json={}).status_code == 422
         # draft and unsupported stay hidden
         assert c.get(f"/api/tasks/{ids[1]}", headers=CHILD).status_code == 404
         assert c.get(f"/api/tasks/{ids[2]}", headers=CHILD).status_code == 404
@@ -249,3 +263,15 @@ def test_a_task_repeated_in_two_chunks_is_stored_once(tmp_path):
         upload(c, text_pdf([["1. " + long], ["1. " + long]]))
         assert len(model.calls_of("tasks_split")) == 2  # two chunks, the same task in both
         assert len(task_ids(tmp_path)) == 1
+
+
+def test_ac5_import_error_is_escaped(tmp_path):
+    hostile = "<script>alert(1)</script>"
+    bad = {"tasks": [{"number": "1", "type": hostile, "text": "x", "pages": [1]}]}
+    with TestClient(build_app(tmp_path, StubModel(split=bad))) as c:
+        r = upload(c, text_pdf([["1. текст"]]))
+        st = c.get(f"/parent/materials/{r.json()['material_id']}", headers=PARENT).json()
+        assert st["import_status"] == "failed" and hostile in st["import_error"]
+        page = c.get("/parent/materials", headers=PARENT)
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
+        assert "<script>alert(1)" not in page.text

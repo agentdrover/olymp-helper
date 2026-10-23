@@ -59,24 +59,28 @@ def attempt(tmp_path, tid, answer, correct):
 
 
 def test_ac15(tmp_path):
-    c, _model, (a, b) = start(tmp_path, [1, 2], {"1": "Б", "2": "В"}, keys={"1": "Б"})
+    answers = {"1": "Б", "2": "В", "3": "А"}
+    c, _model, (a, b, third) = start(tmp_path, [1, 2, 3], answers, keys={"1": "Б"})
     with c:
-        # B has no uploaded key: the parent writes the answer in.
+        # B: the parent writes the answer in beforehand; C: types it in the confirm action.
         post(c, f"/parent/tasks/{b}/key", answer="В")
         q = c.get("/parent/review/queue", headers=PARENT).json()
-        assert q["total"] == 2 and [x["task_id"] for x in q["cards"]] == [a, b]
+        assert q["total"] == 3 and [x["task_id"] for x in q["cards"]] == [a, b, third]
         assert q["cards"][0]["kind"] == "confirm" and q["cards"][0]["model_agrees"] is True
         assert q["cards"][0]["button"] == "Верно, ответ Б — подтвердить и дальше"
 
         first = post(c, f"/parent/tasks/{a}/confirm")
-        assert first["counter"] == "2 из 2" and first["next"]["task_id"] == b
+        assert first["counter"] == "2 из 3" and first["next"]["task_id"] == b
         second = post(c, f"/parent/tasks/{b}/confirm")
-        assert second["next"] is None
+        assert second["counter"] == "3 из 3" and second["next"]["task_id"] == third
+        last = post(c, f"/parent/tasks/{third}/confirm", answer="А")
+        assert last["next"] is None
 
-    ra, rb = row(tmp_path, a), row(tmp_path, b)
-    assert ra["import_status"] == rb["import_status"] == "checked"
+    ra, rb, rc = row(tmp_path, a), row(tmp_path, b), row(tmp_path, third)
+    assert ra["import_status"] == rb["import_status"] == rc["import_status"] == "checked"
     assert ra["key_source"] == "official" and json.loads(ra["answer_key"])["value"] == "Б"
     assert rb["key_source"] == "parent" and json.loads(rb["answer_key"])["value"] == "В"
+    assert rc["key_source"] == "parent" and json.loads(rc["answer_key"])["value"] == "А"
 
 
 def test_ac16(tmp_path):

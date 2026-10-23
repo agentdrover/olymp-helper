@@ -18,7 +18,6 @@ class PageCache:
         self.hits = 0
         self.misses = 0
         self._lock = threading.Lock()
-        self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, key: str) -> Path:
         return self.root / (hashlib.sha256(key.encode("utf-8")).hexdigest() + ".png")
@@ -37,13 +36,14 @@ class PageCache:
             self.misses += 1
         data = render()
         with self._lock:
+            self.root.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             tmp.write_bytes(data)
             os.replace(tmp, path)
-            self._evict(keep=path)
+            self._evict()
         return data
 
-    def _evict(self, keep: Path) -> None:
+    def _evict(self) -> None:
         entries = []
         for entry in self.root.iterdir():
             if entry.suffix == ".png":
@@ -53,7 +53,5 @@ class PageCache:
         for _, entry, size in sorted(entries, key=lambda e: e[0]):
             if total <= self.limit:
                 break
-            if entry == keep:
-                continue
             entry.unlink(missing_ok=True)
             total -= size

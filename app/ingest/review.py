@@ -339,7 +339,6 @@ def task_detail(ctx, conn, task_id: int) -> dict:
 def queue(ctx, conn) -> list[dict]:
     rows = conn.execute("SELECT * FROM task_item WHERE excluded = 0 ORDER BY id").fetchall()
     cards = [c for r in rows if (c := build_card(ctx, conn, r, compute=False))]
-    cards.sort(key=lambda c: (c["kind"] != "child_dispute", c["task_id"]))
     if cards:  # ответ модели считается для карточки, которую родитель увидит первой
         first = build_card(ctx, conn, get_task(conn, cards[0]["task_id"]), compute=True)
         if first:

@@ -23,7 +23,11 @@
   }
 
   async function show(id, count) {
-    if (!id) { feed.textContent = ""; feed.insertAdjacentHTML("beforeend", "<p>Всё проверено: в ленте больше нет заданий.</p>"); counter.textContent = ""; return; }
+    if (!id) {
+      feed.innerHTML = "<p>Всё проверено: в ленте больше нет заданий.</p>";
+      counter.textContent = "";
+      return;
+    }
     const r = await fetch(`/parent/review/${id}?fragment=1`);
     feed.innerHTML = await r.text();
     counter.textContent = count || "";

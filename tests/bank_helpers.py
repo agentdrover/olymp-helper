@@ -169,7 +169,16 @@ def build_app(tmp_path, model=None, **kw):
     return create_app(db_path=tmp_path / "olymp.db", model=model, **kw)
 
 
-def upload(client, pdf, kind="tasks", variant="1", year="2022", stage="отборочный", name="f.pdf"):
+def upload(
+    client,
+    pdf,
+    kind="tasks",
+    variant="1",
+    year="2022",
+    stage="отборочный",
+    name="f.pdf",
+    olympiad="sechenov",
+):
     return client.post(
         "/parent/materials",
         headers=PARENT,
@@ -179,7 +188,7 @@ def upload(client, pdf, kind="tasks", variant="1", year="2022", stage="отбо�
             "variant": variant,
             "year": year,
             "stage": stage,
-            "olympiad": "sechenov",
+            "olympiad": olympiad,
         },
     )
 
