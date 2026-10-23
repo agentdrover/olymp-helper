@@ -470,7 +470,7 @@ def test_a_heading_after_the_last_task_of_a_chunk_is_carried_to_the_next_one(tmp
         long = "а" * 7000
         upload(c, text_pdf([["1. " + long], ["1. " + long]]), variant="")
         assert (
-            "Раздел на начало порции: Вариант 2"
+            "Раздел на начало порции: Раздел Б; вариант: 9"
             in (model.calls_of("tasks_split")[1].messages[-1]["content"])
         )
         rows = [row(tmp_path, i) for i in task_ids(tmp_path)]
