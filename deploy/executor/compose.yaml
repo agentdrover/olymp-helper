@@ -1,0 +1,49 @@
+# Два контейнера-исполнителя, по одному на канал (уточнение по ревью #2013, SPEC-1.0 1.4).
+# Образ один (deploy/executor/Containerfile); токен канала приходит из окружения хоста при запуске
+# через home-infra и в образ, репозиторий и журналы не попадает. Тома данных нет. Сеть наружу
+# (только к API своего провайдера) задаёт HI-1; порт наружу не публикуется, приложение ходит по
+# внутренней сети. no-new-privileges здесь НЕ включён намеренно: setpriv сервера получает
+# CAP_SETUID/CAP_SETGID из file capabilities, а CLI запускается уже с no-new-privs (setpriv).
+# Сверка с deploy/compose.yaml из OH-T04 (#2014) - при слиянии.
+services:
+  executor-claude:
+    build:
+      context: ../..
+      dockerfile: deploy/executor/Containerfile
+    image: olymp-executor:local
+    environment:
+      EXECUTOR_CHANNEL: claude
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set at run time by home-infra}
+    read_only: true
+    tmpfs:
+      - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    pids_limit: 256
+    restart: unless-stopped
+    expose:
+      - "8099"
+
+  executor-cursor:
+    build:
+      context: ../..
+      dockerfile: deploy/executor/Containerfile
+    image: olymp-executor:local
+    environment:
+      EXECUTOR_CHANNEL: cursor
+      CURSOR_API_KEY: ${CURSOR_API_KEY:?set at run time by home-infra}
+    read_only: true
+    tmpfs:
+      - /work:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    pids_limit: 256
+    restart: unless-stopped
+    expose:
+      - "8099"

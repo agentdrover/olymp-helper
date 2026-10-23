@@ -18,3 +18,14 @@ def redact(text: str, secrets=()) -> str:
     for pattern in _PATTERNS:
         text = pattern.sub(MASK, text)
     return text
+
+
+def redact_json(value, secrets=()):
+    """То же для вложенного JSON: строки в значениях и в ключах."""
+    if isinstance(value, str):
+        return redact(value, secrets)
+    if isinstance(value, list):
+        return [redact_json(v, secrets) for v in value]
+    if isinstance(value, dict):
+        return {redact(str(k), secrets): redact_json(v, secrets) for k, v in value.items()}
+    return value

@@ -107,3 +107,80 @@ def test_real_process_roundtrip_and_timeout(tmp_path):
     res = run_cli("cursor", "m", "s", REQ["messages"], None, env=env, workroot=str(work), timeout=1)
     assert res.error_kind == "timeout" and res.error
     assert os.listdir(work) == []
+
+
+def test_server_serves_only_its_own_channel(tmp_path):
+    """Ревью #2013 P1: контейнер на канал; чужой канал отклоняется до запуска."""
+    called = []
+    out = handle_request(
+        dict(REQ, channel="cursor"),
+        env=ENV,
+        spawn=lambda *a, **k: called.append(1),
+        workroot=str(tmp_path),
+        only_channel="claude",
+    )
+    assert out["error"] and out["error_kind"] == "bad_request" and not called
+
+
+def test_cli_runs_under_launcher_and_workdir_is_scrubbed_by_cli_user(tmp_path):
+    """Ревью #2013 P1: CLI под другим UID (launcher), уборка тоже от его имени."""
+    from app.model.runner import run_cli
+
+    calls = []
+
+    def spawn(argv, *, input, env, cwd, timeout):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stderr="", stdout='{"is_error":false,"result":"ok"}')
+
+    launcher = ["setpriv", "--reuid=exec-cli", "--"]
+    res = run_cli(
+        "claude",
+        "m",
+        "s",
+        REQ["messages"],
+        None,
+        env=ENV,
+        spawn=spawn,
+        workroot=str(tmp_path),
+        launcher=launcher,
+    )
+    assert res.text == "ok"
+    assert calls[0][:3] == launcher and calls[0][3] == "claude"
+    # Уборка тем же пользователем, что запускал CLI: find ... -delete внутри рабочих каталогов.
+    assert calls[1][:3] == launcher and calls[1][3] == "find" and "-delete" in calls[1]
+    assert os.listdir(tmp_path) == []
+
+
+def test_http_server_passes_channel_limit_and_launcher_to_the_runner(tmp_path):
+    seen = []
+
+    def spawn(argv, *, input, env, cwd, timeout):
+        seen.append(argv)
+        return SimpleNamespace(returncode=0, stderr="", stdout='{"is_error":false,"result":"hi"}')
+
+    launcher = ["setpriv", "--reuid=exec-cli", "--"]
+    srv = make_server(
+        "127.0.0.1",
+        0,
+        env=ENV,
+        workroot=str(tmp_path),
+        spawn=spawn,
+        only_channel="claude",
+        launcher=launcher,
+    )
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/run"
+
+        def post(payload):
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
+            )
+            return json.load(urllib.request.urlopen(req, timeout=5))
+
+        assert post(REQ)["text"] == "hi" and seen[0][:3] == launcher
+        assert post(dict(REQ, channel="cursor"))["error_kind"] == "bad_request"
+    finally:
+        srv.shutdown()
+        srv.server_close()

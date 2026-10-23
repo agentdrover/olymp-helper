@@ -18,10 +18,12 @@ log = logging.getLogger("app.model.executor")
 MAX_BODY = 1_000_000
 
 
-def handle_request(payload, *, env=None, spawn=None, workroot=None) -> dict:
+def handle_request(
+    payload, *, env=None, spawn=None, workroot=None, only_channel=None, launcher=None
+) -> dict:
     env = os.environ if env is None else env
     channel = payload.get("channel") if isinstance(payload, dict) else None
-    if channel not in ADAPTERS:
+    if channel not in ADAPTERS or (only_channel and channel != only_channel):
         return ModelResult.failure(str(channel), "", "bad_request").to_dict()
     try:
         system, messages = payload["system"], payload["messages"]
@@ -36,11 +38,21 @@ def handle_request(payload, *, env=None, spawn=None, workroot=None) -> dict:
     except (KeyError, ValueError, TypeError):
         return ModelResult.failure(channel, "", "bad_request").to_dict()
     return run_cli(
-        channel, model, system, messages, schema, env=env, spawn=spawn, workroot=workroot
+        channel,
+        model,
+        system,
+        messages,
+        schema,
+        env=env,
+        spawn=spawn,
+        workroot=workroot,
+        launcher=launcher,
     ).to_dict()
 
 
-def make_server(host, port, *, env=None, spawn=None, workroot=None):
+def make_server(
+    host, port, *, env=None, spawn=None, workroot=None, only_channel=None, launcher=None
+):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, body):
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -66,7 +78,15 @@ def make_server(host, port, *, env=None, spawn=None, workroot=None):
                 payload = json.loads(self.rfile.read(size))
             except ValueError:
                 return self._send(400, ModelResult.failure("", "", "bad_request").to_dict())
-            self._send(200, handle_request(payload, env=env, spawn=spawn, workroot=workroot))
+            reply = handle_request(
+                payload,
+                env=env,
+                spawn=spawn,
+                workroot=workroot,
+                only_channel=only_channel,
+                launcher=launcher,
+            )
+            self._send(200, reply)
 
         def log_message(self, fmt, *args):  # запросы с содержимым не журналируются
             pass
@@ -74,12 +94,33 @@ def make_server(host, port, *, env=None, spawn=None, workroot=None):
     return ThreadingHTTPServer((host, port), Handler)
 
 
+def cli_launcher(user: str) -> list[str]:
+    """Префикс запуска CLI под другим UID без привилегий: сервер, его /proc и токен недоступны."""
+    return [
+        "setpriv",
+        f"--reuid={user}",
+        f"--regid={user}",
+        "--clear-groups",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+        "--no-new-privs",
+        "--",
+    ]
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     host = os.environ.get("EXECUTOR_HOST", "0.0.0.0")
     port = int(os.environ.get("EXECUTOR_PORT", "8099"))
     root = os.environ.get("EXECUTOR_WORKROOT", "/work")
-    make_server(host, port, workroot=root).serve_forever()
+    cli_user = os.environ.get("EXECUTOR_CLI_USER")
+    make_server(
+        host,
+        port,
+        workroot=root,
+        only_channel=os.environ.get("EXECUTOR_CHANNEL") or None,
+        launcher=cli_launcher(cli_user) if cli_user else None,
+    ).serve_forever()
 
 
 if __name__ == "__main__":
