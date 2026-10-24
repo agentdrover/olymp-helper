@@ -34,6 +34,7 @@
 | `EXECUTOR_WORKROOT` | executor-* | `/work` | рабочий корень запусков CLI; задан в compose |
 | `EXECUTOR_CHANNEL` | executor-* | нет | канал контейнера: `claude` или `cursor`; задан в compose |
 | `EXECUTOR_SHARED_KEY` | app, executor-* | нет | общий ключ приложения и исполнителей (заголовок `X-Executor-Key`); передаётся при запуске, в окружение CLI не попадает |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `NODE_USE_ENV_PROXY` | executor-* | нет | прокси исходящих CLI; на k8 исполнители выходят наружу только через egress: `HTTPS_PROXY=http://egress:3128`; передаются CLI, если заданы |
 | `CLAUDE_CODE_OAUTH_TOKEN` | executor-claude | нет | токен подписки Claude; передаётся при запуске, значение в compose не пишется |
 | `CURSOR_API_KEY` | executor-cursor | нет | ключ Cursor; передаётся при запуске, значение в compose не пишется |
 

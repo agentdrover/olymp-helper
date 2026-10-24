@@ -277,3 +277,29 @@ def test_ac7(db):
         ("cursor", "auto-c", 700),
     ]
     assert [r["fallback"] for r in rows] == [False, False, False, True]
+
+
+def test_proxy_vars_reach_the_cli():
+    """На k8 CLI выходят к своим API только через egress: прокси доходит до CLI, ключи - нет."""
+    proxy = {
+        "HTTPS_PROXY": "http://egress:3128",
+        "HTTP_PROXY": "http://egress:3128",
+        "NO_PROXY": "localhost,127.0.0.1",
+        "NODE_USE_ENV_PROXY": "1",
+    }
+    source = dict(ENV, **proxy, EXECUTOR_SHARED_KEY="shared", UNRELATED="x")
+    for channel in ("claude", "cursor"):
+        env = build_env(channel, source, "/work/home")
+        assert {k: env.get(k) for k in proxy} == proxy
+        assert "EXECUTOR_SHARED_KEY" not in env and "UNRELATED" not in env
+    # Строчные имена тоже доходят: их читают Node и curl.
+    lower = {
+        "https_proxy": "http://egress:3128",
+        "http_proxy": "http://egress:3128",
+        "no_proxy": "localhost",
+    }
+    env = build_env("cursor", dict(ENV, **lower), "/work/home")
+    assert {k: env.get(k) for k in lower} == lower
+    # Без прокси в окружении состав прежний.
+    plain = build_env("claude", dict(ENV), "/work/home")
+    assert not set(proxy) & set(plain)

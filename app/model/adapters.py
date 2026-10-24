@@ -10,12 +10,16 @@ from app.model.types import ChannelError
 TOKEN_VARS = {"claude": "CLAUDE_CODE_OAUTH_TOKEN", "cursor": "CURSOR_API_KEY"}
 # Служебные переменные, больше ничего из окружения контейнера процессу CLI не передаётся.
 SERVICE_VARS = ("PATH", "LANG", "LC_ALL", "TZ", "TMPDIR")
+# На k8 исполнитель выходит наружу только через прокси egress (HI-1): CLI получает его адрес.
+# Секретов в этих переменных нет; правило «ничего сверх списка» то же.
+_PROXY_NAMES = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY")  # Node и curl читают оба регистра
+PROXY_VARS = (*_PROXY_NAMES, *(n.lower() for n in _PROXY_NAMES), "NODE_USE_ENV_PROXY")
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]=,+-]*")
 
 
 def build_env(channel: str, source: dict, home: str) -> dict:
-    """Окружение процесса CLI: служебные переменные и токен ТОЛЬКО своего канала."""
-    env = {k: source[k] for k in SERVICE_VARS if k in source}
+    """Окружение процесса CLI: служебные переменные, прокси и токен ТОЛЬКО своего канала."""
+    env = {k: source[k] for k in (*SERVICE_VARS, *PROXY_VARS) if k in source}
     env["HOME"] = home
     token = TOKEN_VARS[channel]
     if source.get(token):
