@@ -1012,9 +1012,9 @@ def test_a_match_figure_may_show_its_designations_but_not_its_pairs(tmp_path):
             "options": None,
             "refers_to_figure": True,
         }
-        assert _figure_record(doc, 1, task, None)["leak"] == []
+        assert _figure_record(doc, 1, task, ("known", [(1, 80.0)]))["leak"] == []
         task["type"] = "single"  # the bare «1» is a short answer there
-        assert _figure_record(doc, 1, task, None)["leak"] == ["1"]
+        assert _figure_record(doc, 1, task, ("known", [(1, 80.0)]))["leak"] == ["1"]
     finally:
         doc.close()
 
@@ -1121,7 +1121,7 @@ def _photos_pdf(photo_tops, next_page_y=None, same_start=False):
 
 
 def _regions(pdf, texts, pages_per_task):
-    from app.ingest.importer import _figure_record, _following, _positions
+    from app.ingest.importer import _figure_record, _following, _positions, _stops
 
     doc = pymupdf.open("pdf", pdf)
     try:
@@ -1137,8 +1137,9 @@ def _regions(pdf, texts, pages_per_task):
             for i, (t, pg) in enumerate(zip(texts, pages_per_task, strict=True))
         ]
         pos = _positions(figures_index(doc), tasks)
+        stops = _stops(pos)
         return [
-            _figure_record(doc, 1, t, pos[i], _following(pos, i))["regions"]
+            _figure_record(doc, 1, t, pos[i], _following(pos, stops, i))["regions"]
             for i, t in enumerate(tasks)
         ], pos
     finally:
@@ -1183,8 +1184,7 @@ def test_the_stop_cuts_only_on_its_own_page_and_the_page_is_clamped():
         got = figures.suggest_regions(doc, 1, 95.0, 2, stop=(2, 30.0))
         assert [r["page"] for r in got] == [1]
         # No start y: no bounds, the nearest image only.
-        nearest = figures.suggest_regions(doc, 2, None, 2)
-        assert len(nearest) == 1 and near(nearest[0]["rect"], PHOTOS_P2[0])
+        assert figures.suggest_regions(doc, 2, None, 2) == []  # nothing to be near to
         assert figures.suggest_regions(doc, 4, 100.0, 4) == []
     finally:
         doc.close()
@@ -1279,19 +1279,31 @@ def test_the_page_index_counts_the_whole_material_and_normalises_the_start():
         assert index.find(PREAMBLE + " Первое.")[1] < 150
         assert index.find(PREAMBLE + " Второе.")[1] > 250
         assert index.find(PREAMBLE + " Третье.") == AMBIGUOUS  # grew into words nobody has
+        kind, places = index.locate(PREAMBLE + " Третье.")
+        assert kind == "ambiguous" and len(places) == 2  # both places stay stops
     finally:
         doc.close()
 
 
-def test_the_following_anchor_is_the_next_one_in_page_order():
-    from app.ingest.importer import _following
+def test_the_following_anchor_is_the_next_start_of_any_condition_in_page_order():
+    from app.ingest.importer import _following, _stops
 
-    pos = [(2, 5.0), (1, 10.0), None, "ambiguous", (1, 50.0)]
-    assert _following(pos, 1) == (1, 50.0)  # whatever the model order
-    assert _following(pos, 4) == (2, 5.0)
-    assert _following(pos, 0) is None  # nothing known after it: no stop
-    assert _following(pos, 2) is None and _following(pos, 3) is None  # no own anchor
-    assert _following([(1, 10.0), (1, 10.0)], 0) is None  # equal is not after
+    known = lambda *p: ("known", list(p))
+    located = [
+        known((2, 5.0)),
+        known((1, 10.0)),
+        ("unknown", []),
+        ("ambiguous", [(1, 30.0), (2, 70.0)]),
+        known((1, 50.0)),
+    ]
+    stops = _stops(located)
+    assert sorted(stops) == [(1, 10.0), (1, 30.0), (1, 50.0), (2, 5.0), (2, 70.0)]
+    assert _following(located, stops, 1) == (1, 30.0)  # an ambiguous start is a stop too
+    assert _following(located, stops, 4) == (2, 5.0)
+    assert _following(located, stops, 0) == (2, 70.0)
+    assert _following(located, stops, 2) is None and _following(located, stops, 3) is None
+    only = [known((1, 10.0)), known((1, 10.0))]
+    assert _following(only, _stops(only), 0) is None  # equal is not after
 
 
 def test_the_index_tiers_the_needle_and_places_it_at_the_first_word():
@@ -1317,14 +1329,15 @@ def test_the_index_tiers_the_needle_and_places_it_at_the_first_word():
         b = index.find("Определите препарат под микроскопом, вариант Б. Далее ответ.")
         assert a[1] < 120 and b[1] > 280  # the 60-character start tells them apart
         assert index.find("Определите препарат под микроскопом, вариант") == AMBIGUOUS
-        # The first 60 characters are not on the page, the first 30 are: a shorter start.
-        assert index.find("Ёж и елка растут в лесу, где совсем другой конец")[1] > 450
-        assert index.find("Ёж и ёлка растут в лесу, где много снега, но дальше иначе")[1] > 450
+        # The start is on the page but the continuation is not: nothing to look for there.
+        assert index.find("Ёж и елка растут в лесу, где совсем другой конец") is None
+        assert index.find("Ёж и ёлка растут в лесу, где много снега, но дальше иначе") is None
+        assert index.find("Ёж и елка растут в лесу, где много снега и ветра зимой")[1] > 450
         assert index.find("а  б  в") is None  # too short once normalised: not an anchor
         assert index.find("Х" * 100) is None
-        # The start is unique at 30 characters even though the rest differs from the page.
-        wrong = index.find("Рассмотрите внимательно препарат совсем другой конец")
-        assert 620 < wrong[1] < 650
+        # Unique at 30 characters, but the rest of the condition is not there: unknown, not guessed.
+        assert index.find("Рассмотрите внимательно препарат совсем другой конец") is None
+        assert 620 < index.find("Рассмотрите внимательно препарат под лупой")[1] < 650
         # A shared short start with a wrong rest is not guessed.
         assert index.find("Рассмотрите внимательно совсем иначе тут") == AMBIGUOUS
         assert (
@@ -1351,8 +1364,208 @@ def test_the_figure_is_taken_where_the_anchor_is_not_where_the_model_says():
             "refers_to_figure": True,
             "answer_text": None,
         }
-        record = _figure_record(doc, 1, task, (1, 95.0), (2, 200.0))
+        record = _figure_record(doc, 1, task, ("known", [(1, 95.0)]), (2, 200.0))
         assert [r["page"] for r in record["regions"]] == [1, 2]
         assert record["page"] == 1
     finally:
         doc.close()
+
+
+def _neighbours_pdf(two_pages=False):
+    """T1 (unique), a condition printed twice with its answer under each, and T4 (unique)."""
+    from tests.bank_helpers import doc_bytes
+    from tests.layout_pdf import _text
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _text(page, 50, 100, "Определите орган по фотографии номер один.")
+    page.insert_image(pymupdf.Rect(60, 110, 150, 170), stream=IMAGE, keep_proportion=False)
+    if two_pages:
+        page = doc.new_page(width=595, height=842)
+    for top in (200, 400):
+        _text(page, 50, top, "Рассмотрите препарат на фотографии ниже и ответьте.")
+        page.insert_image(
+            pymupdf.Rect(60, top + 10, 150, top + 70), stream=IMAGE, keep_proportion=False
+        )
+        _text(page, 50, top + 90, "Ответ: рибосома")
+    _text(page, 50, 600, "Определите ткань по фотографии номер четыре.")
+    page.insert_image(pymupdf.Rect(60, 610, 150, 670), stream=IMAGE, keep_proportion=False)
+    return doc_bytes(doc)
+
+
+def _neighbour_tasks(two_pages):
+    first_pages = (1, 2) if two_pages else (1,)
+    page = 2 if two_pages else 1
+    amb = "Рассмотрите препарат на фотографии ниже и ответьте."
+    return [
+        lt(
+            "1",
+            "Определите орган по фотографии номер один.",
+            "single",
+            first_pages,
+            "А",
+            OPTIONS_1_1,
+            refers_to_figure=True,
+        ),
+        lt("2", amb, "single", (page,), "рибосома", OPTIONS_1_2, refers_to_figure=True),
+        lt("3", amb, "single", (page,), "рибосома", OPTIONS_1_2, refers_to_figure=True),
+        lt(
+            "4",
+            "Определите ткань по фотографии номер четыре.",
+            "single",
+            (page,),
+            "Б",
+            OPTIONS_1_2,
+            refers_to_figure=True,
+        ),
+    ]
+
+
+def test_an_ambiguous_neighbour_still_bounds_the_task_above_it(tmp_path):
+    for two_pages in (False, True):
+        where = tmp_path / str(two_pages)
+        with import_layout(
+            where, _neighbour_tasks(two_pages), pdf=_neighbours_pdf(two_pages)
+        ) as client:
+            one = detail(client, by_number(where, "1")["id"])["figure"]
+            # Only its own photo; the photos of the repeated condition and their answers stay out.
+            assert [r["page"] for r in one["regions"]] == [1], two_pages
+            assert near(one["regions"][0]["rect"], [60, 110, 150, 170]), one["regions"]
+            assert one["leak"] == []
+            for number in ("2", "3"):
+                other = detail(client, by_number(where, number)["id"])["figure"]
+                assert other["ambiguous"] is True and other["regions"] == []
+            four = detail(client, by_number(where, "4")["id"])["figure"]
+            assert [r["page"] for r in four["regions"]] == [2 if two_pages else 1]
+            # A frame over the neighbour's printed answer is flagged for task 1, answer unknown to it.
+            page = 2 if two_pages else 1
+            frame = [50, 270, 300, 300]
+            r = confirm_figure(client, by_number(where, "1")["id"], rect=frame, page=page)
+            if two_pages:  # that frame lies on page 2: not a page of task 1's figure
+                assert r.status_code == 409
+                continue
+            assert r.status_code == 422 and "рибосома" in r.json()["error"], (page, r.text)
+            ok = confirm_figure(
+                client, by_number(where, "1")["id"], rect=frame, page=1, leak_ack=True
+            )
+            assert ok.status_code == 200
+
+
+def test_the_answers_of_other_tasks_are_looked_for_in_the_suggested_frame():
+    from app.ingest.importer import _figure_record
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        task = {
+            "number": "1.2",
+            "pages": [2],
+            "options": None,
+            "type": "single",
+            "text": "x",
+            "refers_to_figure": True,
+            "answer_text": None,
+        }
+        located = ("known", [(2, 215.0)])
+        assert _figure_record(doc, 1, task, located, None)["leak"] == []
+        assert _figure_record(doc, 1, task, located, None, others=["рибосома"])["leak"] == [
+            "рибосома"
+        ]
+        assert _figure_record(doc, 1, task, located, None, others=["лизосома"])["leak"] == []
+    finally:
+        doc.close()
+
+
+def test_a_unique_start_without_its_continuation_is_unknown_and_not_guessed(tmp_path):
+    from tests.bank_helpers import doc_bytes
+    from tests.layout_pdf import _text
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _text(page, 50, 100, "Рассмотрите внимательно препарат: кровь человека под микроскопом.")
+    page.insert_image(pymupdf.Rect(60, 110, 150, 170), stream=IMAGE, keep_proportion=False)
+    pdf = doc_bytes(doc)
+    right = "Рассмотрите внимательно препарат: кровь человека под микроскопом."
+    wrong = "Рассмотрите внимательно препарат: лист растения под микроскопом."
+    for number, text, known in (("1", right, True), ("2", wrong, False)):
+        where = tmp_path / number
+        task = lt(number, text, "single", (1,), "Б", OPTIONS_1_2, refers_to_figure=True)
+        with import_layout(where, [task], pdf=pdf) as client:
+            d = detail(client, by_number(where, number)["id"])
+            assert bool(d["figure"]["regions"]) is known and d["figure"]["suggested"] is known
+            assert d["figure"]["anchor_unknown"] is (not known)
+            assert d["figure"]["ambiguous"] is False
+            if not known:
+                assert d["card"]["kind"] == "needs_figure" and "не найдено" in d["card"]["hint"]
+                assert "вручную" in d["card"]["hint"]
+                r = confirm_figure(
+                    client, by_number(where, number)["id"], rect=[60, 110, 150, 170], page=1
+                )
+                assert r.status_code == 200, r.text
+
+
+def test_other_tasks_answers_and_keys_are_looked_for_in_a_frame_and_in_the_suggestion(tmp_path):
+    # The caption «рибосома» lies in the suggested frame of 1.2; it is the answer of 1.3 here.
+    tasks = good_tasks()
+    tasks[1]["options"] = OPTIONS_1_1  # the options of 1.2 do not name it
+    tasks[1]["answer_text"] = "Б"
+    tasks[2]["answer_text"] = "рибосома"
+    with import_layout(tmp_path, tasks) as client:
+        fig = detail(client, by_number(tmp_path, "1.2")["id"])["figure"]
+        assert "рибосома" in fig["leak"]
+        r = confirm_figure(client, by_number(tmp_path, "1.2")["id"])
+        assert r.status_code == 422 and "рибосома" in r.json()["error"]
+    # An answer text of another task (28) and a key typed for another task (30).
+    tasks = good_tasks()
+    with import_layout(tmp_path / "b", tasks) as client:
+        two = by_number(tmp_path / "b", "1.2")["id"]
+        cell = [150, 510, 400, 536]  # «28» is the answer text of 1.3
+        r = confirm_figure(client, two, rect=cell, page=2)
+        assert r.status_code == 422 and "28" in r.json()["error"], r.text
+    tasks = good_tasks()
+    tasks[2]["answer_text"] = None
+    with import_layout(tmp_path / "c", tasks) as client:
+        two = by_number(tmp_path / "c", "1.2")["id"]
+        three = by_number(tmp_path / "c", "1.3")["id"]
+        cell = [150, 510, 400, 536]
+        assert confirm_figure(client, two, rect=cell, page=2).status_code == 200  # nothing known
+        key = {"answer": "28"}
+        assert (
+            client.post(f"/parent/tasks/{three}/key", headers=PARENT, json=key).status_code == 200
+        )
+        r = confirm_figure(client, two, rect=cell, page=2)
+        assert r.status_code == 422 and "28" in r.json()["error"], r.text
+
+
+def test_the_continuation_is_checked_over_a_line_and_about_sixty_characters():
+    from tests.bank_helpers import doc_bytes
+    from tests.layout_pdf import _text
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _text(page, 50, 100, "Подпишите органоид клетки")
+    _text(page, 50, 116, "кровь человека под микроскопом нужно ещё очень много слов потом кровь")
+    _text(
+        page,
+        50,
+        700,
+        "Пустая строка и конец и ещё несколько слов подряд на самом краю кровь человека",
+    )
+    reopened = pymupdf.open("pdf", doc_bytes(doc))
+    try:
+        from app.ingest.figures import PageIndex
+
+        index = PageIndex(reopened)
+        same = "Подпишите органоид клетки\nкровь человека под микроскопом нужно"
+        assert index.locate(same)[0] == "known"
+        # The second line differs within the first 60 characters: unknown.
+        assert index.locate(same.replace("кровь", "лист"))[0] == "unknown"
+        # The difference lies far behind the checked part: the start is trusted.
+        tail = "Подпишите органоид клетки\nкровь человека под микроскопом нужно ещё очень много слов потом лист"
+        assert index.locate(tail)[0] == "known"
+        # The condition runs on past the end of the page: unknown, no error.
+        edge = (
+            "Пустая строка и конец и ещё несколько слов подряд на самом краю кровь человека и далее"
+        )
+        assert index.locate(edge)[0] == "unknown"
+    finally:
+        reopened.close()

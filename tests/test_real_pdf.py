@@ -141,13 +141,16 @@ def test_no_task_is_lost_and_the_first_figure_covers_all_its_photos():
             assert len(photos) >= 5
             figures = [json.loads(r["figure"]) for r in rows if r["figure"]]
             ambiguous = sum(1 for f in figures if f.get("ambiguous"))
+            unknown = sum(1 for f in figures if f.get("anchor_unknown"))
+            manual = sum(1 for f in figures if not f.get("regions"))
             assert figure["ambiguous"] is False and figure["suggested"] is True
             region = next(r for r in figure["regions"] if r["page"] == 4)
             frame = pymupdf.Rect(region["rect"])
             assert all((frame + (-1, -1, 1, 1)).contains(p) for p in photos), (frame, photos)
             print(
                 f"REAL-PDF counts: tasks={len(rows)} sections={len(sections)} "
-                f"figures={len(figures)} ambiguous_figures={ambiguous} photos_p4={len(photos)} "
+                f"figures={len(figures)} ambiguous_figures={ambiguous} unknown_figures={unknown} "
+                f"no_suggestion={manual} photos_p4={len(photos)} "
                 f"task_1.1_ambiguous={figure['ambiguous']} regions_of_1.1={len(figure['regions'])} "
                 f"leak_flags={len(figure['leak'])}"
             )

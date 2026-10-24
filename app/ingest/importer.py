@@ -8,9 +8,9 @@ import threading
 import pymupdf
 
 from app.ingest.extract import chunk_pages, extract_pages
-from app.ingest.figures import AMBIGUOUS, PageIndex, crop_leaks, suggest_regions
+from app.ingest.figures import PageIndex, crop_leaks, suggest_regions
 from app.ingest.keys import parse_key_text
-from app.ingest.leaks import crop_units, is_drawing
+from app.ingest.leaks import answer_units, crop_units, is_drawing
 from app.ingest.prompt import SYSTEM_PROMPT, TASKS_SCHEMA, build_chunk_message
 from app.ingest.schema import InvalidStructure, validate_section_at_end, validate_tasks
 from app.ingest.store import open_db, save_snapshot
@@ -198,27 +198,35 @@ AMBIGUOUS_REASON = (
     "Начало условия повторяется в сборнике — обведите рисунок вручную: автоматически "
     "его границы определить нельзя."
 )
+UNKNOWN_REASON = (
+    "Начало условия не найдено на страницах — обведите рисунок вручную: автоматически "
+    "его границы определить нельзя."
+)
 
 
-def _figure_record(doc, material_id: int, task: dict, start, stop=None) -> dict:
-    """start - (страница, y) якоря, None (не найден) или AMBIGUOUS; stop - якорь следующего."""
+def _figure_record(
+    doc, material_id: int, task: dict, located, stop=None, others: list[str] | None = None
+) -> dict:
+    """located - итог PageIndex.locate: ('known', [место]), ('ambiguous', ...) или ('unknown', []);
+    stop - ближайшее по месту начало любого другого условия; others - тексты ответов других
+    заданий, которых в вырезке быть не должно."""
+    kind, places = located
     page = (_figure_pages(task) or task["pages"])[0]
     regions = []
-    if start != AMBIGUOUS and doc is not None:
-        first = start[0] if start else page
-        regions = suggest_regions(
-            doc, first, start[1] if start else None, max(max(task["pages"]), first), stop
-        )
+    if kind == "known" and doc is not None:
+        first, start_y = places[0]
+        regions = suggest_regions(doc, first, start_y, max(max(task["pages"]), first), stop)
     leak = []
     if regions:  # ответ или варианты, уже напечатанные в предложенной области
         units = crop_units(task.get("answer_text"), [], task["options"], task["type"])
-        leak = crop_leaks(doc, regions, units)
+        leak = crop_leaks(doc, regions, [*units, *(others or [])])
     return {
         "material_id": material_id,
         "page": regions[0]["page"] if regions else page,
         "rect": regions[0]["rect"] if regions else None,
         "regions": regions,
-        "ambiguous": start == AMBIGUOUS,
+        "ambiguous": kind == "ambiguous",
+        "anchor_unknown": kind == "unknown",
         "leak": leak,
         "suggested": bool(regions),
         "confirmed": False,
@@ -242,33 +250,52 @@ def _task_variant(task: dict, material) -> str | None:
 
 
 def _positions(index: PageIndex, tasks: list[dict]) -> list:
-    """Места якорей: (страница, y), None (не найден) или AMBIGUOUS (начало повторяется)."""
-    return [index.find(task["text"]) for task in tasks]
+    """Итог PageIndex.locate для каждого задания."""
+    return [index.locate(task["text"]) for task in tasks]
 
 
-def _following(positions, index: int):
-    """Якорь следующего ПО МЕСТУ задания (страница, y): строго ниже, в порядке страниц, а не
-    в порядке модели. Следующих известных нет - None: границы снизу нет."""
-    mine = positions[index]
-    if not isinstance(mine, tuple):
+def _stops(located: list) -> list:
+    """Все известные начала условий в материале: и однозначные, и повторяющиеся (все их места)."""
+    return [place for _, places in located for place in places]
+
+
+def _following(located: list, stops: list, index: int):
+    """Начало ближайшего ПО МЕСТУ другого условия (страница, y) строго ниже якоря задания, в
+    порядке страниц, а не в порядке модели. Ниже ничего нет - None: границы снизу нет."""
+    kind, places = located[index]
+    if kind != "known":
         return None
-    later = [p for p in positions if isinstance(p, tuple) and p > mine]
+    later = [p for p in stops if p > places[0]]
     return min(later) if later else None
+
+
+def _foreign(task: dict) -> list[str]:
+    """Тексты ответа задания, которые не должны оказаться в рисунке соседнего."""
+    return answer_units(task.get("answer_text"))
 
 
 def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
     doc = pymupdf.open("pdf", pdf)
     try:
-        positions = _positions(PageIndex(doc), tasks)
+        located = _positions(PageIndex(doc), tasks)
+        stops = _stops(located)
         for index, task in enumerate(tasks):
             reason, wants_figure = _classify(task)
             figure = None
             if wants_figure:
+                others = [u for i, t in enumerate(tasks) if i != index for u in _foreign(t)]
                 figure = _figure_record(
-                    doc, material["id"], task, positions[index], _following(positions, index)
+                    doc,
+                    material["id"],
+                    task,
+                    located[index],
+                    _following(located, stops, index),
+                    others,
                 )
                 if figure["ambiguous"]:
                     reason = AMBIGUOUS_REASON
+                elif figure["anchor_unknown"]:
+                    reason = UNKNOWN_REASON
             # У задания без проверки ответа нет кандидата ключа: ответ со страницы - заметка.
             note = task.get("review_note")
             answer_text = task.get("answer_text")

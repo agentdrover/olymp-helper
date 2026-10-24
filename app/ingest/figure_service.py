@@ -6,7 +6,7 @@ from app.ingest import figures
 from app.ingest.answers import key_value
 from app.ingest.figures import crop_leaks
 from app.ingest.keys import candidate
-from app.ingest.leaks import crop_units
+from app.ingest.leaks import answer_units, crop_units, norm, significant
 from app.ingest.review import Refusal
 from app.ingest.store import (
     figure_of,
@@ -40,8 +40,7 @@ def _correct_labels(conn, task) -> list[str]:
     return []
 
 
-def leak_units(conn, task) -> list[str]:
-    """Что не должно быть напечатано в вырезке: ответ со страницы, ключ, тексты вариантов."""
+def _keys_of(conn, task) -> list[str]:
     keys = []
     value = key_value(task["answer_key"])
     cand = candidate(conn, task)
@@ -52,7 +51,23 @@ def leak_units(conn, task) -> list[str]:
             keys.extend(item)
         elif isinstance(item, dict):  # сопоставление: ответ - пара, а не обозначение стороны
             keys.extend(f"{k} {v}" for k, v in item.items())
-    return crop_units(task["answer_text"], keys, options_of(task), task["type"])
+    return keys
+
+
+def leak_units(conn, task) -> list[str]:
+    """Что не должно быть напечатано в вырезке: ответ со страницы, ключ и тексты вариантов
+    этого задания, а также ответы и ключи ВСЕХ других заданий материала: рамка задела
+    соседнее задание."""
+    units = crop_units(task["answer_text"], _keys_of(conn, task), options_of(task), task["type"])
+    others = conn.execute(
+        "SELECT * FROM task_item WHERE material_id = ? AND id != ?",
+        (task["material_id"], task["id"]),
+    ).fetchall()
+    for other in others:
+        for text in (*answer_units(other["answer_text"]), *map(norm, _keys_of(conn, other))):
+            if significant(text) and text not in units:
+                units.append(text)
+    return units
 
 
 def _rect_from(figure: dict, page, rect, rect_px, scale):

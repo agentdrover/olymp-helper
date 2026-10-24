@@ -55,6 +55,7 @@ def stored_to_clip(page, stored) -> pymupdf.Rect:
 AMBIGUOUS = "ambiguous"
 START_CHARS = 30  # с этого начала ищется якорь и растёт по словам, пока не станет единственным
 FALLBACK_CHARS = 15
+CONTINUATION_CHARS = 60  # столько знаков условия должны совпасть на месте начала
 
 
 def _flat(text: str) -> str:
@@ -95,28 +96,45 @@ class PageIndex:
             hits = self._extend(hits, words[:size], size)
         return hits, count
 
-    def find(self, text: str):
-        """(страница, y), если начало условия встречается в материале в одном месте; AMBIGUOUS,
-        если даже всё условие встречается не в одном (повторы не разбираются по порядку
-        заданий); None, если начала на страницах нет."""
+    def locate(self, text: str):
+        """('known', [место]) - начало условия в одном месте и дальше совпадает с условием;
+        ('ambiguous', [все места]) - даже всё условие не в одном месте; ('unknown', []) - начала
+        нет на страницах или продолжение не совпадает: искать не у чего."""
         segments = re.split(r"[|\n]", text.replace("[рисунок]", " "))
         while segments and len(segments[0].strip()) < 6:  # метка ячейки, не начало условия
             segments.pop(0)
         words = _flat(" ".join(segments)).split()
         if not words or len(" ".join(words)) < 6:
-            return None
+            return "unknown", []
         hits, count = self._prefix(words, START_CHARS)
         if not hits:  # начало отличается от страницы: короткое начало
             hits, _ = self._prefix(words, FALLBACK_CHARS)
-            if len(hits) == 1:
-                return self._place(hits[0])
-            return AMBIGUOUS if hits else None
-        while len(hits) > 1 and count < len(words):
-            count += 1
-            hits = self._extend(hits, words[:count], count)
-            if not hits:  # короткое начало было в нескольких местах, длинное - ни в одном
-                return AMBIGUOUS
-        return self._place(hits[0]) if len(hits) == 1 else AMBIGUOUS
+        else:
+            while len(hits) > 1 and count < len(words):
+                before, count = hits, count + 1
+                hits = self._extend(hits, words[:count], count)
+                if not hits:  # короткое начало было в нескольких местах, длинное - ни в одном
+                    return "ambiguous", [self._place(h) for h in before]
+        if len(hits) > 1:
+            return "ambiguous", [self._place(h) for h in hits]
+        if len(hits) == 1 and self._continues(hits[0], words, _flat(segments[0]).split()):
+            return "known", [self._place(hits[0])]
+        return "unknown", []
+
+    def _continues(self, hit, words, first_line):
+        """Дальше по странице идут те же слова условия: до конца первой строки или ячейки, но
+        не меньше CONTINUATION_CHARS знаков, если условие столько длится."""
+        need = max(len(first_line), 1)
+        while need < len(words) and len(" ".join(words[:need])) < CONTINUATION_CHARS:
+            need += 1
+        number, i = hit
+        page = self.pages[number]
+        return i + need <= len(page) and all(page[i + j][0] == words[j] for j in range(need))
+
+    def find(self, text: str):
+        """(страница, y), AMBIGUOUS или None: то же, что locate, одним значением."""
+        kind, places = self.locate(text)
+        return places[0] if kind == "known" else AMBIGUOUS if kind == "ambiguous" else None
 
     def _place(self, hit):
         number, i = hit
@@ -143,9 +161,6 @@ def _stored(page, rect: pymupdf.Rect) -> list[float]:
 
 
 def _nearest(boxes, anchor):
-    if anchor is None:
-        return min(boxes, key=lambda r: (r.y0, r.x0))
-
     def gap(r):
         vertical = max(0.0, r.y0 - anchor.y1, anchor.y0 - r.y1)
         return (vertical, abs((r.y0 + r.y1) / 2 - (anchor.y0 + anchor.y1) / 2))
@@ -171,11 +186,8 @@ def suggest_regions(
     предлагаются: рамку рисует родитель.
     """
     first = doc[first_page - 1]
-    if start_y is None:
-        boxes = _image_boxes(first)
-        return (
-            [{"page": first_page, "rect": _stored(first, _nearest(boxes, None))}] if boxes else []
-        )
+    if start_y is None:  # начало не найдено: рядом быть не с чем
+        return []
     end, cut = max(last_page, first_page), None
     if stop is not None and first_page <= stop[0] <= end:
         end, cut = stop
