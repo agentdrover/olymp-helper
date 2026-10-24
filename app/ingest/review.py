@@ -77,7 +77,8 @@ def _parse_answer(task, raw) -> object:
 
 def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
     """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято.
-    Подтверждённый рисунок проходит защиту от текста ответа заново: решение было для другого ключа."""
+    Подтверждённый рисунок проходит защиту от текста ответа заново: решение было для другого ключа;
+    то же для рисунков других заданий материала: новый ключ не должен быть напечатан в их вырезках."""
     task = _task(conn, task_id)
     if key_value(task["answer_key"]) == value and task["key_source"] == source:
         return {"revision": task["revision"], "key_version": task["key_version"]}
@@ -91,9 +92,10 @@ def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
     else:
         update_task(conn, task_id, **cols)
         save_snapshot(conn, task_id)
-    from app.ingest.figure_service import recheck_figure  # figure_service импортирует review
+    # figure_service импортирует review
+    from app.ingest.figure_service import recheck_material_figures
 
-    recheck_figure(ctx, conn, task_id)
+    recheck_material_figures(ctx, conn, task_id)
     task = get_task(conn, task_id)
     return {"revision": task["revision"], "key_version": task["key_version"]}
 

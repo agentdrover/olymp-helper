@@ -1569,3 +1569,22 @@ def test_the_continuation_is_checked_over_a_line_and_about_sixty_characters():
         assert index.locate(edge)[0] == "unknown"
     finally:
         reopened.close()
+
+
+def test_no_image_inside_the_span_proposes_nothing_even_if_a_neighbour_has_one():
+    from app.ingest import figures
+
+    # The only image sits at y = 300; the next task starts above it at y = 200 on the same page.
+    doc = pymupdf.open("pdf", _photos_pdf((300,)))
+    try:
+        assert figures.suggest_regions(doc, 1, 60.0, 1, stop=(1, 200.0)) == []
+        # Without a next task the nearest image is still offered.
+        assert [r["page"] for r in figures.suggest_regions(doc, 1, 60.0, 1)] == [1]
+        # An image above the start, with the next task still below it, is the nearest one.
+        assert [r["page"] for r in figures.suggest_regions(doc, 1, 340.0, 1, stop=(1, 400.0))] == [
+            1
+        ]
+        # An image inside the span is still taken.
+        assert [r["page"] for r in figures.suggest_regions(doc, 1, 60.0, 1, stop=(1, 400.0))] == [1]
+    finally:
+        doc.close()

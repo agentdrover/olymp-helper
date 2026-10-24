@@ -226,3 +226,17 @@ def recheck_figure(ctx, conn, task_id: int) -> None:
     else:
         update_task(conn, task_id, figure=figure)
         save_snapshot(conn, task_id)
+
+
+def recheck_material_figures(ctx, conn, task_id: int) -> None:
+    """Ключ задания изменился: его текст входит в защиту от утечки у каждого другого задания
+    материала (leak_units), поэтому уже подтверждённые рисунки соседей проходят проверку заново."""
+    recheck_figure(ctx, conn, task_id)
+    task = get_task(conn, task_id)
+    if task is None:
+        return
+    rows = conn.execute(
+        "SELECT id FROM task_item WHERE material_id = ? AND id != ?", (task["material_id"], task_id)
+    ).fetchall()
+    for row in rows:
+        recheck_figure(ctx, conn, row["id"])

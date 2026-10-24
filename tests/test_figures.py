@@ -341,6 +341,37 @@ def test_ac14(tmp_path):
         assert "rect" not in shown["figure"] and "file" not in shown["figure"]
 
 
+def _printed_number_pdf() -> bytes:
+    """Task 11 with a picture on which the number 42 is printed; task 12 follows below."""
+    from tests.bank_helpers import doc_bytes, quad_png, write_lines
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_image(pymupdf.Rect(60, 120, 260, 260), stream=quad_png(), keep_proportion=False)
+    page.insert_text((80, 200), "42", fontsize=14, fontname="helv")
+    write_lines(page, ["11. Рассмотрите рисунок и выберите верный ответ."], y=400)
+    write_lines(page, ["12. Сколько хромосом в клетке?"], y=500)
+    return doc_bytes(doc)
+
+
+def test_a_neighbours_new_key_unpublishes_a_figure_that_prints_it(tmp_path):
+    numeric = make_task(12, "Сколько хромосом в клетке?", type="numeric")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 200
+
+        r = c.post(f"/parent/tasks/{other}/key", headers=PARENT, json={"answer": "42"})
+        assert r.status_code == 200, r.text
+        got = detail(c, fig)
+        assert got["figure"]["confirmed"] is False and got["status"] == "unsupported"
+        assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 404
+        assert c.get(f"/tasks/{fig}/figure.png", headers=CHILD).status_code == 404
+
+
 # -------------------------------------------------------------------- AC-22
 
 
