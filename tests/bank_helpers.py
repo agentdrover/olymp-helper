@@ -52,9 +52,16 @@ def doc_bytes(doc) -> bytes:
 
 
 def text_pdf(pages: list[list[str]]) -> bytes:
+    """Pages of text lines. A page with a very long text is set small and wrapped, so that it
+    stays on the page: the extractor reads only what lies on the page."""
     doc = pymupdf.open()
     for lines in pages:
-        write_lines(doc.new_page(), lines)
+        page = doc.new_page()
+        if sum(len(line) for line in lines) <= 2000:
+            write_lines(page, lines)
+            continue
+        wrapped = [line[i : i + 200] for line in lines for i in range(0, len(line) or 1, 200)]
+        write_lines(page, wrapped, size=4, step=5)
     return doc_bytes(doc)
 
 

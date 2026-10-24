@@ -236,6 +236,7 @@ class FigureBody(BaseModel):
     teacher_note: str | None = None
     no_answer_ack: bool = False
     teacher_note_ack: bool = False
+    leak_ack: bool = False  # явное решение: текст ответа в вырезке оставлен намеренно
 
 
 def _advance(request: Request, conn, task_id: int, *, stay_if_open: bool = False) -> dict:
@@ -367,6 +368,7 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
         teacher_note=body.teacher_note,
         no_answer_ack=body.no_answer_ack,
         teacher_note_ack=body.teacher_note_ack,
+        leak_ack=body.leak_ack,
     )
 
 

@@ -119,3 +119,65 @@ def test_ac2_settings_stage_date(tmp_path):
         except sqlite3.IntegrityError:
             continue
         raise AssertionError(f"stage_date accepted: {bad!r}")
+
+
+def test_numeric_type_migration_keeps_the_data(tmp_path):
+    """0008 widens the type check of task_item in place: rows, revisions and events stay."""
+    from app.db import _migration_files
+
+    conn = connect(tmp_path / "olymp.db")
+    conn.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
+        "applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    from app.db import _statements
+
+    for version, path in _migration_files()[:7]:
+        for stmt in _statements(path.read_text(encoding="utf-8")):
+            conn.execute(stmt)
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
+    conn.execute(
+        "INSERT INTO material(file, sha256, kind, import_status) "
+        "VALUES ('a.pdf', 'h1', 'tasks', 'done')"
+    )
+    conn.execute("INSERT INTO task_item(material_id, type, text) VALUES (1, 'single', 'q')")
+    conn.execute(
+        "INSERT INTO task_revision(task_item_id, revision, key_version, snapshot, created_at) "
+        "VALUES (1, 1, 1, '{}', 't')"
+    )
+    conn.execute("INSERT INTO study_session(started_at, last_activity_at) VALUES ('t', 't')")
+    conn.execute(
+        "INSERT INTO event(session_id, type, task_item_id, created_at) VALUES (1, 'chat', 1, 't')"
+    )
+    try:
+        conn.execute("INSERT INTO task_item(material_id, type, text) VALUES (1, 'numeric', 'q')")
+        raise AssertionError("numeric was allowed before the migration")
+    except sqlite3.IntegrityError:
+        pass
+
+    assert migrate(conn) == SCHEMA_VERSION
+    assert conn.execute("SELECT type, text FROM task_item").fetchall() == [("single", "q")]
+    assert conn.execute("SELECT COUNT(*) FROM task_revision").fetchone()[0] == 1
+    assert conn.execute("SELECT task_item_id FROM event").fetchall() == [(1,)]
+    conn.execute("INSERT INTO task_item(material_id, type, text) VALUES (1, 'numeric', 'q')")
+    for bad in ("essay", "NUMERIC"):
+        try:
+            conn.execute(
+                "INSERT INTO task_item(material_id, type, text) VALUES (1, ?, 'q')", (bad,)
+            )
+            raise AssertionError(bad)
+        except sqlite3.IntegrityError:
+            pass
+    assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM pragma_table_info('task_item') "
+            "WHERE name IN ('answer_text', 'parent_note')"
+        ).fetchone()[0]
+        == 2
+    )
+    # A second start changes nothing.
+    assert migrate(conn) == SCHEMA_VERSION
+    other = connect(tmp_path / "olymp.db")
+    other.execute("INSERT INTO task_item(material_id, type, text) VALUES (1, 'numeric', 'r')")

@@ -9,6 +9,8 @@ import re
 
 import pymupdf
 
+from app.ingest.leaks import contains_phrase, norm, significant
+
 SCALE = 2.0  # PNG рисунка рендерится в двойном разрешении
 DISPLAY_WIDTH_PX = 560  # SPEC 1.1: рисунок показывается не уже 560 px
 MIN_LABEL_PX = 10.0  # подписи мельче этого размера при показе - рисунок нечитаем
@@ -58,13 +60,8 @@ def _anchor(page, text: str):
     return None
 
 
-def suggest_rect(doc: pymupdf.Document, page_no: int, task_text: str) -> list[float] | None:
-    """Рамка по месту встроенного растрового изображения рядом с заданием; иначе None.
-
-    Скан (изображение почти на всю страницу) и векторная схема (изображений нет) не
-    предлагаются: рамку рисует родитель.
-    """
-    page = doc[page_no - 1]
+def _image_boxes(page) -> list[pymupdf.Rect]:
+    """Растровые изображения страницы без мелочи и без скана на всю страницу."""
     area = abs(page.cropbox.width * page.cropbox.height)
     boxes = []
     for info in page.get_image_info():
@@ -74,20 +71,67 @@ def suggest_rect(doc: pymupdf.Document, page_no: int, task_text: str) -> list[fl
         if rect.width * rect.height >= SCAN_SHARE * area:
             continue
         boxes.append(rect)
-    if not boxes:
-        return None
-    anchor = _anchor(page, task_text)
-    if anchor is None:
-        best = min(boxes, key=lambda r: (r.y0, r.x0))
-    else:
+    return boxes
 
-        def gap(r):
-            vertical = max(0.0, r.y0 - anchor.y1, anchor.y0 - r.y1)
-            return (vertical, abs((r.y0 + r.y1) / 2 - (anchor.y0 + anchor.y1) / 2))
 
-        best = min(boxes, key=gap)
+def _stored(page, rect: pymupdf.Rect) -> list[float]:
     origin = _crop_origin(page)
-    return [best.x0 + origin.x, best.y0 + origin.y, best.x1 + origin.x, best.y1 + origin.y]
+    return [rect.x0 + origin.x, rect.y0 + origin.y, rect.x1 + origin.x, rect.y1 + origin.y]
+
+
+def _nearest(boxes, anchor):
+    if anchor is None:
+        return min(boxes, key=lambda r: (r.y0, r.x0))
+
+    def gap(r):
+        vertical = max(0.0, r.y0 - anchor.y1, anchor.y0 - r.y1)
+        return (vertical, abs((r.y0 + r.y1) / 2 - (anchor.y0 + anchor.y1) / 2))
+
+    return min(boxes, key=gap)
+
+
+def suggest_regions(
+    doc: pymupdf.Document,
+    first_page: int,
+    task_text: str,
+    last_page: int,
+    next_page: int | None = None,
+    next_text: str | None = None,
+) -> list[dict]:
+    """Области рисунка: все растровые изображения между якорем этого задания и якорем
+    следующего, по одной области (объединению) на страницу. Задание на нескольких страницах
+    даёт несколько областей. Если между якорями изображений нет, берётся ближайшее к якорю.
+
+    Скан (изображение почти на всю страницу) и векторная схема (изображений нет) не
+    предлагаются: рамку рисует родитель.
+    """
+    anchor = _anchor(doc[first_page - 1], task_text)
+    end, stop = max(last_page, first_page), None
+    if next_page is not None and next_text and first_page <= next_page <= len(doc):
+        stop = _anchor(doc[next_page - 1], next_text)
+        if stop is not None:
+            end = next_page
+    regions = []
+    for number in range(first_page, end + 1):
+        page = doc[number - 1]
+        top = anchor.y0 if number == first_page and anchor is not None else float("-inf")
+        bottom = stop.y0 if number == end and stop is not None else float("inf")
+        inside = [r for r in _image_boxes(page) if top - 1 <= r.y0 < bottom]
+        if inside:
+            regions.append({"page": number, "rect": _stored(page, _union(inside))})
+    if regions:
+        return regions
+    boxes = _image_boxes(doc[first_page - 1])
+    if not boxes:
+        return []
+    return [{"page": first_page, "rect": _stored(doc[first_page - 1], _nearest(boxes, anchor))}]
+
+
+def _union(rects) -> pymupdf.Rect:
+    out = pymupdf.Rect(rects[0])
+    for rect in rects[1:]:
+        out |= rect
+    return out
 
 
 # ------------------------------------------------------------------ PNG и читаемость
@@ -123,17 +167,65 @@ def labels_readable(doc, page_no, stored) -> bool:
     return smallest is None or smallest >= MIN_LABEL_PX
 
 
+def regions_readable(doc, regions) -> bool:
+    return all(labels_readable(doc, r["page"], r["rect"]) for r in regions)
+
+
+def render_regions_png(doc: pymupdf.Document, regions: list[dict]) -> bytes:
+    """Одна PNG на весь рисунок: области страниц друг под другом, в порядке страниц."""
+    if len(regions) == 1:
+        return render_figure_png(doc, regions[0]["page"], regions[0]["rect"])
+    parts = [pymupdf.Pixmap(render_figure_png(doc, r["page"], r["rect"])) for r in regions]
+    width = max(p.width for p in parts)
+    sheet = pymupdf.open()
+    page = sheet.new_page(width=width, height=sum(p.height for p in parts))
+    top = 0
+    for part in parts:
+        page.insert_image(pymupdf.Rect(0, top, part.width, top + part.height), pixmap=part)
+        top += part.height
+    return page.get_pixmap(alpha=False).tobytes("png")
+
+
+def _crop_lines(doc, region) -> list[str]:
+    """Нормализованные строки текста, попавшие в рамку (в том числе частично)."""
+    page = doc[region["page"] - 1]
+    area = cropbox_relative(page, region["rect"])
+    lines = []
+    for block in page.get_text("dict", clip=area).get("blocks", []):
+        for line in block.get("lines", []):
+            spans = [
+                s["text"]
+                for s in line.get("spans", [])
+                if s["text"].strip() and pymupdf.Rect(s["bbox"]).intersects(area)
+            ]
+            text = norm(" ".join(spans))
+            if text:
+                lines.append(text)
+    return lines
+
+
+def crop_leaks(doc: pymupdf.Document, regions: list[dict], units: list[str]) -> list[str]:
+    """Тексты из units (ответ, ключ, варианты), напечатанные внутри рамки.
+
+    Текст рамки сравнивается по строкам в обе стороны: строка содержит текст ответа или
+    сама входит в него. Однознаковое и пустое не берётся."""
+    wanted = []
+    for unit in units:
+        unit = norm(unit)
+        if significant(unit) and unit not in wanted:
+            wanted.append(unit)
+    lines = [line for region in regions for line in _crop_lines(doc, region)]
+    return [
+        unit
+        for unit in wanted
+        if any(
+            contains_phrase(line, unit) or (significant(line) and contains_phrase(unit, line))
+            for line in lines
+        )
+    ]
+
+
 # --------------------------------------------------------------- проверка alt и пометок
-
-_WORD = re.compile(r"[0-9a-zа-я]+")
-
-
-def _norm(text: str) -> str:
-    return " ".join(_WORD.findall(text.lower().replace("ё", "е")))
-
-
-def _contains_phrase(haystack: str, phrase: str) -> bool:
-    return f" {phrase} " in f" {haystack} "
 
 
 def alt_problem(alt: str, options, correct_labels: list[str]) -> str | None:
@@ -143,17 +235,17 @@ def alt_problem(alt: str, options, correct_labels: list[str]) -> str | None:
         return (
             "Описание рисунка (alt) обязательно: ребёнку и экранному диктору нужен короткий текст."
         )
-    normalized = _norm(alt)
+    normalized = norm(alt)
     texts = []
     if isinstance(options, list):
         texts = [o.get("text", "") for o in options]
     elif isinstance(options, dict):
         texts = [o.get("text", "") for side in options.values() for o in side]
     for text in texts:
-        phrase = _norm(text)
+        phrase = norm(text)
         # Любой текст варианта целой фразой (нормализация, ё = е), буквы и цифры. Пропускается
         # только однознаковый текст: это обозначение, его закрывает проверка меток ниже.
-        if len(phrase.replace(" ", "")) >= 2 and _contains_phrase(normalized, phrase):
+        if len(phrase.replace(" ", "")) >= 2 and contains_phrase(normalized, phrase):
             return f"Описание рисунка содержит вариант ответа «{text}». Уберите его: в alt не должно быть ответа."
     for label in correct_labels:
         if label and re.search(rf"(?<!\w){re.escape(label)}(?!\w)", alt, re.IGNORECASE):

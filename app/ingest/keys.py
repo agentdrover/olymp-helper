@@ -1,9 +1,10 @@
 """Загруженный ключ ответов: разбор и привязка к заданию (SPEC-1.0 1.2)."""
 
+import json
 import re
 import sqlite3
 
-from app.ingest.answers import display, normalize_answer
+from app.ingest.answers import display, fit_page_answer, normalize_answer
 
 _LINE = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})?)\s*[.)\-–—:]\s*(.+?)\s*$")
 _LEADING_ZEROS = re.compile(r"^0+(?=\d)")
@@ -24,11 +25,30 @@ def parse_key_text(pages: list[tuple[int, str]]) -> dict[str, str]:
     return out
 
 
+def page_candidate(task) -> dict | None:
+    """Ответ, напечатанный на странице самого задания (answer_text), приведённый к заданию."""
+    options = json.loads(task["options"]) if task["options"] else None
+    value = fit_page_answer(task["answer_text"], task["type"], options)
+    if value is None:
+        return None
+    return {
+        "answer": display(value),
+        "value": value,
+        "material_id": task["material_id"],
+        "source": "page",
+    }
+
+
 def candidate(conn: sqlite3.Connection, task) -> dict | None:
-    """Ответ из загруженного ключа ТОГО ЖЕ сборника, варианта и номера; иначе None.
+    """Кандидат ключа: сначала загруженный ключ, затем ответ со страницы задания.
 
     Кандидат не ключ: official он становится только после подтверждения родителем.
     """
+    return _uploaded_candidate(conn, task) or page_candidate(task)
+
+
+def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
+    """Ответ из загруженного ключа ТОГО ЖЕ сборника, варианта и номера; иначе None."""
     number = normalize_number(str(task["source_number"] or ""))
     if not number:
         return None
@@ -47,5 +67,10 @@ def candidate(conn: sqlite3.Connection, task) -> dict | None:
     for material_id, raw in rows:
         value = normalize_answer(raw, task["type"])
         if value is not None:
-            return {"answer": display(value), "value": value, "material_id": material_id}
+            return {
+                "answer": display(value),
+                "value": value,
+                "material_id": material_id,
+                "source": "key_file",
+            }
     return None

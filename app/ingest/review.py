@@ -5,7 +5,7 @@ import json
 from app.ingest.answers import display, key_json, key_value, normalize_answer
 from app.ingest.keys import candidate
 from app.ingest.model_answer import compute_model_answer, model_value
-from app.ingest.publish import publication
+from app.ingest.publish import leak_notice, publication
 from app.ingest.schema import InvalidStructure, check_options
 from app.ingest.store import (
     figure_of,
@@ -66,7 +66,8 @@ def _labels_of(task) -> set[str]:
 def _parse_answer(task, raw) -> object:
     value = normalize_answer(raw, task["type"])
     if value is None:
-        raise Refusal(f"Не удалось понять ответ «{raw}». Укажите обозначение варианта.")
+        what = "число" if task["type"] == "numeric" else "обозначение варианта"
+        raise Refusal(f"Не удалось понять ответ «{raw}». Укажите {what}.")
     labels = _labels_of(task)
     named = [value] if isinstance(value, str) else value if isinstance(value, list) else []
     if labels and any(v not in labels for v in named):
@@ -172,6 +173,9 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
             task["unsupported_reason"]
             or "Задание не поддерживается: подтвердите рисунок или впишите условие."
         )
+    blocked = leak_notice(task)
+    if blocked:
+        raise Refusal(blocked)
     figure = figure_of(task)
     if figure is not None and not figure.get("confirmed"):
         raise Refusal("Сначала подтвердите рисунок.")
@@ -253,7 +257,8 @@ def build_card(ctx, conn, task) -> dict | None:
         kind, hint = "child_dispute", "Ребёнок считает ключ спорным. Проверьте ответ."
     elif status == "unsupported":
         if task["type"] == "open":
-            kind, hint = "open_exclude", "Открытое задание вне v1: исключите его."
+            kind = "open_exclude"
+            hint = task["unsupported_reason"] or "Открытое задание вне v1: исключите его."
         else:
             kind = "needs_figure"
             hint = task["unsupported_reason"] or (
@@ -297,6 +302,8 @@ def build_card(ctx, conn, task) -> dict | None:
         "label": LABELS[kind],
         "hint": hint,
         "note": task["review_note"],
+        "parent_note": task["parent_note"],
+        "warning": leak_notice(task),
         "button": button,
         "field": "answer" if kind == "no_key" else None,
         "retry": kind == "model_missing",
@@ -344,7 +351,13 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         "key_source": task["key_source"],
         "key_candidate": None
         if cand is None
-        else {"answer": cand["answer"], "material_id": cand["material_id"]},
+        else {
+            "answer": cand["answer"],
+            "material_id": cand["material_id"],
+            "source": cand["source"],
+        },
+        "answer_text": task["answer_text"],
+        "parent_note": task["parent_note"],
         "model_answer": None
         if not task["model_answer"]
         else json.loads(task["model_answer"])["answer"],

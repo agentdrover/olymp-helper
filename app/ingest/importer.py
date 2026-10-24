@@ -8,8 +8,9 @@ import threading
 import pymupdf
 
 from app.ingest.extract import chunk_pages, extract_pages
-from app.ingest.figures import suggest_rect
+from app.ingest.figures import crop_leaks, suggest_regions
 from app.ingest.keys import parse_key_text
+from app.ingest.leaks import crop_units, is_drawing
 from app.ingest.prompt import SYSTEM_PROMPT, TASKS_SCHEMA, build_chunk_message
 from app.ingest.schema import InvalidStructure, validate_section_at_end, validate_tasks
 from app.ingest.store import open_db, save_snapshot
@@ -120,6 +121,10 @@ def merge_repeat(old: dict, new: dict) -> dict:
     merged["pages"] = sorted(set(old["pages"]) | set(new["pages"]))
     merged["refers_to_figure"] = old["refers_to_figure"] or new["refers_to_figure"]
     merged["figure_pages"] = sorted(set(_figure_pages(old)) | set(_figure_pages(new)))
+    # Ответ со страницы: из порций берётся более полный.
+    merged["answer_text"] = max(
+        old.get("answer_text"), new.get("answer_text"), key=lambda t: len(t or "")
+    )
     if old["type"] != new["type"]:
         # Тип и варианты - одна пара: смешивать варианты разных типов нельзя.
         merged["options"], options_differ = keep["options"], True
@@ -163,27 +168,62 @@ def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
     return list(seen.values())
 
 
-def _unsupported_reason(task: dict) -> str | None:
+DRAWING_REASON = (
+    "Задание на рисование вне v1: ответ рисуют, а не вводят. Элементы ответа остались "
+    "в заметке; задание можно исключить."
+)
+SCORED_REASON = (
+    "Развёрнутый ответ с баллами вне v1: его проверяет родитель. Эталон остался в заметке; "
+    "задание можно исключить."
+)
+OPEN_REASON = "Открытое задание вне v1: его можно исключить."
+FIGURE_REASON = (
+    "Условие зависит от рисунка, схемы или таблицы: подтвердите рисунок или впишите условие."
+)
+
+
+def _classify(task: dict) -> tuple[str | None, bool]:
+    """(причина неподдерживаемости или None, нужен ли рисунок для подтверждения)."""
     if task["type"] == "open":
-        return "Открытое задание вне v1: его можно исключить."
+        if is_drawing(task["text"]):
+            return DRAWING_REASON, False
+        scored = task["points"] or "балл" in (task.get("answer_text") or "").lower()
+        return (SCORED_REASON if scored else OPEN_REASON), False
     if task["refers_to_figure"] or FIGURE_WORDS.search(task["text"]):
-        return "Условие зависит от рисунка, схемы или таблицы: подтвердите рисунок или впишите условие."
-    return None
+        return FIGURE_REASON, True
+    return None, False
 
 
-def _figure_record(doc, material_id: int, task: dict) -> dict:
+def _figure_record(doc, material_id: int, task: dict, following: dict | None) -> dict:
     page = (_figure_pages(task) or task["pages"])[0]
-    rect = suggest_rect(doc, page, task["text"]) if doc is not None else None
+    regions = []
+    if doc is not None:
+        next_page = _text_page(following) if following else None
+        regions = suggest_regions(
+            doc,
+            page,
+            task["text"],
+            max(task["pages"]),
+            next_page,
+            following["text"] if following else None,
+        )
+    leak = []
+    if regions:  # ответ или варианты, уже напечатанные в предложенной области
+        units = crop_units(task.get("answer_text"), [], task["options"])
+        leak = crop_leaks(doc, regions, units)
     return {
         "material_id": material_id,
-        "page": page,
-        "rect": rect,
-        "suggested": rect is not None,
+        "page": regions[0]["page"] if regions else page,
+        "rect": regions[0]["rect"] if regions else None,
+        "regions": regions,
+        "leak": leak,
+        "suggested": bool(regions),
         "confirmed": False,
         "alt": f"Рисунок к заданию {task['number']}, страница {page}",
         "teacher_note": "",
         "no_answer_ack": False,
         "teacher_note_ack": False,
+        "leak_ack": False,
         "file": None,
     }
 
@@ -201,16 +241,23 @@ def _task_variant(task: dict, material) -> str | None:
 def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
     doc = pymupdf.open("pdf", pdf)
     try:
-        for task in tasks:
-            reason = _unsupported_reason(task)
+        for index, task in enumerate(tasks):
+            reason, wants_figure = _classify(task)
             figure = None
-            if reason and task["type"] != "open":
-                figure = _figure_record(doc, material["id"], task)
+            if wants_figure:
+                following = tasks[index + 1] if index + 1 < len(tasks) else None
+                figure = _figure_record(doc, material["id"], task, following)
+            # У задания без проверки ответа нет кандидата ключа: ответ со страницы - заметка.
+            note = task.get("review_note")
+            answer_text = task.get("answer_text")
+            parent_note = None
+            if reason and not wants_figure:
+                parent_note, answer_text = answer_text, None
             cur = conn.execute(
                 "INSERT INTO task_item (material_id, page_from, page_to, variant, source_number, "
                 "type, text, options, points, topic, import_status, figure, unsupported_reason, "
-                "section, stage, review_note, text_page) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "section, stage, review_note, text_page, answer_text, parent_note) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     material["id"],
                     min(task["pages"]),
@@ -229,8 +276,10 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
                     reason,
                     task["section"],
                     task["stage"] or material["stage"],
-                    task.get("review_note"),
+                    note,
                     _text_page(task),
+                    answer_text,
+                    parent_note,
                 ),
             )
             save_snapshot(conn, cur.lastrowid)
