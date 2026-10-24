@@ -97,6 +97,30 @@ def _label_for(token: str, options) -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+_END = r"(?:№\s*)?([0-9]+|[A-Za-zА-Яа-яЁё])"
+_RANGE = re.compile(rf"(?<![\w]){_END}\s*(?:…|\.{{2,}}|[-–—])\s*{_END}(?![\w])")
+
+
+_DASHES = re.compile(r"…|\.\.|[-–—]")
+
+
+def _expand_ranges(raw: str, order: list[str]) -> str | None:
+    """«№ 2 … № 7», «2-7», «2...7» -> «2, 3, 4, 5, 6, 7»: все обозначения между концами по порядку
+    вариантов. Если конец - не обозначение задания или диапазон идёт назад, None."""
+    failed = False
+
+    def expand(found):
+        nonlocal failed
+        a, b = _label(found.group(1)), _label(found.group(2))
+        if a not in order or b not in order or order.index(a) > order.index(b):
+            failed = True
+            return ""
+        return ", ".join(order[order.index(a) : order.index(b) + 1])
+
+    out = _RANGE.sub(expand, raw)
+    return None if failed or _DASHES.search(out) else out  # a range left unread is ambiguous
+
+
 def fit_page_answer(raw, task_type: str, options):
     """Ответ со страницы задания, приведённый к заданию: обозначения вариантов или число.
 
@@ -113,6 +137,9 @@ def fit_page_answer(raw, task_type: str, options):
     if not isinstance(options, list):
         return None
     labels = set(_texts(options))
+    raw = _expand_ranges(str(raw), [normalize_answer(o["label"], "single") for o in options])
+    if raw is None:
+        return None
     value = normalize_answer(raw, task_type)
     named = [value] if isinstance(value, str) else value or []
     if value is not None and named and all(v in labels for v in named):

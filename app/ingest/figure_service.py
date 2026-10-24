@@ -100,7 +100,7 @@ def confirm_figure(
     doc = pymupdf.open(str(ctx.material_path(material["file"])))
     try:
         page_no = figure["page"]
-        regions = [dict(r) for r in figure.get("regions") or []]
+        regions = figures.regions_of(figure)
         pages = {r["page"] for r in regions} | {page_no}
         if rect_px is not None and page is None:
             raise Refusal("Для нарисованной рамки нужна страница, на которой она нарисована.")
@@ -186,13 +186,14 @@ def recheck_figure(ctx, conn, task_id: int) -> None:
     if figure is None or not figure.get("confirmed"):
         return
     found = []
-    if figure.get("regions"):
+    regions = figures.regions_of(figure)
+    if regions:
         material = conn.execute(
             "SELECT file FROM material WHERE id = ?", (task["material_id"],)
         ).fetchone()
         doc = pymupdf.open(str(ctx.material_path(material["file"])))
         try:
-            found = crop_leaks(doc, figure["regions"], leak_units(conn, task))
+            found = crop_leaks(doc, regions, leak_units(conn, task))
         finally:
             doc.close()
     alt_bad = figures.alt_problem(

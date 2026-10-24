@@ -9,11 +9,13 @@ import re
 
 import pymupdf
 
+from app.ingest.answers import normalize_answer
 from app.ingest.leaks import contains_phrase, norm, significant
 
 SCALE = 2.0  # PNG рисунка рендерится в двойном разрешении
 DISPLAY_WIDTH_PX = 560  # SPEC 1.1: рисунок показывается не уже 560 px
 MIN_LABEL_PX = 10.0  # подписи мельче этого размера при показе - рисунок нечитаем
+_NUMBER = re.compile(r"(?<![\w.,])\d+(?:[.,]\d+)?(?![\w])")
 SCAN_SHARE = 0.9  # изображение на такую долю страницы - скан, а не рисунок
 MIN_SIDE_PT = 20.0
 
@@ -50,7 +52,7 @@ def stored_to_clip(page, stored) -> pymupdf.Rect:
 # ------------------------------------------------------------------------ автопоиск
 
 
-def _anchor(page, text: str):
+def anchor(page, text: str):
     for needle in (text[:30], text[:15]):
         needle = " ".join(needle.split())
         if len(needle) >= 6:
@@ -105,26 +107,39 @@ def suggest_regions(
     Скан (изображение почти на всю страницу) и векторная схема (изображений нет) не
     предлагаются: рамку рисует родитель.
     """
-    anchor = _anchor(doc[first_page - 1], task_text)
+    first = doc[first_page - 1]
+    start = anchor(first, task_text)
+    if start is None:  # без якоря границ нет: объединять нечего, берётся ближайшее изображение
+        boxes = _image_boxes(first)
+        return (
+            [{"page": first_page, "rect": _stored(first, _nearest(boxes, None))}] if boxes else []
+        )
     end, stop = max(last_page, first_page), None
     if next_page is not None and next_text and first_page <= next_page <= len(doc):
-        stop = _anchor(doc[next_page - 1], next_text)
+        stop = anchor(doc[next_page - 1], next_text)
         if stop is not None:
             end = next_page
     regions = []
     for number in range(first_page, end + 1):
         page = doc[number - 1]
-        top = anchor.y0 if number == first_page and anchor is not None else float("-inf")
+        top = start.y0 if number == first_page else float("-inf")
         bottom = stop.y0 if number == end and stop is not None else float("inf")
         inside = [r for r in _image_boxes(page) if top - 1 <= r.y0 < bottom]
         if inside:
             regions.append({"page": number, "rect": _stored(page, _union(inside))})
     if regions:
         return regions
-    boxes = _image_boxes(doc[first_page - 1])
-    if not boxes:
-        return []
-    return [{"page": first_page, "rect": _stored(doc[first_page - 1], _nearest(boxes, anchor))}]
+    boxes = _image_boxes(first)
+    return [{"page": first_page, "rect": _stored(first, _nearest(boxes, start))}] if boxes else []
+
+
+def regions_of(figure: dict) -> list[dict]:
+    """Области рисунка; запись старого вида (page и rect без regions) - одна область."""
+    if figure.get("regions"):
+        return [dict(r) for r in figure["regions"]]
+    if figure.get("rect") and figure.get("page"):
+        return [{"page": figure["page"], "rect": list(figure["rect"])}]
+    return []
 
 
 def _union(rects) -> pymupdf.Rect:
@@ -256,7 +271,11 @@ def alt_problem(alt: str, options, correct_labels: list[str]) -> str | None:
         # только однознаковый текст: это обозначение, его закрывает проверка меток ниже.
         if len(phrase.replace(" ", "")) >= 2 and contains_phrase(normalized, phrase):
             return f"Описание рисунка содержит вариант ответа «{text}». Уберите его: в alt не должно быть ответа."
+    shown = {n for raw in _NUMBER.findall(alt) if (n := normalize_answer(raw, "numeric"))}
     for label in correct_labels:
+        number = normalize_answer(label, "numeric") if label else None
+        if number is not None and number in shown:  # «28,5», «28.50» и «28.5» - одно число
+            return f"Описание рисунка называет число-ответ «{label}». Уберите его."
         if label and re.search(rf"(?<!\w){re.escape(label)}(?!\w)", alt, re.IGNORECASE):
             return f"Описание рисунка называет обозначение верного варианта «{label}». Уберите его."
     return None

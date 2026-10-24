@@ -8,7 +8,7 @@ import threading
 import pymupdf
 
 from app.ingest.extract import chunk_pages, extract_pages
-from app.ingest.figures import crop_leaks, suggest_regions
+from app.ingest.figures import anchor, crop_leaks, suggest_regions
 from app.ingest.keys import parse_key_text
 from app.ingest.leaks import crop_units, is_drawing
 from app.ingest.prompt import SYSTEM_PROMPT, TASKS_SCHEMA, build_chunk_message
@@ -238,14 +238,29 @@ def _task_variant(task: dict, material) -> str | None:
     return found.group(1) if found else material["variant"]
 
 
+def _position(doc, task: dict):
+    """Место якоря задания на странице: (страница, y) или None, если текст не найден."""
+    page = _text_page(task)
+    found = anchor(doc[page - 1], task["text"]) if 1 <= page <= len(doc) else None
+    return None if found is None else (page, found.y0)
+
+
+def _following(tasks, positions, index):
+    """Ближайшее СЛЕДУЮЩЕЕ по месту на страницах задание, в каком бы порядке его ни назвала модель."""
+    mine = positions[index]
+    later = [(p, i) for i, p in enumerate(positions) if p is not None and mine and p > mine]
+    return tasks[min(later)[1]] if later else None
+
+
 def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
     doc = pymupdf.open("pdf", pdf)
     try:
+        positions = [_position(doc, task) for task in tasks]
         for index, task in enumerate(tasks):
             reason, wants_figure = _classify(task)
             figure = None
             if wants_figure:
-                following = tasks[index + 1] if index + 1 < len(tasks) else None
+                following = _following(tasks, positions, index)
                 figure = _figure_record(doc, material["id"], task, following)
             # У задания без проверки ответа нет кандидата ключа: ответ со страницы - заметка.
             note = task.get("review_note")

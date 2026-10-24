@@ -582,7 +582,7 @@ def test_a_figure_is_not_proposed_for_images_of_the_next_task(tmp_path):
         assert near(until_end[0]["rect"], union(CAPTION_PHOTOS))
         # The anchor is not on the page: the nearest image is the last resort.
         lost = figures.suggest_regions(doc, 2, "Нет такого текста на странице", 2)
-        assert lost and lost[0]["page"] == 2
+        assert len(lost) == 1 and lost[0]["page"] == 2
         # A page without images gives no proposal.
         assert figures.suggest_regions(doc, 4, "Какой орган растения поглощает воду", 4) == []
     finally:
@@ -1038,3 +1038,92 @@ def test_a_match_figure_may_show_its_designations_but_not_its_pairs(tmp_path):
         assert _figure_record(doc, 1, task, None)["leak"] == ["1"]
     finally:
         doc.close()
+
+
+def test_a_range_in_the_page_answer_is_expanded_to_every_label():
+    from app.ingest.answers import fit_page_answer
+
+    labels = [{"label": str(i), "text": f"утверждение {i}"} for i in range(1, 9)]
+    every = ["2", "3", "4", "5", "6", "7"]
+    for raw in ("№ 2 … № 7", "2-7", "2...7", "2 – 7", "2, 3, 4, 5, 6, 7", "2 … 7, 3"):
+        assert fit_page_answer(raw, "multiple", labels) == every, raw
+    assert fit_page_answer("1, 3 … 5", "multiple", labels) == ["1", "3", "4", "5"]
+    # Ambiguous: an end is not a label, the range runs backwards, or its ends differ in kind.
+    for raw in ("2 … 12", "7 … 2", "1, 7 … 2", "А … 3", "№ 2 … №"):
+        assert fit_page_answer(raw, "multiple", labels) is None, raw
+    assert fit_page_answer("2-7", "single", labels) is None
+    letters = [{"label": c, "text": f"вариант {c}"} for c in "АБВГД"]
+    assert fit_page_answer("А-В", "multiple", letters) == ["А", "Б", "В"]
+    assert fit_page_answer("Б … Д", "multiple", letters) == ["Б", "В", "Г", "Д"]
+
+
+def test_an_anchor_that_is_not_on_the_page_takes_the_nearest_image_only():
+    from app.ingest import figures
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        lost = figures.suggest_regions(doc, 2, "Этого текста на странице нет", 2)
+        assert len(lost) == 1 and lost[0]["page"] == 2
+        images = [*PHOTOS_P2, *CAPTION_PHOTOS]
+        assert any(near(lost[0]["rect"], list(r)) for r in images)  # one image, not their union
+        far = figures.suggest_regions(
+            doc, 1, "Этого текста на странице нет", 2, 2, "1.2 Определите"
+        )
+        assert len(far) == 1 and far[0]["page"] == 1
+    finally:
+        doc.close()
+
+
+def test_the_next_anchor_is_the_nearest_following_one_by_position(tmp_path):
+    tasks = good_tasks()
+    tasks[1], tasks[2] = tasks[2], tasks[1]  # emitted as 1.1, 1.3, 1.2
+    with import_layout(tmp_path, tasks) as client:
+        figure = detail(client, by_number(tmp_path, "1.1")["id"])["figure"]
+        assert [r["page"] for r in figure["regions"]] == [1, 2]
+        assert near(figure["regions"][1]["rect"], union(PHOTOS_P2))  # stops at 1.2, not at 1.3
+
+
+def test_the_alt_check_compares_numbers_not_spellings():
+    from app.ingest.figures import alt_problem
+
+    for alt in ("Всего 28,5 мм", "Всего 28.50 мм", "Размер 28.5.", "(28,5)", "028,50"):
+        assert alt_problem(alt, None, ["28.5"]), alt
+    assert alt_problem("Размер 28.5 мм", None, ["28,50"])  # the key may be spelled either way
+    assert alt_problem("Размер 285 мм", None, ["28.5"]) is None
+    assert alt_problem("Размер 28,55 мм", None, ["28.5"]) is None
+    assert alt_problem("Рисунок 12", None, ["Б"]) is None
+
+
+def test_a_figure_stored_without_regions_is_rechecked_after_a_key_change(tmp_path):
+    client, task, _cell = _cell_figure_task(tmp_path)
+    with client:
+        conn = db(tmp_path)
+        figure = json.loads(
+            conn.execute("SELECT figure FROM task_item WHERE id = ?", (task["id"],)).fetchone()[0]
+        )
+        for name in ("regions", "leak", "leak_ack"):
+            figure.pop(name)  # the form written before regions existed
+        assert figure["page"] and figure["rect"]
+        conn.execute(
+            "UPDATE task_item SET figure = ? WHERE id = ?", (json.dumps(figure), task["id"])
+        )
+        conn.close()
+        r = client.post(f"/parent/tasks/{task['id']}/key", headers=PARENT, json={"answer": "28"})
+        assert r.status_code == 200, r.text
+        d = detail(client, task["id"])
+        assert d["status"] == "unsupported" and not d["figure"]["confirmed"]
+        assert "28" in d["figure"]["leak"]
+        # Confirming it again reads the old record as one region and keeps the page.
+        assert confirm_figure(client, task["id"], leak_ack=True).status_code == 200
+
+
+def test_the_following_task_is_the_nearest_one_after_it_by_position():
+    from app.ingest.importer import _following
+
+    tasks = ["a", "b", "c", "d"]
+    positions = [(1, 10.0), (1, 50.0), (2, 5.0), None]
+    assert _following(tasks, positions, 0) == "b"  # same page, lower down
+    assert _following(tasks, positions, 1) == "c"  # next page
+    assert _following(tasks, positions, 2) is None  # nothing after it
+    assert _following(tasks, positions, 3) is None  # its own anchor was not found
+    assert _following(tasks, [(2, 5.0), (1, 10.0), (1, 50.0), None], 1) == "c"  # model order
