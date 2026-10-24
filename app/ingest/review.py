@@ -111,7 +111,7 @@ def set_parent_key(ctx, conn, task_id: int, raw) -> dict:
 
 
 def edit_task(
-    conn, task_id: int, *, text=None, options=None, teacher_note=None, manual_condition=False
+    ctx, conn, task_id: int, *, text=None, options=None, teacher_note=None, manual_condition=False
 ) -> dict:
     task = _task(conn, task_id)
     if task["excluded"]:
@@ -140,7 +140,12 @@ def edit_task(
             cols["import_status"] = "draft"
     if not cols:
         raise Refusal("Нечего менять.")
-    return {"revision": new_revision(conn, task_id, **cols)}
+    revision = new_revision(conn, task_id, **cols)
+    if options is not None:  # варианты задают кандидата ключа, а он - защиту рисунков соседей
+        from app.ingest.figure_service import recheck_material_figures
+
+        recheck_material_figures(ctx, conn, task_id)
+    return {"revision": revision}
 
 
 def exclude_task(conn, task_id: int) -> None:

@@ -14,7 +14,9 @@ from tests.bank_helpers import (
     StubModel,
     answer_by_number,
     build_app,
+    db,
     figure_pdf,
+    key_pdf,
     make_task,
     reply,
     row,
@@ -373,8 +375,6 @@ def test_a_neighbours_new_key_unpublishes_a_figure_that_prints_it(tmp_path):
 
 
 def test_an_uploaded_key_file_unpublishes_a_figure_that_prints_its_answer(tmp_path):
-    from tests.bank_helpers import key_pdf
-
     numeric = make_task(12, "Сколько хромосом в клетке?", type="numeric")
     model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
     app = build_app(tmp_path, model)
@@ -388,6 +388,89 @@ def test_an_uploaded_key_file_unpublishes_a_figure_that_prints_its_answer(tmp_pa
         got = detail(c, fig)
         assert got["figure"]["confirmed"] is False and got["status"] == "unsupported"
         assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 404
+
+
+def _key_import_material(tmp_path):
+    conn = db(tmp_path)
+    try:
+        return conn.execute("SELECT * FROM material WHERE kind = 'key'").fetchall()
+    finally:
+        conn.close()
+
+
+def _key_entries(tmp_path):
+    conn = db(tmp_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM key_entry").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_a_failed_figure_recheck_rolls_the_key_import_back(tmp_path, monkeypatch):
+    from app.ingest import figure_service
+
+    numeric = make_task(12, "Сколько хромосом в клетке?", type="numeric")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, _ = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+
+        def boom(*a, **kw):
+            raise RuntimeError("recheck failed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(figure_service, "recheck_figure", boom)
+            upload(c, key_pdf({"12": "42"}), kind="key", name="k.pdf")
+        (key,) = _key_import_material(tmp_path)
+        assert key["import_status"] == "failed" and _key_entries(tmp_path) == 0
+        assert detail(c, fig)["figure"]["confirmed"] is True  # nothing was learned from the key
+        assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 200
+
+
+def test_edited_options_recheck_the_neighbours_figures(tmp_path):
+    def opts(first):
+        return [{"label": first, "text": "ядро"}, {"label": "40", "text": "рибосома"}]
+
+    single = dict(make_task(12, "Выберите органоид.", options=opts("41")), answer_text="ядро")
+    model = StubModel(split=reply(fig_task(11), single), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)  # the page answer of task 12 maps to the label 41
+        r = c.post(f"/parent/tasks/{other}/edit", headers=PARENT, json={"options": opts("42")})
+        assert r.status_code == 200, r.text
+        got = detail(c, fig)
+        assert got["figure"]["confirmed"] is False and got["status"] == "unsupported"
+
+
+def test_an_unrelated_or_unchanged_leak_keeps_the_parents_approval(tmp_path, monkeypatch):
+    numeric = dict(make_task(12, "Сколько хромосом в клетке?", type="numeric"), answer_text="42")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, _ = task_ids(tmp_path)
+        assert confirm_figure(c, fig, leak_ack=True).status_code == 200  # 42 is printed, ack'd
+        assert detail(c, fig)["figure"]["leak_ack"] is True
+
+        # A key of another year matches nothing; a key for this collection changes the
+        # candidate of task 12 but not the text printed in the picture.
+        from app.ingest import figure_service
+
+        calls = []
+        real = figure_service.recheck_figure
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                figure_service, "recheck_figure", lambda *a, **kw: calls.append(a) or real(*a, **kw)
+            )
+            upload(c, key_pdf({"12": "43"}), kind="key", year="2030", name="k30.pdf")
+        assert calls == []  # no candidate of the 2022 collection changed: nothing is scanned
+        upload(c, key_pdf({"12": "43"}), kind="key", name="k.pdf")
+        got = detail(c, fig)["figure"]
+        assert got["confirmed"] is True and got["leak_ack"] is True
 
 
 # -------------------------------------------------------------------- AC-22

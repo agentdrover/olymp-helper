@@ -181,7 +181,7 @@ def suggest_regions(
     задания. Положение stop действует только на странице stop: если она дальше последней
     страницы задания, рисунок идёт до низа последней страницы. Без start_y границ нет и берётся
     ближайшее изображение; если между границами изображений нет, берётся ближайшее к началу, но
-    не за началом следующего задания: такое изображение принадлежит соседу.
+    не заходящее за начало следующего задания: такое изображение принадлежит соседу.
 
     Скан (изображение почти на всю страницу) и векторная схема (изображений нет) не
     предлагаются: рамку рисует родитель.
@@ -197,14 +197,14 @@ def suggest_regions(
         page = doc[number - 1]
         top = start_y if number == first_page else float("-inf")
         bottom = cut if number == end and cut is not None else float("inf")
-        inside = [r for r in _image_boxes(page) if top - 1 <= r.y0 < bottom]
+        inside = [r for r in _image_boxes(page) if top - 1 <= r.y0 and r.y1 <= bottom + 1]
         if inside:
             regions.append({"page": number, "rect": _stored(page, _union(inside))})
     if regions:
         return regions
     boxes = _image_boxes(first)
     if stop is not None and stop[0] == first_page:  # за началом соседнего задания рисунок чужой
-        boxes = [r for r in boxes if r.y0 < stop[1]]
+        boxes = [r for r in boxes if r.y1 <= stop[1] + 1]
     start = pymupdf.Rect(0, start_y, 1, start_y)
     return [{"page": first_page, "rect": _stored(first, _nearest(boxes, start))}] if boxes else []
 

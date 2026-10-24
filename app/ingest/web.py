@@ -316,8 +316,9 @@ def task_skip(task_id: int, request: Request, conn: Db):
 
 @parent.post("/parent/tasks/{task_id}/edit")
 @_action
-def task_edit(task_id: int, body: EditBody, conn: Db):
+def task_edit(task_id: int, body: EditBody, request: Request, conn: Db):
     return review.edit_task(
+        ctx_of(request),
         conn,
         task_id,
         text=body.text,

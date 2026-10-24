@@ -1588,3 +1588,17 @@ def test_no_image_inside_the_span_proposes_nothing_even_if_a_neighbour_has_one()
         assert [r["page"] for r in figures.suggest_regions(doc, 1, 60.0, 1, stop=(1, 400.0))] == [1]
     finally:
         doc.close()
+
+
+def test_an_image_crossing_the_next_task_is_not_proposed():
+    from app.ingest import figures
+
+    # One image spans y = 180..230; the next task starts at y = 200 on the same page.
+    doc = pymupdf.open("pdf", _photos_pdf((180,)))
+    try:
+        assert figures.suggest_regions(doc, 1, 60.0, 1, stop=(1, 200.0)) == []  # in the span
+        assert figures.suggest_regions(doc, 1, 190.0, 1, stop=(1, 200.0)) == []  # fallback
+        # Whole above the boundary: proposed.
+        assert [r["page"] for r in figures.suggest_regions(doc, 1, 60.0, 1, stop=(1, 240.0))] == [1]
+    finally:
+        doc.close()

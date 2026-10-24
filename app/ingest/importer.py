@@ -337,8 +337,9 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
     return len(tasks)
 
 
-def _finish(conn, material_id: int, run_id: str, pages_total: int, write) -> bool:
-    """Записать результат и status=done одной транзакцией, если запуск run_id ещё running."""
+def _finish(conn, material_id: int, run_id: str, pages_total: int, write, after=None) -> bool:
+    """Записать результат и status=done одной транзакцией, если запуск run_id ещё running.
+    after выполняется в той же транзакции после status=done: его отказ откатывает всё."""
     conn.execute("BEGIN IMMEDIATE")
     try:
         owner = conn.execute(
@@ -353,6 +354,8 @@ def _finish(conn, material_id: int, run_id: str, pages_total: int, write) -> boo
             "WHERE id = ?",
             (pages_total, material_id),
         )
+        if after is not None:
+            after()
         conn.execute("COMMIT")
         return True
     except BaseException:
@@ -404,19 +407,26 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 if not entries:
                     raise ImportFailure("В файле не найдено строк ключа вида «12. Б».")
 
+                from app.ingest import figure_service as figs
+
+                before: dict = {}
+
                 def write_key():
+                    before.update(figs.candidate_snapshot(conn))
                     conn.execute("DELETE FROM key_entry WHERE material_id = ?", (material_id,))
                     conn.executemany(
                         "INSERT INTO key_entry (material_id, number, answer) VALUES (?, ?, ?)",
                         [(material_id, n, a) for n, a in entries.items()],
                     )
 
-                if _finish(conn, material_id, run_id, len(pages), write_key):
+                def recheck():
                     # Кандидаты ключа изменились у заданий любого материала: решения о рисунках
-                    # были приняты для прежних ключей.
-                    from app.ingest.figure_service import recheck_materials_figures
+                    # были приняты для прежних ключей. Пока транзакция не закрыта, ребёнок не
+                    # увидит ни новый ключ, ни прежний рисунок.
+                    changed = figs.changed_materials(before, figs.candidate_snapshot(conn))
+                    figs.recheck_materials_figures(ctx, conn, changed)
 
-                    recheck_materials_figures(ctx, conn)
+                _finish(conn, material_id, run_id, len(pages), write_key, recheck)
             else:
                 tasks = split_tasks(ctx, pages, cancel)
                 if not tasks:

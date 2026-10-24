@@ -1,5 +1,7 @@
 """Подтверждение рисунка родителем: рамка, alt, пометки, PNG (SPEC-1.0 1.1)."""
 
+import json
+
 import pymupdf
 
 from app.ingest import figures
@@ -190,12 +192,13 @@ LEAK_REASON = (
 )
 
 
-def recheck_figure(ctx, conn, task_id: int) -> None:
+def recheck_figure(ctx, conn, task_id: int, *, keep_ack: bool = False) -> None:
     """Ключ задания изменился: прежние решения о рисунке относились к другому ключу.
 
     Защита от текста ответа в вырезке и проверка описания (alt) проходят заново с новым
     ключом; решение leak_ack сбрасывается. При нарушении рисунок снимается с подтверждения
-    и задание возвращается на карточку рисунка."""
+    и задание возвращается на карточку рисунка. keep_ack: проверка из-за ключа ДРУГОГО задания;
+    если найденное не изменилось, прежнее решение родителя остаётся."""
     task = get_task(conn, task_id)
     figure = figure_of(task) if task is not None else None
     if figure is None or not figure.get("confirmed"):
@@ -214,6 +217,8 @@ def recheck_figure(ctx, conn, task_id: int) -> None:
     alt_bad = figures.alt_problem(
         figure.get("alt", ""), options_of(task), _correct_labels(conn, task)
     )
+    if keep_ack and not alt_bad and sorted(found) == sorted(figure.get("leak") or []):
+        return
     if not found and not alt_bad and not figure.get("leak_ack") and not figure.get("leak"):
         return
     figure.update(leak=found, leak_ack=False)
@@ -237,13 +242,29 @@ def recheck_material_figures(ctx, conn, task_id: int) -> None:
         recheck_materials_figures(ctx, conn, [task["material_id"]])
 
 
-def recheck_materials_figures(ctx, conn, material_ids=None) -> None:
-    """Проверить подтверждённые рисунки всех заданий материалов (None - всех материалов с
-    рисунками): загруженный файл ключей меняет кандидатов ключа у заданий любого материала."""
-    if material_ids is None:
-        rows = conn.execute("SELECT DISTINCT material_id FROM task_item WHERE figure IS NOT NULL")
-        material_ids = [r[0] for r in rows.fetchall()]
-    for material_id in material_ids:
+def recheck_materials_figures(ctx, conn, material_ids) -> None:
+    """Проверить подтверждённые рисунки всех заданий материалов: у каждого задания защита от
+    утечки включает ответы остальных заданий материала. Решение родителя об ответе в вырезке
+    остаётся, если найденное не изменилось."""
+    for material_id in sorted(material_ids):
         ids = conn.execute("SELECT id FROM task_item WHERE material_id = ?", (material_id,))
         for row in ids.fetchall():
-            recheck_figure(ctx, conn, row["id"])
+            recheck_figure(ctx, conn, row["id"], keep_ack=True)
+
+
+def candidate_snapshot(conn) -> dict[int, tuple[int, str]]:
+    """{задание: (материал, кандидат ключа)} у материалов, где есть подтверждённый рисунок:
+    только их вырезки зависят от кандидатов."""
+    rows = conn.execute("SELECT * FROM task_item WHERE figure IS NOT NULL").fetchall()
+    materials = {r["material_id"] for r in rows if (figure_of(r) or {}).get("confirmed")}
+    out = {}
+    for material_id in materials:
+        for task in conn.execute("SELECT * FROM task_item WHERE material_id = ?", (material_id,)):
+            cand = candidate(conn, task)
+            out[task["id"]] = (material_id, json.dumps(cand["value"] if cand else None))
+    return out
+
+
+def changed_materials(before: dict, after: dict) -> set[int]:
+    """Материалы, где кандидат ключа хотя бы одного задания изменился."""
+    return {m for t, (m, value) in after.items() if before.get(t, (m, None))[1] != value}
