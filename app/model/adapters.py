@@ -12,7 +12,8 @@ TOKEN_VARS = {"claude": "CLAUDE_CODE_OAUTH_TOKEN", "cursor": "CURSOR_API_KEY"}
 SERVICE_VARS = ("PATH", "LANG", "LC_ALL", "TZ", "TMPDIR")
 # На k8 исполнитель выходит наружу только через прокси egress (HI-1): CLI получает его адрес.
 # Секретов в этих переменных нет; правило «ничего сверх списка» то же.
-PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY")
+_PROXY_NAMES = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY")  # Node и curl читают оба регистра
+PROXY_VARS = (*_PROXY_NAMES, *(n.lower() for n in _PROXY_NAMES), "NODE_USE_ENV_PROXY")
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]=,+-]*")
 
 

@@ -292,6 +292,14 @@ def test_proxy_vars_reach_the_cli():
         env = build_env(channel, source, "/work/home")
         assert {k: env.get(k) for k in proxy} == proxy
         assert "EXECUTOR_SHARED_KEY" not in env and "UNRELATED" not in env
+    # Строчные имена тоже доходят: их читают Node и curl.
+    lower = {
+        "https_proxy": "http://egress:3128",
+        "http_proxy": "http://egress:3128",
+        "no_proxy": "localhost",
+    }
+    env = build_env("cursor", dict(ENV, **lower), "/work/home")
+    assert {k: env.get(k) for k in lower} == lower
     # Без прокси в окружении состав прежний.
     plain = build_env("claude", dict(ENV), "/work/home")
     assert not set(proxy) & set(plain)
