@@ -229,14 +229,21 @@ def recheck_figure(ctx, conn, task_id: int) -> None:
 
 
 def recheck_material_figures(ctx, conn, task_id: int) -> None:
-    """Ключ задания изменился: его текст входит в защиту от утечки у каждого другого задания
-    материала (leak_units), поэтому уже подтверждённые рисунки соседей проходят проверку заново."""
+    """Ключ или варианты задания изменились: они входят в защиту от утечки (leak_units) у каждого
+    другого задания материала, поэтому уже подтверждённые рисунки соседей проходят проверку заново."""
     recheck_figure(ctx, conn, task_id)
     task = get_task(conn, task_id)
-    if task is None:
-        return
-    rows = conn.execute(
-        "SELECT id FROM task_item WHERE material_id = ? AND id != ?", (task["material_id"], task_id)
-    ).fetchall()
-    for row in rows:
-        recheck_figure(ctx, conn, row["id"])
+    if task is not None:
+        recheck_materials_figures(ctx, conn, [task["material_id"]])
+
+
+def recheck_materials_figures(ctx, conn, material_ids=None) -> None:
+    """Проверить подтверждённые рисунки всех заданий материалов (None - всех материалов с
+    рисунками): загруженный файл ключей меняет кандидатов ключа у заданий любого материала."""
+    if material_ids is None:
+        rows = conn.execute("SELECT DISTINCT material_id FROM task_item WHERE figure IS NOT NULL")
+        material_ids = [r[0] for r in rows.fetchall()]
+    for material_id in material_ids:
+        ids = conn.execute("SELECT id FROM task_item WHERE material_id = ?", (material_id,))
+        for row in ids.fetchall():
+            recheck_figure(ctx, conn, row["id"])

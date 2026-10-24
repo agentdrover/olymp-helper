@@ -411,7 +411,12 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                         [(material_id, n, a) for n, a in entries.items()],
                     )
 
-                _finish(conn, material_id, run_id, len(pages), write_key)
+                if _finish(conn, material_id, run_id, len(pages), write_key):
+                    # Кандидаты ключа изменились у заданий любого материала: решения о рисунках
+                    # были приняты для прежних ключей.
+                    from app.ingest.figure_service import recheck_materials_figures
+
+                    recheck_materials_figures(ctx, conn)
             else:
                 tasks = split_tasks(ctx, pages, cancel)
                 if not tasks:
