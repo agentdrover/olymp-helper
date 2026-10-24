@@ -146,12 +146,12 @@ def good_tasks():
     ]
 
 
-def import_layout(tmp_path, tasks=None, answer=None, tiny_label=False):
+def import_layout(tmp_path, tasks=None, answer=None, tiny_label=False, pdf=None):
     model = StubModel(split=reply(*(tasks or good_tasks())), answer=answer)
     app = build_app(tmp_path, model)
     client = TestClient(app)
     client.__enter__()
-    resp = upload(client, layout_pdf(tiny_label))
+    resp = upload(client, pdf or layout_pdf(tiny_label))
     assert resp.status_code == 202, resp.text
     status = client.get(f"/parent/materials/{resp.json()['material_id']}", headers=PARENT).json()
     assert status["import_status"] == "done", status
@@ -1124,8 +1124,10 @@ def test_the_following_task_is_the_nearest_one_after_it_by_position():
     positions = [(1, 10.0), (1, 50.0), (2, 5.0), None]
     assert _following(tasks, positions, 0) == "b"  # same page, lower down
     assert _following(tasks, positions, 1) == "c"  # next page
-    assert _following(tasks, positions, 2) is None  # nothing after it
-    assert _following(tasks, positions, 3) is None  # its own anchor was not found
+    assert _following(tasks, positions, 2) == "d"  # nothing known after it: the next in the list
+    assert _following(tasks, positions, 3) is None  # last in the list
+    assert _following(tasks, [(1, 10.0), (1, 10.0), (1, 40.0)], 0) == "c"  # equal is not after
+    assert _following(tasks, [(1, 10.0), (1, 10.0)], 0) == "b"  # equal only: the list order
     assert _following(tasks, [(2, 5.0), (1, 10.0), (1, 50.0), None], 1) == "c"  # model order
 
 
@@ -1138,5 +1140,115 @@ def test_the_anchor_of_a_task_that_starts_in_a_table_cell_is_found():
         got = figures.suggest_regions(doc, 2, text, 2)
         assert len(got) == 1 and near(got[0]["rect"], union(CAPTION_PHOTOS))
         assert figures.anchor(doc[1], "[рисунок] | | ") is None
+    finally:
+        doc.close()
+
+
+def _same_prefix_pdf():
+    from tests.bank_helpers import doc_bytes
+    from tests.layout_pdf import _text
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    for top, name in ((100, "первое"), (300, "второе")):
+        _text(page, 50, top, f"Рассмотрите внимательно препарат, {name} задание.")
+        page.insert_image(
+            pymupdf.Rect(60, top + 10, 150, top + 70), stream=IMAGE, keep_proportion=False
+        )
+    page.insert_image(pymupdf.Rect(60, 180, 150, 240), stream=IMAGE, keep_proportion=False)
+    return doc_bytes(doc)
+
+
+def test_tasks_that_start_with_the_same_words_get_their_own_images(tmp_path):
+    def task(number, name):
+        return lt(
+            number,
+            f"Рассмотрите внимательно препарат, {name} задание.",
+            "single",
+            (1,),
+            "Б",
+            OPTIONS_1_2,
+            refers_to_figure=True,
+        )
+
+    tasks = [task("1", "первое"), task("2", "второе")]
+    with import_layout(tmp_path, tasks, pdf=_same_prefix_pdf()) as client:
+        one = detail(client, by_number(tmp_path, "1")["id"])["figure"]["regions"]
+        two = detail(client, by_number(tmp_path, "2")["id"])["figure"]["regions"]
+        assert len(one) == 1 and near(one[0]["rect"], [60, 110, 150, 240])
+        assert len(two) == 1 and near(two[0]["rect"], [60, 310, 150, 370])
+
+    # The same start, whatever follows it: the second is found below the first.
+    from app.ingest import figures
+
+    doc = pymupdf.open("pdf", _same_prefix_pdf())
+    try:
+        text = "Рассмотрите внимательно препарат"
+        top = figures.anchor(doc[0], text)
+        below = figures.anchor(doc[0], text, after=top.y0)
+        assert below.y0 > top.y0 + 100
+        assert figures.anchor(doc[0], text, after=below.y0).y0 == top.y0  # nothing lower: the first
+    finally:
+        doc.close()
+
+
+def test_a_region_never_runs_past_the_last_page_of_its_own_task(tmp_path):
+    from app.ingest import figures
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        text = "Рассмотрите фотографии в таблице и выберите"
+        got = figures.suggest_regions(doc, 1, text, 1, 2, "1.2 Определите органоид, показанный")
+        assert [r["page"] for r in got] == [1]  # the next task is on page 2, this one ends on 1
+        got = figures.suggest_regions(doc, 1, text, 2, 2, "1.2 Определите органоид, показанный")
+        assert [r["page"] for r in got] == [1, 2]
+    finally:
+        doc.close()
+    # A task in the middle without a found anchor: the first one stays on its own pages.
+    tasks = good_tasks()
+    tasks[0]["pages"] = [1]
+    tasks[1] = lt("1.2", "Этого текста нет на странице", "single", (2,), "Б", OPTIONS_1_2)
+    with import_layout(tmp_path, tasks) as client:
+        regions = detail(client, by_number(tmp_path, "1.1")["id"])["figure"]["regions"]
+        assert [r["page"] for r in regions] == [1]
+
+
+def test_the_alt_check_finds_numbers_glued_to_words():
+    from app.ingest.figures import alt_problem
+
+    for alt in ("28,5мм", "Длина 2,5см и 28,5мм", "рис.28,5", "x28.5y", "(28,5)", "1-28,5"):
+        assert alt_problem(alt, None, ["28.5"]), alt
+    for alt in ("285", "28,55", "128,5"):
+        assert alt_problem(alt, None, ["28.5"]) is None, alt
+
+
+def test_anchors_of_repeated_starts_are_found_in_order_on_each_page():
+    from app.ingest import figures
+    from app.ingest.importer import _positions, _y_on
+    from tests.layout_pdf import _text
+
+    doc = pymupdf.open()
+    try:
+        for tops in ((100, 200, 300), (80, 400)):
+            page = doc.new_page(width=595, height=842)
+            for top in tops:
+                _text(page, 50, top, "Рассмотрите внимательно препарат, и далее по тексту.")
+        text = "Рассмотрите внимательно препарат, и далее по тексту."
+        first = figures.anchor(doc[0], text)
+        second = figures.anchor(doc[0], text, after=first.y0)
+        third = figures.anchor(doc[0], text, after=second.y0)
+        assert 150 < second.y0 < 250 and third.y0 > 250  # the nearest one below, not the last
+        tasks = [{"text": text, "pages": [p]} for p in (1, 1, 2, 2)]
+        pos = _positions(doc, tasks)
+        assert [p for p, _ in pos] == [1, 1, 2, 2]
+        assert pos[0][1] < pos[1][1] and pos[2][1] < pos[3][1]
+        assert pos[2][1] < 100  # the first hit of the new page, not below the previous page's y
+        # A task whose anchor is missing does not make the next one start over.
+        gap = [{"text": text, "pages": [1]}, {"text": "нет такого", "pages": [1]}, tasks[0]]
+        mid = _positions(doc, gap)
+        assert mid[1] is None and mid[0][1] < mid[2][1]
+        assert (
+            _y_on((2, 10.0), 1) is None and _y_on((1, 10.0), 1) == 10.0 and _y_on(None, 1) is None
+        )
     finally:
         doc.close()

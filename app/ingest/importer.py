@@ -194,7 +194,14 @@ def _classify(task: dict) -> tuple[str | None, bool]:
     return None, False
 
 
-def _figure_record(doc, material_id: int, task: dict, following: dict | None) -> dict:
+def _figure_record(
+    doc,
+    material_id: int,
+    task: dict,
+    following: dict | None,
+    start_y: float | None = None,
+    stop_y: float | None = None,
+) -> dict:
     page = (_figure_pages(task) or task["pages"])[0]
     regions = []
     if doc is not None:
@@ -206,6 +213,8 @@ def _figure_record(doc, material_id: int, task: dict, following: dict | None) ->
             max(task["pages"]),
             next_page,
             following["text"] if following else None,
+            start_y=start_y,
+            stop_y=stop_y,
         )
     leak = []
     if regions:  # ответ или варианты, уже напечатанные в предложенной области
@@ -238,30 +247,60 @@ def _task_variant(task: dict, material) -> str | None:
     return found.group(1) if found else material["variant"]
 
 
-def _position(doc, task: dict):
-    """Место якоря задания на странице: (страница, y) или None, если текст не найден."""
-    page = _text_page(task)
-    found = anchor(doc[page - 1], task["text"]) if 1 <= page <= len(doc) else None
-    return None if found is None else (page, found.y0)
+def _positions(doc, tasks: list[dict]) -> list:
+    """Места якорей: (страница, y) или None. Заданий с одинаковым началом на странице может
+    быть несколько: каждому следующему достаётся вхождение ниже якоря предыдущего."""
+    out, previous = [], None
+    for task in tasks:
+        page = _text_page(task)
+        after = previous[1] if previous and previous[0] == page else None
+        found = anchor(doc[page - 1], task["text"], after) if 1 <= page <= len(doc) else None
+        position = None if found is None else (page, found.y0)
+        out.append(position)
+        previous = position or previous
+    return out
+
+
+def _y_on(position, page: int) -> float | None:
+    """y якоря, если он на нужной странице."""
+    return position[1] if position and position[0] == page else None
+
+
+def _following_index(positions, index: int) -> int | None:
+    """Ближайшее СЛЕДУЮЩЕЕ по месту задание, в каком бы порядке его ни назвала модель. Место
+    должно быть строго ниже: при равных или неизвестных местах берётся следующее по списку."""
+    mine = positions[index]
+    later = [(p, i) for i, p in enumerate(positions) if p is not None and mine and p > mine]
+    if later:
+        return min(later)[1]
+    return index + 1 if index + 1 < len(positions) else None
 
 
 def _following(tasks, positions, index):
-    """Ближайшее СЛЕДУЮЩЕЕ по месту на страницах задание, в каком бы порядке его ни назвала модель."""
-    mine = positions[index]
-    later = [(p, i) for i, p in enumerate(positions) if p is not None and mine and p > mine]
-    return tasks[min(later)[1]] if later else None
+    found = _following_index(positions, index)
+    return None if found is None else tasks[found]
 
 
 def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
     doc = pymupdf.open("pdf", pdf)
     try:
-        positions = [_position(doc, task) for task in tasks]
+        positions = _positions(doc, tasks)
         for index, task in enumerate(tasks):
             reason, wants_figure = _classify(task)
             figure = None
             if wants_figure:
-                following = _following(tasks, positions, index)
-                figure = _figure_record(doc, material["id"], task, following)
+                found = _following_index(positions, index)
+                following = None if found is None else tasks[found]
+                figure = _figure_record(
+                    doc,
+                    material["id"],
+                    task,
+                    following,
+                    _y_on(positions[index], (_figure_pages(task) or task["pages"])[0]),
+                    _y_on(positions[found] if found is not None else None, _text_page(following))
+                    if following
+                    else None,
+                )
             # У задания без проверки ответа нет кандидата ключа: ответ со страницы - заметка.
             note = task.get("review_note")
             answer_text = task.get("answer_text")

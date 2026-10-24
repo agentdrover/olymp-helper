@@ -15,7 +15,7 @@ from app.ingest.leaks import contains_phrase, norm, significant
 SCALE = 2.0  # PNG рисунка рендерится в двойном разрешении
 DISPLAY_WIDTH_PX = 560  # SPEC 1.1: рисунок показывается не уже 560 px
 MIN_LABEL_PX = 10.0  # подписи мельче этого размера при показе - рисунок нечитаем
-_NUMBER = re.compile(r"(?<![\w.,])\d+(?:[.,]\d+)?(?![\w])")
+_NUMBER = re.compile(r"(?<!\d)\d+(?:[.,]\d+)?(?!\d)")
 SCAN_SHARE = 0.9  # изображение на такую долю страницы - скан, а не рисунок
 MIN_SIDE_PT = 20.0
 
@@ -52,9 +52,10 @@ def stored_to_clip(page, stored) -> pymupdf.Rect:
 # ------------------------------------------------------------------------ автопоиск
 
 
-def anchor(page, text: str):
+def anchor(page, text: str, after: float | None = None):
     """Место начала задания на странице: поиск по началу текста, затем по его первой строке
-    или ячейке (в таблице начало задания лежит в ячейке, а не в сплошной строке)."""
+    или ячейке (в таблице начало задания лежит в ячейке, а не в сплошной строке).
+    after - y предыдущего якоря: при одинаковых началах берётся ближайшее вхождение ниже него."""
     cleaned = text.replace("[рисунок]", " ")
     first = next((x.strip() for x in re.split(r"[|\n]", cleaned) if len(x.strip()) >= 6), "")
     for source in (text, first):
@@ -63,7 +64,8 @@ def anchor(page, text: str):
             if len(needle) >= 6:
                 hits = page.search_for(needle)
                 if hits:
-                    return hits[0]
+                    below = [h for h in hits if after is not None and h.y0 > after + 1]
+                    return below[0] if below else hits[0]
     return None
 
 
@@ -104,16 +106,23 @@ def suggest_regions(
     last_page: int,
     next_page: int | None = None,
     next_text: str | None = None,
+    *,
+    start_y: float | None = None,
+    stop_y: float | None = None,
 ) -> list[dict]:
     """Области рисунка: все растровые изображения между якорем этого задания и якорем
     следующего, по одной области (объединению) на страницу. Задание на нескольких страницах
-    даёт несколько областей. Если между якорями изображений нет, берётся ближайшее к якорю.
+    даёт несколько областей, но не дальше последней страницы самого задания. Если между якорями
+    изображений нет, берётся ближайшее к якорю. start_y и stop_y - уже найденные положения якорей
+    на первой странице и на странице следующего задания (при одинаковых началах поиск по тексту
+    находил бы одно и то же место).
 
     Скан (изображение почти на всю страницу) и векторная схема (изображений нет) не
     предлагаются: рамку рисует родитель.
     """
     first = doc[first_page - 1]
-    start = anchor(first, task_text)
+    start = pymupdf.Rect(0, start_y, 1, start_y) if start_y is not None else None
+    start = start or anchor(first, task_text)
     if start is None:  # без якоря границ нет: объединять нечего, берётся ближайшее изображение
         boxes = _image_boxes(first)
         return (
@@ -121,9 +130,10 @@ def suggest_regions(
         )
     end, stop = max(last_page, first_page), None
     if next_page is not None and next_text and first_page <= next_page <= len(doc):
-        stop = anchor(doc[next_page - 1], next_text)
+        stop = pymupdf.Rect(0, stop_y, 1, stop_y) if stop_y is not None else None
+        stop = stop or anchor(doc[next_page - 1], next_text)
         if stop is not None:
-            end = next_page
+            end = min(next_page, end)  # дальше своей последней страницы рисунок не уходит
     regions = []
     for number in range(first_page, end + 1):
         page = doc[number - 1]
