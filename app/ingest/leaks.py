@@ -44,9 +44,37 @@ _MARK = r"(?:ответ[а-я]*|=|→|->)\s*[:\-–—]?\s*"
 _NUMBER = re.compile(r"(?<![\w.,])\d+(?:[.,]\d+)?(?![\w])")
 
 
-def short_tokens(answer_text: str | None) -> list[str]:
-    """Однознаковые слова ответа («Б», «7»): сами по себе они есть в любом тексте."""
+_PAIR_ONE = re.compile(r"(\d{1,2})([a-zа-я])")
+
+
+def answer_pairs(answer_text: str | None) -> list[tuple[str, str]]:
+    """Пары сопоставления из ответа («1-А», «1 — А», «1А»): (элемент, обозначение)."""
+    out: list[tuple[str, str]] = []
+    for piece in re.split(r"[;,\n]+", answer_text or ""):
+        words = norm(piece).split()
+        if len(words) == 2 and len(words[0]) <= 2:
+            pair = (words[0], words[1])
+        elif len(words) == 1 and (one := _PAIR_ONE.fullmatch(words[0])):
+            pair = (one.group(1), one.group(2))
+        else:
+            continue
+        if pair not in out:
+            out.append(pair)
+    return out
+
+
+def _pair_stands(condition: str, pair: tuple[str, str]) -> bool:
+    left, right = (re.escape(x) for x in pair)
+    text = condition.lower().replace("ё", "е")
+    return bool(re.search(rf"(?<![\w]){left}\s*[-–—:=>→]*\s*{right}(?![\w])", text))
+
+
+def short_tokens(answer_text: str | None, task_type: str | None = None) -> list[str]:
+    """Однознаковые слова ответа («Б», «7»): сами по себе они есть в любом тексте.
+    У сопоставления обозначения сторон («1», «А») сами ответом не бывают: ответ - пара."""
     out: list[str] = []
+    if task_type == "match":
+        return out
     for word in norm(answer_text or "").split():
         if len(word) == 1 and word not in out:
             out.append(word)
@@ -78,9 +106,13 @@ def condition_leaks(condition: str, answer_text: str | None, task_type: str | No
     запрещено в условии в любом месте."""
     text = norm(condition)
     found = [u for u in answer_units(answer_text) if contains_phrase(text, u)]
-    for token in short_tokens(answer_text):
+    for token in short_tokens(answer_text, task_type):
         if token not in found and _stands_as_answer(condition, token):
             found.append(token)
+    if task_type == "match":
+        for pair in answer_pairs(answer_text):
+            if _pair_stands(condition, pair):
+                found.append("-".join(pair))
     if task_type == "numeric":
         for number in sorted(_numbers(answer_text or "") & _numbers(condition)):
             if number not in found:
@@ -88,11 +120,13 @@ def condition_leaks(condition: str, answer_text: str | None, task_type: str | No
     return found
 
 
-def crop_units(answer_text: str | None, keys: list[str], options) -> list[str]:
+def crop_units(
+    answer_text: str | None, keys: list[str], options, task_type: str | None = None
+) -> list[str]:
     """Тексты, которых не должно быть в вырезке: ответ со страницы, ключ и тексты вариантов.
     Вариант из одних цифр и знаков - обозначение на рисунке, а не ответ: он не берётся."""
     out = list(answer_units(answer_text))
-    for token in short_tokens(answer_text):
+    for token in short_tokens(answer_text, task_type):
         if token not in out:
             out.append(token)
     for key in keys:

@@ -209,7 +209,7 @@ def _figure_record(doc, material_id: int, task: dict, following: dict | None) ->
         )
     leak = []
     if regions:  # ответ или варианты, уже напечатанные в предложенной области
-        units = crop_units(task.get("answer_text"), [], task["options"])
+        units = crop_units(task.get("answer_text"), [], task["options"], task["type"])
         leak = crop_leaks(doc, regions, units)
     return {
         "material_id": material_id,

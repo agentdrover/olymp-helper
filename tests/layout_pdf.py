@@ -103,6 +103,7 @@ def _page_three(doc):
     page = doc.new_page(width=W, height=H)
     _text(page, 50, 60, "1.5 Расположите события в порядке их наступления.")
     _lines(page, 50, 78, EVENTS, step=15)
+    _text(page, 330, 95, "А Б")  # labels of the right side of a matching
     _answer_row(page, 205, "№ 2 … № 7")
     _text(page, 50, 260, "1.6 Определите орган растения по описанию в каждой строке.")
     rows = ["1 Стебель", "2 Лист", "3 Корень", "4 Стебель", "5 Корень", "10 баллов"]

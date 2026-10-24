@@ -25,6 +25,9 @@ from tests.layout_pdf import (
     STATEMENTS,
     layout_pdf,
 )
+from tests.layout_pdf import (
+    IMG as IMAGE,
+)
 
 S1 = "Вариант 1. Отборочный этап"
 S2 = "Вариант 2. Отборочный этап"
@@ -910,5 +913,128 @@ def test_readability_is_judged_at_the_scale_of_the_stacked_picture():
         ]
         assert figures.regions_readable(doc, regions[:1])  # alone it is shown 5.6 times larger
         assert not figures.regions_readable(doc, regions)  # stacked: 560 / 500 = 1.12 times
+    finally:
+        doc.close()
+
+
+def test_a_key_added_after_the_figure_reruns_the_alt_check(tmp_path):
+    clean = [60, 600, 120, 620]  # no number in it
+    client = import_layout(tmp_path, _numeric_figure_tasks(None))
+    with client:
+        task = by_number(tmp_path, "1.3")
+        r = confirm_figure(client, task["id"], rect=clean, alt="На рисунке 28 хромосом")
+        assert r.status_code == 200, r.text  # no key yet: nothing to compare with
+        key = {"answer": "28"}
+        assert (
+            client.post(f"/parent/tasks/{task['id']}/key", headers=PARENT, json=key).status_code
+            == 200
+        )
+        d = detail(client, task["id"])
+        assert d["status"] == "unsupported" and not d["figure"]["confirmed"]
+        assert d["figure"]["leak_ack"] is False
+        assert confirm(client, task["id"]).status_code == 422
+        assert client.get(f"/api/tasks/{task['id']}", headers=CHILD).status_code == 404
+        # The alt is rewritten without the key: the figure and the task go through.
+        assert (
+            confirm_figure(client, task["id"], rect=clean, alt="Фотографии клетки").status_code
+            == 200
+        )
+        assert confirm(client, task["id"]).status_code == 200
+        assert client.get(f"/api/tasks/{task['id']}", headers=CHILD).status_code == 200
+
+
+def test_an_alt_without_the_new_key_keeps_the_figure_confirmed(tmp_path):
+    client = import_layout(tmp_path, _numeric_figure_tasks(None))
+    with client:
+        task = by_number(tmp_path, "1.3")
+        r = confirm_figure(client, task["id"], rect=[60, 600, 120, 620], alt="Фотографии клетки")
+        assert r.status_code == 200
+        key = {"answer": "28"}
+        assert (
+            client.post(f"/parent/tasks/{task['id']}/key", headers=PARENT, json=key).status_code
+            == 200
+        )
+        d = detail(client, task["id"])
+        assert d["figure"]["confirmed"] and d["status"] != "unsupported"
+
+
+def test_the_designations_of_a_match_task_are_not_short_answers():
+    from app.ingest.leaks import condition_leaks, crop_units
+
+    def leaks(condition, answer="1-А; 2-Б", kind="match"):
+        return bool(condition_leaks(condition, answer, kind))
+
+    rows = "Описания органов:\n1 | Корень поглощает воду\n2 | Лист осуществляет фотосинтез"
+    assert not leaks(rows)
+    assert not leaks("Соотнесите 1 и 2 с органами А и Б.\nБ")
+    assert leaks(rows + "\n1 — А | 2 — Б")
+    assert leaks("Соотнесите. 1-А")
+    assert leaks("Соотнесите. 2Б")
+    assert leaks("Соотнесите: 1 — А")
+    assert not leaks("Соотнесите: 1 — Аист")
+    assert leaks("Соотнесите.\nОтвет: 1-А; 2-Б")
+    # A choice answer is a label by nature: it stays checked by context.
+    assert leaks("Выберите.\nБ", "Б", "single")
+    # In the frame, the pairs are looked for, not the bare designations.
+    assert crop_units("1-А; 2-Б", [], None, "match") == ["1 а 2 б", "1 а", "2 б"]
+    assert crop_units("1-А; 2-Б", [], None, "single") == [
+        "1 а 2 б",
+        "1 а",
+        "2 б",
+        "1",
+        "а",
+        "2",
+        "б",
+    ]
+
+
+def test_pairs_are_the_answer_of_a_match_only_and_come_in_both_spellings():
+    from app.ingest.leaks import condition_leaks
+
+    assert condition_leaks("Соотнесите: 1А и 2Б", "1А; 2Б", "match")
+    assert condition_leaks("Соотнесите: 1-А", "1 А", "match")
+    assert condition_leaks("Соотнесите: 1 — А", "1А; 2Б", "match")  # answer written as one word
+    assert not condition_leaks("Соотнесите: 1А", "1-А", "multiple")
+    assert condition_leaks("Соотнесите: 1А", "1-А", "match")
+
+
+def test_a_match_figure_may_show_its_designations_but_not_its_pairs(tmp_path):
+    from app.ingest.importer import _figure_record
+
+    options = {
+        "left": [{"label": "1", "text": "Фото 1"}, {"label": "2", "text": "Фото 2"}],
+        "right": [{"label": "А", "text": "Корень"}, {"label": "Б", "text": "Стебель"}],
+    }
+    tasks = good_tasks()
+    tasks[5] = lt(
+        "1.6", "Соотнесите по рисунку.", "match", (3,), "1-А; 2-Б", options, refers_to_figure=True
+    )
+    with import_layout(tmp_path, tasks) as client:
+        task = by_number(tmp_path, "1.6")
+        assert detail(client, task["id"])["key_candidate"]["answer"]
+        events = [50, 78, 300, 200]  # lines «№ 1. …» «№ 2. …» hold the numbers 1 and 2
+        labels = [320, 80, 400, 100]  # «А Б»
+        for frame in (events, labels):
+            r = confirm_figure(client, task["id"], rect=frame, page=3)
+            assert r.status_code == 200, (frame, r.text)
+
+    doc = pymupdf.open()
+    try:
+        page = doc.new_page()
+        page.insert_image(pymupdf.Rect(60, 100, 200, 160), stream=IMAGE, keep_proportion=False)
+        page.insert_text((70, 130), "1", fontsize=12, fontname="helv")
+        page.insert_text((60, 90), "Соотнесите фотографии", fontsize=11, fontname="helv")
+        task = {
+            "number": "1",
+            "text": "Соотнесите фотографии",
+            "pages": [1],
+            "type": "match",
+            "answer_text": "1-А",
+            "options": None,
+            "refers_to_figure": True,
+        }
+        assert _figure_record(doc, 1, task, None)["leak"] == []
+        task["type"] = "single"  # the bare «1» is a short answer there
+        assert _figure_record(doc, 1, task, None)["leak"] == ["1"]
     finally:
         doc.close()

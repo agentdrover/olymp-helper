@@ -50,9 +50,9 @@ def leak_units(conn, task) -> list[str]:
             keys.append(item)
         elif isinstance(item, list):
             keys.extend(item)
-        elif isinstance(item, dict):
-            keys.extend(item.values())
-    return crop_units(task["answer_text"], keys, options_of(task))
+        elif isinstance(item, dict):  # сопоставление: ответ - пара, а не обозначение стороны
+            keys.extend(f"{k} {v}" for k, v in item.items())
+    return crop_units(task["answer_text"], keys, options_of(task), task["type"])
 
 
 def _rect_from(figure: dict, page, rect, rect_px, scale):
@@ -176,33 +176,36 @@ LEAK_REASON = (
 
 
 def recheck_figure(ctx, conn, task_id: int) -> None:
-    """Ключ задания изменился: прежнее решение о тексте в вырезке относилось к другому ключу.
+    """Ключ задания изменился: прежние решения о рисунке относились к другому ключу.
 
-    Решение (leak_ack) сбрасывается, защита заново проходит по сохранённым областям; при
-    тексте ответа в вырезке рисунок снимается с подтверждения до нового явного решения."""
+    Защита от текста ответа в вырезке и проверка описания (alt) проходят заново с новым
+    ключом; решение leak_ack сбрасывается. При нарушении рисунок снимается с подтверждения
+    и задание возвращается на карточку рисунка."""
     task = get_task(conn, task_id)
     figure = figure_of(task) if task is not None else None
-    if figure is None or not figure.get("confirmed") or not figure.get("regions"):
+    if figure is None or not figure.get("confirmed"):
         return
-    material = conn.execute(
-        "SELECT file FROM material WHERE id = ?", (task["material_id"],)
-    ).fetchone()
-    doc = pymupdf.open(str(ctx.material_path(material["file"])))
-    try:
-        found = crop_leaks(doc, figure["regions"], leak_units(conn, task))
-    finally:
-        doc.close()
-    if not found and not figure.get("leak_ack") and not figure.get("leak"):
+    found = []
+    if figure.get("regions"):
+        material = conn.execute(
+            "SELECT file FROM material WHERE id = ?", (task["material_id"],)
+        ).fetchone()
+        doc = pymupdf.open(str(ctx.material_path(material["file"])))
+        try:
+            found = crop_leaks(doc, figure["regions"], leak_units(conn, task))
+        finally:
+            doc.close()
+    alt_bad = figures.alt_problem(
+        figure.get("alt", ""), options_of(task), _correct_labels(conn, task)
+    )
+    if not found and not alt_bad and not figure.get("leak_ack") and not figure.get("leak"):
         return
     figure.update(leak=found, leak_ack=False)
-    if found:
+    if found or alt_bad:
         figure["confirmed"] = False
+        reason = " ".join(x for x in (LEAK_REASON if found else None, alt_bad) if x)
         new_revision(
-            conn,
-            task_id,
-            figure=figure,
-            import_status="unsupported",
-            unsupported_reason=LEAK_REASON,
+            conn, task_id, figure=figure, import_status="unsupported", unsupported_reason=reason
         )
     else:
         update_task(conn, task_id, figure=figure)
