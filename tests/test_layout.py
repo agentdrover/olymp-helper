@@ -143,12 +143,12 @@ def good_tasks():
     ]
 
 
-def import_layout(tmp_path, tasks=None, answer=None):
+def import_layout(tmp_path, tasks=None, answer=None, tiny_label=False):
     model = StubModel(split=reply(*(tasks or good_tasks())), answer=answer)
     app = build_app(tmp_path, model)
     client = TestClient(app)
     client.__enter__()
-    resp = upload(client, layout_pdf())
+    resp = upload(client, layout_pdf(tiny_label))
     assert resp.status_code == 202, resp.text
     status = client.get(f"/parent/materials/{resp.json()['material_id']}", headers=PARENT).json()
     assert status["import_status"] == "done", status
@@ -248,7 +248,7 @@ def test_ac1(tmp_path):
         assert "28" not in t13["text"]
         d = detail(client, t13["id"])
         assert d["key"] is None and d["key_source"] is None
-        assert d["key_candidate"]["answer"] == "28"
+        assert d["key_candidate"]["answer"] == "28" and d["answer_text"] == "28"
         assert detail(client, by_number(tmp_path, "1.6")["id"])["key_candidate"]["answer"]
         assert not client.get("/api/tasks", headers=CHILD).json()["tasks"]
 
@@ -642,3 +642,134 @@ def test_what_makes_an_open_task_a_scored_answer():
     assert _classify(task(type="numeric", text="Смотрите рисунок.")) == (
         _classify(task(type="single", text="Смотрите рисунок."))
     )
+
+
+def test_a_task_without_a_next_task_takes_the_images_up_to_its_last_page(tmp_path):
+    from app.ingest import figures
+
+    only = good_tasks()[:1]
+    with import_layout(tmp_path, only) as client:
+        figure = detail(client, by_number(tmp_path, "1.1")["id"])["figure"]
+        assert [r["page"] for r in figure["regions"]] == [1, 2]
+        assert near(figure["regions"][1]["rect"], union([*PHOTOS_P2, *CAPTION_PHOTOS]))
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        text = "Рассмотрите фотографии в таблице и выберите"
+        assert [r["page"] for r in figures.suggest_regions(doc, 1, text, 2)] == [1, 2]
+        assert [r["page"] for r in figures.suggest_regions(doc, 1, text, 1)] == [1]
+    finally:
+        doc.close()
+
+
+def test_the_stacked_picture_holds_every_region_in_its_own_place():
+    from app.ingest import figures
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        regions = [
+            {"page": 1, "rect": list(union(PHOTOS_P1))},
+            {"page": 2, "rect": list(union(PHOTOS_P2))},
+        ]
+        stacked = pymupdf.Pixmap(figures.render_regions_png(doc, regions))
+        parts = [
+            pymupdf.Pixmap(figures.render_figure_png(doc, r["page"], r["rect"])) for r in regions
+        ]
+        assert stacked.height == sum(p.height for p in parts)
+        top = 0
+        for part in parts:
+            for x, y in (
+                (8, 8),
+                (part.width - 9, 8),
+                (8, part.height - 9),
+                (part.width // 2, part.height // 2),
+            ):
+                assert tuple(stacked.pixel(x, top + y)) == tuple(part.pixel(x, y)), (top, x, y)
+            top += part.height
+    finally:
+        doc.close()
+
+
+def test_the_crop_guard_looks_at_every_region_and_at_parts_of_a_line():
+    from app.ingest.figures import crop_leaks
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        clean, dirty = (
+            {"page": 2, "rect": [60, 560, 70, 570]},
+            {"page": 2, "rect": [50, 510, 400, 536]},
+        )
+        assert crop_leaks(doc, [clean, dirty], ["28"]) == ["28"]
+        assert crop_leaks(doc, [clean], ["28"]) == []
+        # The line holds the unit (and more): the unit is printed in the frame.
+        row = [{"page": 3, "rect": [50, 275, 300, 301]}]
+        assert crop_leaks(doc, row, ["стебель"]) == ["стебель"]
+    finally:
+        doc.close()
+    # A one-character line of the frame is not a part of the answer text.
+    sheet = pymupdf.open()
+    try:
+        sheet.new_page().insert_text((70, 100), "1", fontsize=12, fontname="helv")
+        frame = [{"page": 1, "rect": [50, 80, 200, 120]}]
+        assert crop_leaks(sheet, frame, ["1 стебель 2 лист"]) == []
+    finally:
+        sheet.close()
+
+
+def test_units_of_the_answer_text_and_the_fitting_of_a_page_answer():
+    from app.ingest.answers import fit_page_answer, same_answer
+    from app.ingest.leaks import condition_leaks, crop_units
+
+    assert condition_leaks("Подсчитайте. 28", "28\n№ 2 … № 7") == ["28"]
+    assert condition_leaks("Подсчитайте.", "28\n№ 2 … № 7") == []
+    assert crop_units("ядро", [], None) == ["ядро"]
+    assert crop_units(None, ["ядро"], None) == ["ядро"]
+    assert not same_answer("numeric", None, "x")
+    assert fit_page_answer("А", "open", [{"label": "А", "text": "один"}]) is None
+    assert fit_page_answer("1 Стебель 2 Лист", "match", MATCH_6) is None  # not every left label
+    assert fit_page_answer("1 Стебель 2 Лист 3 Корень 4 Лист 5 Корень", "match", MATCH_6) == {
+        "1": "Б",
+        "2": "В",
+        "3": "А",
+        "4": "В",
+        "5": "А",
+    }
+
+
+def test_an_unreadable_label_in_the_second_region_makes_the_task_unsupported(tmp_path):
+    with import_layout(tmp_path, tiny_label=True) as client:
+        task = by_number(tmp_path, "1.1")
+        figure = detail(client, task["id"])["figure"]
+        assert [r["page"] for r in figure["regions"]] == [1, 2]
+        r = confirm_figure(client, task["id"])
+        assert r.status_code == 200 and r.json()["status"] == "unsupported", r.text
+
+
+def _numeric_figure_tasks(answer_text):
+    tasks = good_tasks()
+    tasks[2] = lt(
+        "1.3",
+        "Сколько хромосом содержит соматическая клетка? Смотрите таблицу.",
+        "numeric",
+        (2,),
+        answer_text=answer_text,
+        refers_to_figure=True,
+    )
+    return tasks
+
+
+def test_the_candidate_from_an_uploaded_key_is_checked_against_the_frame(tmp_path):
+    from tests.bank_helpers import key_pdf
+
+    with import_layout(tmp_path, _numeric_figure_tasks(None)) as client:
+        assert upload(client, key_pdf({"1.3": "28"}), kind="key", name="k.pdf").status_code == 202
+        task = by_number(tmp_path, "1.3")
+        r = confirm_figure(client, task["id"], rect=[150, 510, 400, 536])
+        assert r.status_code == 422 and "28" in r.json()["error"]
+
+
+def test_the_answer_text_is_checked_against_the_frame_even_without_a_candidate(tmp_path):
+    with import_layout(tmp_path, _numeric_figure_tasks("28 хромосом")) as client:
+        task = by_number(tmp_path, "1.3")
+        assert detail(client, task["id"])["key_candidate"] is None
+        r = confirm_figure(client, task["id"], rect=[150, 510, 400, 536])
+        assert r.status_code == 422 and "28" in r.json()["error"]

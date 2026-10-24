@@ -40,7 +40,7 @@ def normalize_answer(raw, task_type: str):
 
 def _number(text: str) -> str | None:
     """Число для точного сравнения: запятая = точка, лишние нули и знак плюс не важны."""
-    plain = text.strip().replace(",", ".")
+    plain = text.replace(",", ".")
     if not _NUMBER.fullmatch(plain):
         return None
     value = Decimal(plain)

@@ -75,8 +75,10 @@ def _page_one(doc):
         page.insert_image(rect, stream=IMG, keep_proportion=False)
 
 
-def _page_two(doc):
+def _page_two(doc, tiny_label=False):
     page = doc.new_page(width=W, height=H)
+    if tiny_label:  # a label nobody can read at the display width, inside the first photo
+        page.insert_text((70, 70), "1 2", fontsize=2, fontname="helv")
     for i, rect in enumerate(PHOTOS_P2):
         top = 50 + 70 * i
         _cell(page, pymupdf.Rect(50, top, 200, top + 70))
@@ -142,8 +144,10 @@ def _page_four(doc):
     _answer_row(page, 190, "23")
 
 
-def layout_pdf() -> bytes:
+def layout_pdf(tiny_label=False) -> bytes:
     doc = pymupdf.open()
-    for build in (_page_one, _page_two, _page_three, _page_four):
-        build(doc)
+    _page_one(doc)
+    _page_two(doc, tiny_label)
+    _page_three(doc)
+    _page_four(doc)
     return doc_bytes(doc)

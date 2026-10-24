@@ -193,11 +193,7 @@ def _crop_lines(doc, region) -> list[str]:
     lines = []
     for block in page.get_text("dict", clip=area).get("blocks", []):
         for line in block.get("lines", []):
-            spans = [
-                s["text"]
-                for s in line.get("spans", [])
-                if s["text"].strip() and pymupdf.Rect(s["bbox"]).intersects(area)
-            ]
+            spans = [s["text"] for s in line.get("spans", []) if s["text"].strip()]
             text = norm(" ".join(spans))
             if text:
                 lines.append(text)
