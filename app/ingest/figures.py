@@ -53,12 +53,17 @@ def stored_to_clip(page, stored) -> pymupdf.Rect:
 
 
 def anchor(page, text: str):
-    for needle in (text[:30], text[:15]):
-        needle = " ".join(needle.split())
-        if len(needle) >= 6:
-            hits = page.search_for(needle)
-            if hits:
-                return hits[0]
+    """Место начала задания на странице: поиск по началу текста, затем по его первой строке
+    или ячейке (в таблице начало задания лежит в ячейке, а не в сплошной строке)."""
+    cleaned = text.replace("[рисунок]", " ")
+    first = next((x.strip() for x in re.split(r"[|\n]", cleaned) if len(x.strip()) >= 6), "")
+    for source in (text, first):
+        for needle in (source[:30], source[:15]):
+            needle = " ".join(needle.split())
+            if len(needle) >= 6:
+                hits = page.search_for(needle)
+                if hits:
+                    return hits[0]
     return None
 
 

@@ -1127,3 +1127,16 @@ def test_the_following_task_is_the_nearest_one_after_it_by_position():
     assert _following(tasks, positions, 2) is None  # nothing after it
     assert _following(tasks, positions, 3) is None  # its own anchor was not found
     assert _following(tasks, [(2, 5.0), (1, 10.0), (1, 50.0), None], 1) == "c"  # model order
+
+
+def test_the_anchor_of_a_task_that_starts_in_a_table_cell_is_found():
+    from app.ingest import figures
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        text = "[рисунок] | Фото | Определите органоид, показанный на микрофотографии."
+        got = figures.suggest_regions(doc, 2, text, 2)
+        assert len(got) == 1 and near(got[0]["rect"], union(CAPTION_PHOTOS))
+        assert figures.anchor(doc[1], "[рисунок] | | ") is None
+    finally:
+        doc.close()
