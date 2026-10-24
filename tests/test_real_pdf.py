@@ -141,12 +141,10 @@ def test_no_task_is_lost_and_the_first_figure_covers_all_its_photos():
             assert len(photos) >= 5
             figures = [json.loads(r["figure"]) for r in rows if r["figure"]]
             ambiguous = sum(1 for f in figures if f.get("ambiguous"))
-            if figure["ambiguous"]:  # the start repeats in the book: no guess, the parent draws
-                assert figure["regions"] == [] and figure["suggested"] is False
-            else:
-                region = next(r for r in figure["regions"] if r["page"] == 4)
-                frame = pymupdf.Rect(region["rect"])
-                assert all((frame + (-1, -1, 1, 1)).contains(p) for p in photos), (frame, photos)
+            assert figure["ambiguous"] is False and figure["suggested"] is True
+            region = next(r for r in figure["regions"] if r["page"] == 4)
+            frame = pymupdf.Rect(region["rect"])
+            assert all((frame + (-1, -1, 1, 1)).contains(p) for p in photos), (frame, photos)
             print(
                 f"REAL-PDF counts: tasks={len(rows)} sections={len(sections)} "
                 f"figures={len(figures)} ambiguous_figures={ambiguous} photos_p4={len(photos)} "

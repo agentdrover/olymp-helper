@@ -1200,22 +1200,13 @@ def test_the_bottom_task_named_first_keeps_both_of_its_photos(tmp_path):
         assert [r["page"] for r in two] == [2] and near(two[0]["rect"], union(CAPTION_PHOTOS))
 
 
-def test_a_repeated_start_gives_no_automatic_suggestion_in_either_order(tmp_path):
-    def task(number, name):
-        return lt(
-            number,
-            "Рассмотрите внимательно препарат и ответьте на вопрос. " + name,
-            "single",
-            (1,),
-            "Б",
-            OPTIONS_1_2,
-            refers_to_figure=True,
-        )
+def test_identical_conditions_get_no_automatic_suggestion_in_either_order(tmp_path):
+    def task(number):
+        return lt(number, PREAMBLE, "single", (1,), "Б", OPTIONS_1_2, refers_to_figure=True)
 
-    pdf = _same_start_pdf()
+    pdf = _same_start_pdf(identical=True)
     for order in (("1", "2"), ("2", "1")):
-        tasks = [task(n, "Первое." if n == "1" else "Второе.") for n in order]
-        with import_layout(tmp_path / "".join(order), tasks, pdf=pdf) as client:
+        with import_layout(tmp_path / "".join(order), [task(n) for n in order], pdf=pdf) as client:
             for number in order:
                 d = detail(client, by_number(tmp_path / "".join(order), number)["id"])
                 assert d["figure"]["regions"] == [] and d["figure"]["suggested"] is False
@@ -1228,17 +1219,39 @@ def test_a_repeated_start_gives_no_automatic_suggestion_in_either_order(tmp_path
             assert r.status_code == 200, r.text
 
 
-def _same_start_pdf():
+PREAMBLE = "Рассмотрите внимательно препарат и ответьте на вопрос."
+
+
+def test_conditions_that_share_a_long_start_are_each_found_at_their_own_place(tmp_path):
+    def task(number, name):
+        return lt(
+            number, f"{PREAMBLE} {name}", "single", (1,), "Б", OPTIONS_1_2, refers_to_figure=True
+        )
+
+    for order in (("1", "2"), ("2", "1")):
+        tasks = [task(n, "Первое." if n == "1" else "Второе.") for n in order]
+        where = tmp_path / "".join(order)
+        with import_layout(where, tasks, pdf=_same_start_pdf()) as client:
+            one = detail(client, by_number(where, "1")["id"])["figure"]
+            two = detail(client, by_number(where, "2")["id"])["figure"]
+            assert one["ambiguous"] is False and two["ambiguous"] is False
+            assert [near(r["rect"], [60, 110, 150, 240]) for r in one["regions"]] == [True]
+            assert [near(r["rect"], [60, 310, 150, 370]) for r in two["regions"]] == [True]
+
+
+def _same_start_pdf(identical=False):
     from tests.bank_helpers import doc_bytes
     from tests.layout_pdf import _text
 
     doc = pymupdf.open()
     page = doc.new_page(width=595, height=842)
     for top, name in ((100, "Первое."), (300, "Второе.")):
-        _text(page, 50, top, "Рассмотрите внимательно препарат и ответьте на вопрос. " + name)
+        tail = "" if identical else name
+        _text(page, 50, top, "Рассмотрите внимательно препарат и ответьте на вопрос. " + tail)
         page.insert_image(
             pymupdf.Rect(60, top + 10, 150, top + 70), stream=IMAGE, keep_proportion=False
         )
+    page.insert_image(pymupdf.Rect(60, 180, 150, 240), stream=IMAGE, keep_proportion=False)
     return doc_bytes(doc)
 
 
@@ -1261,10 +1274,11 @@ def test_the_page_index_counts_the_whole_material_and_normalises_the_start():
     doc = pymupdf.open("pdf", _same_start_pdf())
     try:
         index = PageIndex(doc)
-        assert index.find("Рассмотрите внимательно препарат и ответьте на вопрос.") == AMBIGUOUS
-        # The anchor is the first 60 characters: tasks that differ only later are ambiguous.
-        longer = "Рассмотрите внимательно препарат и ответьте на вопрос. Второе."
-        assert index.find(longer) == AMBIGUOUS
+        # The shortest start that is unique: a start shared by two places grows until it differs.
+        assert index.find(PREAMBLE) == AMBIGUOUS  # even the whole condition is not unique
+        assert index.find(PREAMBLE + " Первое.")[1] < 150
+        assert index.find(PREAMBLE + " Второе.")[1] > 250
+        assert index.find(PREAMBLE + " Третье.") == AMBIGUOUS  # grew into words nobody has
     finally:
         doc.close()
 
@@ -1291,8 +1305,11 @@ def test_the_index_tiers_the_needle_and_places_it_at_the_first_word():
     _text(page, 50, 300, "Определите препарат под микроскопом, вариант Б. Далее ответ.")
     _text(page, 50, 500, "Ёж и ёлка растут в лесу, где много снега и ветра зимой")
     _text(page, 50, 600, "а б в")
+    _text(page, 50, 640, "Рассмотрите внимательно препарат под лупой")
+    _text(page, 50, 660, "Рассмотрите внимательно рисунок справа")
     _text(page, 50, 700, "Определите, пожалуйста, внимательно,")
     _text(page, 50, 716, "какой орган изображён на рисунке справа сейчас")
+    _text(page, 50, 800, "и последнее слово")
     reopened = pymupdf.open("pdf", doc_bytes(doc))
     try:
         index = PageIndex(reopened)
@@ -1304,7 +1321,15 @@ def test_the_index_tiers_the_needle_and_places_it_at_the_first_word():
         assert index.find("Ёж и елка растут в лесу, где совсем другой конец")[1] > 450
         assert index.find("Ёж и ёлка растут в лесу, где много снега, но дальше иначе")[1] > 450
         assert index.find("а  б  в") is None  # too short once normalised: not an anchor
-        assert index.find("Х" * 100) is None  # a word longer than the needle: nothing to look for
+        assert index.find("Х" * 100) is None
+        # The start is unique at 30 characters even though the rest differs from the page.
+        wrong = index.find("Рассмотрите внимательно препарат совсем другой конец")
+        assert 620 < wrong[1] < 650
+        # A shared short start with a wrong rest is not guessed.
+        assert index.find("Рассмотрите внимательно совсем иначе тут") == AMBIGUOUS
+        assert (
+            index.find("слово другое далее тут") is None
+        )  # the last word of a page  # a word longer than the needle: nothing to look for
         # The place is the first word, also when the start runs over a line.
         two = index.find("Определите, пожалуйста, внимательно, какой орган изображён на рисунке")
         assert 680 < two[1] < 700

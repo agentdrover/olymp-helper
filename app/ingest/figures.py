@@ -53,7 +53,8 @@ def stored_to_clip(page, stored) -> pymupdf.Rect:
 
 
 AMBIGUOUS = "ambiguous"
-NEEDLE_CHARS = (60, 30, 15)
+START_CHARS = 30  # с этого начала ищется якорь и растёт по словам, пока не станет единственным
+FALLBACK_CHARS = 15
 
 
 def _flat(text: str) -> str:
@@ -62,45 +63,64 @@ def _flat(text: str) -> str:
 
 
 class PageIndex:
-    """Якоря заданий по ВСЕМУ материалу. Якорь - начало первой строки или ячейки условия,
-    слова подряд; место берётся у первого слова, поэтому перенос строки не мешает."""
+    """Якоря заданий по ВСЕМУ материалу: слова подряд, место берётся у первого слова, поэтому
+    перенос строки не мешает. Якорь - кратчайшее начало условия, которое встречается ровно в
+    одном месте."""
 
     def __init__(self, doc: pymupdf.Document):
-        self.words = [
+        self.pages = [
             [(w, y0) for _, y0, _, _, raw, *_ in page.get_text("words") if (w := _flat(raw))]
             for page in doc
         ]
+        self.starts: dict[str, list[tuple[int, int]]] = {}
+        for number, words in enumerate(self.pages):
+            for i, (word, _) in enumerate(words):
+                self.starts.setdefault(word, []).append((number, i))
 
-    def _where(self, seq: list[str]) -> list[tuple[int, float]]:
-        n, found = len(seq), []
-        for number, words in enumerate(self.words, 1):
-            texts = [w for w, _ in words]
-            found += [
-                (number, words[i][1]) for i in range(len(texts) - n + 1) if texts[i : i + n] == seq
-            ]
-        return found
+    def _extend(self, hits, words, count):
+        """Места, где подряд идут первые count слов (hits - места первых count - 1 слов)."""
+        return [
+            (n, i)
+            for n, i in hits
+            if i + count - 1 < len(self.pages[n]) and self.pages[n][i + count - 1][0] == words[-1]
+        ]
+
+    def _prefix(self, words, chars):
+        """Места начала из words, набранного по целым словам до chars знаков."""
+        count = 1
+        while count < len(words) and len(" ".join(words[:count])) < chars:
+            count += 1
+        hits = list(self.starts.get(words[0], []))
+        for size in range(2, count + 1):
+            hits = self._extend(hits, words[:size], size)
+        return hits, count
 
     def find(self, text: str):
-        """(страница, y), если начало встречается в материале ровно в одном месте; AMBIGUOUS,
-        если больше чем в одном (повторы не разбираются по порядку заданий); None, если нет."""
-        cleaned = text.replace("[рисунок]", " ")
-        first = next((x.strip() for x in re.split(r"[|\n]", cleaned) if len(x.strip()) >= 6), "")
-        words = _flat(first).split()
-        for chars in NEEDLE_CHARS:
-            seq, size = [], 0
-            for word in words:
-                size += len(word) + 1
-                if size > chars + 1:
-                    break
-                seq.append(word)
-            if len(" ".join(seq)) < 6:
-                continue
-            where = self._where(seq)
-            if len(where) > 1:
+        """(страница, y), если начало условия встречается в материале в одном месте; AMBIGUOUS,
+        если даже всё условие встречается не в одном (повторы не разбираются по порядку
+        заданий); None, если начала на страницах нет."""
+        segments = re.split(r"[|\n]", text.replace("[рисунок]", " "))
+        while segments and len(segments[0].strip()) < 6:  # метка ячейки, не начало условия
+            segments.pop(0)
+        words = _flat(" ".join(segments)).split()
+        if not words or len(" ".join(words)) < 6:
+            return None
+        hits, count = self._prefix(words, START_CHARS)
+        if not hits:  # начало отличается от страницы: короткое начало
+            hits, _ = self._prefix(words, FALLBACK_CHARS)
+            if len(hits) == 1:
+                return self._place(hits[0])
+            return AMBIGUOUS if hits else None
+        while len(hits) > 1 and count < len(words):
+            count += 1
+            hits = self._extend(hits, words[:count], count)
+            if not hits:  # короткое начало было в нескольких местах, длинное - ни в одном
                 return AMBIGUOUS
-            if where:
-                return where[0]
-        return None
+        return self._place(hits[0]) if len(hits) == 1 else AMBIGUOUS
+
+    def _place(self, hit):
+        number, i = hit
+        return (number + 1, self.pages[number][i][1])
 
 
 def _image_boxes(page) -> list[pymupdf.Rect]:
