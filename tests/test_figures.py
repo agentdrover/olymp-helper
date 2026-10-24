@@ -473,6 +473,81 @@ def test_an_unrelated_or_unchanged_leak_keeps_the_parents_approval(tmp_path, mon
         assert got["confirmed"] is True and got["leak_ack"] is True
 
 
+def _boom(*args, **kwargs):
+    raise RuntimeError("recheck failed")
+
+
+def test_a_failed_recheck_leaves_a_new_key_uncommitted_and_the_retry_rechecks(
+    tmp_path, monkeypatch
+):
+    import pytest
+
+    from app.ingest import figure_service
+
+    numeric = make_task(12, "Сколько хромосом в клетке?", type="numeric")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        before = dict(row(tmp_path, other))
+        with monkeypatch.context() as patch, pytest.raises(RuntimeError):
+            patch.setattr(figure_service, "recheck_figure", _boom)
+            c.post(f"/parent/tasks/{other}/key", headers=PARENT, json={"answer": "42"})
+        assert dict(row(tmp_path, other)) == before  # no key, no revision, no snapshot
+        assert detail(c, fig)["figure"]["confirmed"] is True
+
+        # The same key again is not skipped as «unchanged»: nothing was stored.
+        r = c.post(f"/parent/tasks/{other}/key", headers=PARENT, json={"answer": "42"})
+        assert r.status_code == 200, r.text
+        assert detail(c, fig)["figure"]["confirmed"] is False
+
+
+def test_a_failed_recheck_leaves_an_options_edit_uncommitted_and_the_retry_rechecks(
+    tmp_path, monkeypatch
+):
+    import pytest
+
+    from app.ingest import figure_service
+
+    def opts(first):
+        return [{"label": first, "text": "ядро"}, {"label": "40", "text": "рибосома"}]
+
+    single = dict(make_task(12, "Выберите органоид.", options=opts("41")), answer_text="ядро")
+    model = StubModel(split=reply(fig_task(11), single), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        before = dict(row(tmp_path, other))
+        with monkeypatch.context() as patch, pytest.raises(RuntimeError):
+            patch.setattr(figure_service, "recheck_figure", _boom)
+            c.post(f"/parent/tasks/{other}/edit", headers=PARENT, json={"options": opts("42")})
+        assert dict(row(tmp_path, other)) == before
+        assert detail(c, fig)["figure"]["confirmed"] is True
+
+        r = c.post(f"/parent/tasks/{other}/edit", headers=PARENT, json={"options": opts("42")})
+        assert r.status_code == 200, r.text
+        assert detail(c, fig)["figure"]["confirmed"] is False
+
+
+def test_an_edit_returns_the_revision_that_is_stored_after_the_recheck(tmp_path):
+    tasks = [fig_task(11, CELL_OPTS)]
+    with figure_client(tmp_path, "raster", tasks=tasks) as c:
+        tid = task_ids(tmp_path)[0]
+        assert confirm_figure(c, tid).status_code == 200
+        # The new option texts name what the picture shows: the recheck makes another revision.
+        options = [{"label": "А", "text": "Рисунок: части объекта обозначены цифрами"}] + CELL_OPTS[
+            1:
+        ]
+        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"options": options})
+        assert r.status_code == 200, r.text
+        assert detail(c, tid)["figure"]["confirmed"] is False  # the recheck did run
+        assert r.json()["revision"] == row(tmp_path, tid)["revision"]
+
+
 # -------------------------------------------------------------------- AC-22
 
 
