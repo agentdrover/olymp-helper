@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Проверка заданий{% endblock %}
+{% block content %}
+<h1>Проверка заданий <span class="hint" id="counter">{{ counter or "" }}</span></h1>
+<div id="feed">{% include "parent/card.html" %}</div>
+<p class="hint">Enter — верно и подтвердить, → — пропустить, E — поправить.</p>
+<script src="/static/feed.js"></script>
+{% endblock %}

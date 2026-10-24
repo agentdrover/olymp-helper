@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Задания{% endblock %}
+{% block content %}
+<h1>Задания</h1>
+{% if tasks %}
+<ul>
+  {% for t in tasks %}<li><a href="/tasks/{{ t.id }}">Задание {{ t.number }}</a> — {{ t.source }}</li>{% endfor %}
+</ul>
+{% else %}
+<p>Пока нет проверенных заданий.</p>
+{% endif %}
+{% endblock %}

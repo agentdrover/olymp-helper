@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Олимпиадный помощник{% endblock %}</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; color: #1d2733; background: #f6f7f9; }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  .badge { background: #e8eef7; border-radius: 6px; padding: 2px 8px; font-weight: 600; }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 800px) { .split { grid-template-columns: 1fr; } }
+  .source img { max-width: 100%; border: 1px solid #ccd; background: #fff; }
+  .body { background: #fff; border-radius: 8px; padding: 16px; }
+  button { font: inherit; padding: 8px 14px; margin: 4px 4px 4px 0; cursor: pointer; }
+  button.primary { background: #1b6ef3; color: #fff; border: 0; border-radius: 6px; }
+  .err { color: #b00020; }
+  .hint { color: #51606f; }
+  #frame { position: absolute; border: 2px solid #e00; pointer-events: none; }
+</style>
+</head>
+<body><main>{% block content %}{% endblock %}</main></body>
+</html>

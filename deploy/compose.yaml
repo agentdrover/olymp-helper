@@ -18,6 +18,7 @@ services:
       - OLYMP_TLS_CERT=/certs/server.pem
       - OLYMP_TLS_KEY=/certs/server.key
       - EXECUTOR_SHARED_KEY
+      - OLYMP_PARENT_KEY
     healthcheck:
       test: ["CMD", "python", "/app/deploy/healthcheck.py"]
       interval: 30s

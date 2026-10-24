@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Вход родителя{% endblock %}
+{% block content %}
+<h1>Вход родителя</h1>
+<form method="post" action="/parent/login">
+  <p><label>Ключ <input type="password" name="key" autocomplete="current-password" required></label></p>
+  {% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
+  <button class="primary">Войти</button>
+</form>
+{% endblock %}

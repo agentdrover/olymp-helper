@@ -1,0 +1,75 @@
+{% if card %}
+<article class="card" data-task-id="{{ card.task_id }}" data-kind="{{ card.kind }}"
+         data-counter="{{ counter or '' }}" data-figure-page="{{ card.figure_page or '' }}">
+  <p><span class="badge">{{ card.label }}</span></p>
+  <div class="split">
+    <div class="source">
+      {% if card.page_url %}<img id="page-img" src="{{ card.page_url }}" alt="Исходная страница">{% endif %}
+      {# Ссылки на страницы - только у карточек проверки текста: на карточке рисунка рамка
+         привязана к одной странице, переключать её нельзя. #}
+      {% if card.kind != "needs_figure" and card.page_urls|length > 1 %}
+      <p class="hint">Страницы:
+        {% for p in card.page_urls %}<a class="page-link" href="{{ p.url }}" data-page-url="{{ p.url }}">стр. {{ p.page }}</a> {% endfor %}
+      </p>
+      {% endif %}
+    </div>
+    <div class="body">
+      <p><strong>Задание {{ card.number }}</strong> ({{ card.type }})</p>
+      <p class="text">{{ card.text }}</p>
+      {% if card.options %}
+      <ul>
+        {% if card.options is mapping %}
+          {% for side in card.options.values() %}{% for o in side %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}{% endfor %}
+        {% else %}
+          {% for o in card.options %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}
+        {% endif %}
+      </ul>
+      {% endif %}
+      {% if card.key %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }})</p>{% endif %}
+      {% if card.model_answer %}<p>Ответ модели (не проверен): <b>{{ card.model_answer }}</b></p>{% endif %}
+      {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
+      <p class="hint">{{ card.hint }}</p>
+      {% if card.note %}<p class="err">Обратите внимание: {{ card.note }}.</p>{% endif %}
+
+      {% if card.kind in ("confirm", "child_dispute") %}
+        <button class="primary" data-action="confirm">{{ card.button or "Ключ прав — оставить" }}</button>
+      {% elif card.kind == "no_key" %}
+        <p><label>Ответ <input id="answer" size="8"></label></p>
+        <button class="primary" data-action="confirm">Подтвердить с моим ответом</button>
+        <button data-action="confirm-no-key">Подтвердить без ключа</button>
+      {% elif card.kind == "discrepancy" %}
+        <button class="primary" data-action="resolve" data-choice="key">Ключ прав</button>
+        <label>Мой ответ <input id="answer" size="8"></label>
+        <button data-action="resolve" data-choice="mine">Принять мой ответ</button>
+      {% elif card.kind == "model_missing" %}
+        <button class="primary" data-action="retry">Повторить запрос к модели</button>
+      {% elif card.kind == "open_exclude" %}
+        <button class="primary" data-action="exclude">Исключить</button>
+      {% elif card.kind == "needs_figure" %}
+        <fieldset>
+          <legend>Рисунок</legend>
+          <p class="hint">Рамка: {% if card.figure and card.figure.rect %}найдена автоматически{% else %}нарисуйте её мышью на странице слева{% endif %}.</p>
+          <p><label>Описание для ребёнка (alt)<br><input id="alt" size="50" value="{{ card.figure.alt if card.figure else '' }}"></label></p>
+          <p><label>Пояснение для модели (ребёнку не показывается)<br><textarea id="teacher_note" rows="3" cols="50">{{ card.figure.teacher_note if card.figure else '' }}</textarea></label></p>
+          <p><label><input type="checkbox" id="no_answer_ack"> в рисунке и в описании нет ответа</label></p>
+          <p><label><input type="checkbox" id="teacher_note_ack"> в пояснении названо, что обозначено</label></p>
+          <button class="primary" data-action="figure">Подтвердить рисунок</button>
+        </fieldset>
+      {% endif %}
+      <p>
+        <button data-action="skip">Пропустить (→)</button>
+        <button data-action="edit">Поправить (E)</button>
+        {% if card.kind != "open_exclude" %}<button data-action="exclude">Исключить</button>{% endif %}
+      </p>
+      <div id="edit-panel" hidden>
+        <p><textarea id="edit-text" rows="5" cols="50">{{ card.text }}</textarea></p>
+        <label><input type="checkbox" id="manual"> самодостаточное условие (без рисунка)</label>
+        <button data-action="save-edit">Сохранить правку</button>
+      </div>
+      <p class="err" id="error" role="alert"></p>
+    </div>
+  </div>
+</article>
+{% else %}
+<p>Всё проверено: в ленте больше нет заданий.</p>
+{% endif %}

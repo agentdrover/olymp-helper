@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Задание {{ task.number }}{% endblock %}
+{% block content %}
+<h1>Задание {{ task.number }}</h1>
+<p class="hint">{{ task.source }}</p>
+{% if task.figure %}
+<p><a href="{{ task.figure.url }}"><img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}" style="max-width:100%;min-width:560px"></a></p>
+{% endif %}
+<p>{{ task.text }}</p>
+{% if task.options %}
+<ul>
+  {% if task.options is mapping %}
+    {% for side in task.options.values() %}{% for o in side %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}{% endfor %}
+  {% else %}
+    {% for o in task.options %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}
+  {% endif %}
+</ul>
+{% endif %}
+{% endblock %}
