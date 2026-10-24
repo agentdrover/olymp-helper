@@ -140,7 +140,16 @@ def test_numeric_type_migration_keeps_the_data(tmp_path):
         "INSERT INTO material(file, sha256, kind, import_status) "
         "VALUES ('a.pdf', 'h1', 'tasks', 'done')"
     )
-    conn.execute("INSERT INTO task_item(material_id, type, text) VALUES (1, 'single', 'q')")
+    conn.execute(
+        "INSERT INTO task_item(material_id, page_from, page_to, variant, source_number, type, "
+        "text, options, points, topic, import_status, answer_key, key_source, model_answer, "
+        "revision, figure, key_version, excluded, discrepancy_ack, dispute_cleared_event_id, "
+        "unsupported_reason, section, stage, review_note, text_page) VALUES "
+        "(1, 3, 4, '2', '1.5', 'single', 'q', '[]', 2.5, 'cells', 'checked', '{\"v\":1}', "
+        "'parent', '{\"m\":2}', 3, '{\"f\":3}', 4, 1, 'ack', 5, 'why', 'Section', 'final', "
+        "'note', 3)"
+    )
+    before = conn.execute("SELECT * FROM task_item").fetchall()
     conn.execute(
         "INSERT INTO task_revision(task_item_id, revision, key_version, snapshot, created_at) "
         "VALUES (1, 1, 1, '{}', 't')"
@@ -156,7 +165,17 @@ def test_numeric_type_migration_keeps_the_data(tmp_path):
         pass
 
     assert migrate(conn) == SCHEMA_VERSION
-    assert conn.execute("SELECT type, text FROM task_item").fetchall() == [("single", "q")]
+    assert [tuple(r) for r in conn.execute("SELECT * FROM task_item").fetchall()] == [
+        (*tuple(before[0]), None, None)  # every old column as it was; the two new ones empty
+    ]
+    try:  # the unique index of (material, section, number) was recreated
+        conn.execute(
+            "INSERT INTO task_item(material_id, type, text, section, source_number) "
+            "VALUES (1, 'single', 'x', 'Section', '1.5')"
+        )
+        raise AssertionError("a duplicate (section, number) was accepted")
+    except sqlite3.IntegrityError:
+        pass
     assert conn.execute("SELECT COUNT(*) FROM task_revision").fetchone()[0] == 1
     assert conn.execute("SELECT task_item_id FROM event").fetchall() == [(1,)]
     conn.execute("INSERT INTO task_item(material_id, type, text) VALUES (1, 'numeric', 'q')")
@@ -216,3 +235,10 @@ def test_a_migration_that_leaves_orphans_is_rolled_back(tmp_path):
     )
     assert not conn.in_transaction
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_a_connection_that_runs_with_foreign_keys_off_keeps_them_off(tmp_path):
+    conn = connect(tmp_path / "olymp.db")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    migrate(conn)
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 0

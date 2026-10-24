@@ -375,6 +375,7 @@ def test_ac2(tmp_path):
         # A manual frame edits the region of its page only; the other page stays.
         assert [r["page"] for r in decided["regions"]] == [1, 2]
         assert near(decided["regions"][0]["rect"], table)
+        assert near(decided["rect"], table) and decided["page"] == 1
         assert near(decided["regions"][1]["rect"], union(PHOTOS_P2))
         assert detail(client, t11["id"])["figure"]["confirmed"]
         stacked = pymupdf.Pixmap((tmp_path / decided["file"]).read_bytes())
@@ -808,6 +809,7 @@ def test_short_answers_are_looked_for_by_context_in_the_condition():
     assert leaks("У паука 7 глаз.", "7", "numeric")  # a number of a numeric task, anywhere
     assert leaks("У паука 7,0 глаз.", "7", "numeric")
     assert not leaks("У паука 17 глаз.", "7", "numeric")
+    assert not leaks("У паука 7 глаз.", "7", "single")  # only a numeric task bars the number
     assert not leaks("Среди 7 видов выберите верное.", "Б")  # an ordinary number
     assert not leaks("Выберите верное. Б) ядро и А) клетка", "Б")
     assert not leaks("Ответ запишите числом.", "7", "numeric")
@@ -826,6 +828,13 @@ def test_a_short_answer_left_in_the_condition_is_not_published(tmp_path):
         assert not client.get("/api/search", params={"q": "хромосомы"}, headers=CHILD).json()[
             "results"
         ]
+
+    # A number of a numeric task is barred anywhere in the condition.
+    tasks[2] = lt("1.3", "У паука 7 глаз. Подсчитайте.", "numeric", (2,), "7")
+    with import_layout(tmp_path / "n", tasks) as client:
+        task = by_number(tmp_path / "n", "1.3")
+        assert detail(client, task["id"])["publication"]["blocked"]
+        assert confirm(client, task["id"]).status_code == 422
 
 
 def _cell_figure_task(tmp_path, tasks=None):

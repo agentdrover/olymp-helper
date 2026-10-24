@@ -133,7 +133,6 @@ def confirm_figure(
                 "Сдвиньте рамку или подтвердите явно, что так и надо."
             )
         figure.update(
-            page=regions[0]["page"],
             rect=regions[0]["rect"],
             regions=regions,
             leak=found,
