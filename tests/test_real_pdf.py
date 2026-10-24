@@ -5,6 +5,7 @@ removed afterwards; nothing of the book is written into the repository, the CI o
 the test prints counts only.
 """
 
+import json
 import os
 import re
 import tempfile
@@ -137,14 +138,20 @@ def test_no_task_is_lost_and_the_first_figure_covers_all_its_photos():
                 ]
             finally:
                 doc.close()
-            region = next(r for r in figure["regions"] if r["page"] == 4)
-            frame = pymupdf.Rect(region["rect"])
             assert len(photos) >= 5
-            assert all((frame + (-1, -1, 1, 1)).contains(p) for p in photos), (frame, photos)
+            figures = [json.loads(r["figure"]) for r in rows if r["figure"]]
+            ambiguous = sum(1 for f in figures if f.get("ambiguous"))
+            if figure["ambiguous"]:  # the start repeats in the book: no guess, the parent draws
+                assert figure["regions"] == [] and figure["suggested"] is False
+            else:
+                region = next(r for r in figure["regions"] if r["page"] == 4)
+                frame = pymupdf.Rect(region["rect"])
+                assert all((frame + (-1, -1, 1, 1)).contains(p) for p in photos), (frame, photos)
             print(
                 f"REAL-PDF counts: tasks={len(rows)} sections={len(sections)} "
-                f"figures={sum(1 for r in rows if r['figure'])} photos_p4={len(photos)} "
-                f"regions_of_1.1={len(figure['regions'])} leak_flags={len(figure['leak'])}"
+                f"figures={len(figures)} ambiguous_figures={ambiguous} photos_p4={len(photos)} "
+                f"task_1.1_ambiguous={figure['ambiguous']} regions_of_1.1={len(figure['regions'])} "
+                f"leak_flags={len(figure['leak'])}"
             )
 
 

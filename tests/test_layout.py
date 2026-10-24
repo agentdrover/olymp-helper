@@ -569,26 +569,6 @@ def test_the_splitter_is_told_to_keep_the_answer_out_of_the_condition():
     assert "answer_text" in SYSTEM_PROMPT and "condition" in SYSTEM_PROMPT
 
 
-def test_a_figure_is_not_proposed_for_images_of_the_next_task(tmp_path):
-    from app.ingest import figures
-
-    doc = pymupdf.open("pdf", layout_pdf())
-    try:
-        text = "Определите органоид, показанный на микрофотографии."
-        only = figures.suggest_regions(doc, 2, text, 2, 2, "Сколько хромосом содержит соматическая")
-        assert [r["page"] for r in only] == [2] and near(only[0]["rect"], union(CAPTION_PHOTOS))
-        # No next task: everything below the anchor up to the last page of the task.
-        until_end = figures.suggest_regions(doc, 2, text, 2)
-        assert near(until_end[0]["rect"], union(CAPTION_PHOTOS))
-        # The anchor is not on the page: the nearest image is the last resort.
-        lost = figures.suggest_regions(doc, 2, "Нет такого текста на странице", 2)
-        assert len(lost) == 1 and lost[0]["page"] == 2
-        # A page without images gives no proposal.
-        assert figures.suggest_regions(doc, 4, "Какой орган растения поглощает воду", 4) == []
-    finally:
-        doc.close()
-
-
 def test_the_key_typed_by_the_parent_is_checked_against_the_frame_too(tmp_path):
     tasks = good_tasks()
     tasks[2] = lt(
@@ -673,9 +653,8 @@ def test_a_task_without_a_next_task_takes_the_images_up_to_its_last_page(tmp_pat
         assert near(figure["regions"][1]["rect"], union([*PHOTOS_P2, *CAPTION_PHOTOS]))
     doc = pymupdf.open("pdf", layout_pdf())
     try:
-        text = "Рассмотрите фотографии в таблице и выберите"
-        assert [r["page"] for r in figures.suggest_regions(doc, 1, text, 2)] == [1, 2]
-        assert [r["page"] for r in figures.suggest_regions(doc, 1, text, 1)] == [1]
+        assert [r["page"] for r in figures.suggest_regions(doc, 1, 95.0, 2)] == [1, 2]
+        assert [r["page"] for r in figures.suggest_regions(doc, 1, 95.0, 1)] == [1]
     finally:
         doc.close()
 
@@ -1057,23 +1036,6 @@ def test_a_range_in_the_page_answer_is_expanded_to_every_label():
     assert fit_page_answer("Б … Д", "multiple", letters) == ["Б", "В", "Г", "Д"]
 
 
-def test_an_anchor_that_is_not_on_the_page_takes_the_nearest_image_only():
-    from app.ingest import figures
-
-    doc = pymupdf.open("pdf", layout_pdf())
-    try:
-        lost = figures.suggest_regions(doc, 2, "Этого текста на странице нет", 2)
-        assert len(lost) == 1 and lost[0]["page"] == 2
-        images = [*PHOTOS_P2, *CAPTION_PHOTOS]
-        assert any(near(lost[0]["rect"], list(r)) for r in images)  # one image, not their union
-        far = figures.suggest_regions(
-            doc, 1, "Этого текста на странице нет", 2, 2, "1.2 Определите"
-        )
-        assert len(far) == 1 and far[0]["page"] == 1
-    finally:
-        doc.close()
-
-
 def test_the_next_anchor_is_the_nearest_following_one_by_position(tmp_path):
     tasks = good_tasks()
     tasks[1], tasks[2] = tasks[2], tasks[1]  # emitted as 1.1, 1.3, 1.2
@@ -1117,33 +1079,6 @@ def test_a_figure_stored_without_regions_is_rechecked_after_a_key_change(tmp_pat
         assert confirm_figure(client, task["id"], leak_ack=True).status_code == 200
 
 
-def test_the_following_task_is_the_nearest_one_after_it_by_position():
-    from app.ingest.importer import _following
-
-    tasks = ["a", "b", "c", "d"]
-    positions = [(1, 10.0), (1, 50.0), (2, 5.0), None]
-    assert _following(tasks, positions, 0) == "b"  # same page, lower down
-    assert _following(tasks, positions, 1) == "c"  # next page
-    assert _following(tasks, positions, 2) == "d"  # nothing known after it: the next in the list
-    assert _following(tasks, positions, 3) is None  # last in the list
-    assert _following(tasks, [(1, 10.0), (1, 10.0), (1, 40.0)], 0) == "c"  # equal is not after
-    assert _following(tasks, [(1, 10.0), (1, 10.0)], 0) == "b"  # equal only: the list order
-    assert _following(tasks, [(2, 5.0), (1, 10.0), (1, 50.0), None], 1) == "c"  # model order
-
-
-def test_the_anchor_of_a_task_that_starts_in_a_table_cell_is_found():
-    from app.ingest import figures
-
-    doc = pymupdf.open("pdf", layout_pdf())
-    try:
-        text = "[рисунок] | Фото | Определите органоид, показанный на микрофотографии."
-        got = figures.suggest_regions(doc, 2, text, 2)
-        assert len(got) == 1 and near(got[0]["rect"], union(CAPTION_PHOTOS))
-        assert figures.anchor(doc[1], "[рисунок] | | ") is None
-    finally:
-        doc.close()
-
-
 def _same_prefix_pdf():
     from tests.bank_helpers import doc_bytes
     from tests.layout_pdf import _text
@@ -1159,60 +1094,6 @@ def _same_prefix_pdf():
     return doc_bytes(doc)
 
 
-def test_tasks_that_start_with_the_same_words_get_their_own_images(tmp_path):
-    def task(number, name):
-        return lt(
-            number,
-            f"Рассмотрите внимательно препарат, {name} задание.",
-            "single",
-            (1,),
-            "Б",
-            OPTIONS_1_2,
-            refers_to_figure=True,
-        )
-
-    tasks = [task("1", "первое"), task("2", "второе")]
-    with import_layout(tmp_path, tasks, pdf=_same_prefix_pdf()) as client:
-        one = detail(client, by_number(tmp_path, "1")["id"])["figure"]["regions"]
-        two = detail(client, by_number(tmp_path, "2")["id"])["figure"]["regions"]
-        assert len(one) == 1 and near(one[0]["rect"], [60, 110, 150, 240])
-        assert len(two) == 1 and near(two[0]["rect"], [60, 310, 150, 370])
-
-    # The same start, whatever follows it: the second is found below the first.
-    from app.ingest import figures
-
-    doc = pymupdf.open("pdf", _same_prefix_pdf())
-    try:
-        text = "Рассмотрите внимательно препарат"
-        top = figures.anchor(doc[0], text)
-        below = figures.anchor(doc[0], text, after=top.y0)
-        assert below.y0 > top.y0 + 100
-        assert figures.anchor(doc[0], text, after=below.y0).y0 == top.y0  # nothing lower: the first
-    finally:
-        doc.close()
-
-
-def test_a_region_never_runs_past_the_last_page_of_its_own_task(tmp_path):
-    from app.ingest import figures
-
-    doc = pymupdf.open("pdf", layout_pdf())
-    try:
-        text = "Рассмотрите фотографии в таблице и выберите"
-        got = figures.suggest_regions(doc, 1, text, 1, 2, "1.2 Определите органоид, показанный")
-        assert [r["page"] for r in got] == [1]  # the next task is on page 2, this one ends on 1
-        got = figures.suggest_regions(doc, 1, text, 2, 2, "1.2 Определите органоид, показанный")
-        assert [r["page"] for r in got] == [1, 2]
-    finally:
-        doc.close()
-    # A task in the middle without a found anchor: the first one stays on its own pages.
-    tasks = good_tasks()
-    tasks[0]["pages"] = [1]
-    tasks[1] = lt("1.2", "Этого текста нет на странице", "single", (2,), "Б", OPTIONS_1_2)
-    with import_layout(tmp_path, tasks) as client:
-        regions = detail(client, by_number(tmp_path, "1.1")["id"])["figure"]["regions"]
-        assert [r["page"] for r in regions] == [1]
-
-
 def test_the_alt_check_finds_numbers_glued_to_words():
     from app.ingest.figures import alt_problem
 
@@ -1222,33 +1103,231 @@ def test_the_alt_check_finds_numbers_glued_to_words():
         assert alt_problem(alt, None, ["28.5"]) is None, alt
 
 
-def test_anchors_of_repeated_starts_are_found_in_order_on_each_page():
-    from app.ingest import figures
-    from app.ingest.importer import _positions, _y_on
+def _photos_pdf(photo_tops, next_page_y=None, same_start=False):
+    """Page 1 holds the task and its photos; page 2 starts the next task at next_page_y."""
+    from tests.bank_helpers import doc_bytes
     from tests.layout_pdf import _text
 
     doc = pymupdf.open()
+    one = doc.new_page(width=595, height=842)
+    _text(one, 50, 60, "Рассмотрите внимательно препарат и ответьте на вопрос.")
+    for top in photo_tops:
+        one.insert_image(pymupdf.Rect(60, top, 150, top + 50), stream=IMAGE, keep_proportion=False)
+    two = doc.new_page(width=595, height=842)
+    if next_page_y is not None:
+        name = "Рассмотрите внимательно препарат и ответьте на вопрос." if same_start else "Другое"
+        _text(two, 50, next_page_y, name if same_start else "Определите орган по описанию.")
+    return doc_bytes(doc)
+
+
+def _regions(pdf, texts, pages_per_task):
+    from app.ingest.importer import _figure_record, _following, _positions
+
+    doc = pymupdf.open("pdf", pdf)
     try:
-        for tops in ((100, 200, 300), (80, 400)):
-            page = doc.new_page(width=595, height=842)
-            for top in tops:
-                _text(page, 50, top, "Рассмотрите внимательно препарат, и далее по тексту.")
-        text = "Рассмотрите внимательно препарат, и далее по тексту."
-        first = figures.anchor(doc[0], text)
-        second = figures.anchor(doc[0], text, after=first.y0)
-        third = figures.anchor(doc[0], text, after=second.y0)
-        assert 150 < second.y0 < 250 and third.y0 > 250  # the nearest one below, not the last
-        tasks = [{"text": text, "pages": [p]} for p in (1, 1, 2, 2)]
-        pos = _positions(doc, tasks)
-        assert [p for p, _ in pos] == [1, 1, 2, 2]
-        assert pos[0][1] < pos[1][1] and pos[2][1] < pos[3][1]
-        assert pos[2][1] < 100  # the first hit of the new page, not below the previous page's y
-        # A task whose anchor is missing does not make the next one start over.
-        gap = [{"text": text, "pages": [1]}, {"text": "нет такого", "pages": [1]}, tasks[0]]
-        mid = _positions(doc, gap)
-        assert mid[1] is None and mid[0][1] < mid[2][1]
-        assert (
-            _y_on((2, 10.0), 1) is None and _y_on((1, 10.0), 1) == 10.0 and _y_on(None, 1) is None
+        tasks = [
+            {
+                "text": t,
+                "pages": pg,
+                "number": str(i),
+                "options": None,
+                "type": "single",
+                "refers_to_figure": True,
+            }
+            for i, (t, pg) in enumerate(zip(texts, pages_per_task, strict=True))
+        ]
+        pos = _positions(figures_index(doc), tasks)
+        return [
+            _figure_record(doc, 1, t, pos[i], _following(pos, i))["regions"]
+            for i, t in enumerate(tasks)
+        ], pos
+    finally:
+        doc.close()
+
+
+def figures_index(doc):
+    from app.ingest.figures import PageIndex
+
+    return PageIndex(doc)
+
+
+FIRST = "Рассмотрите внимательно препарат и ответьте на вопрос."
+SECOND = "Определите орган по описанию."
+
+
+def test_photos_before_the_next_page_anchor_are_all_taken():
+    # Three photos on page 1; the next task starts on page 2 at y = 203: the y is the other
+    # page's, so it must not cut page 1.
+    for tops, expected in (((100, 170, 240), 3), ((100, 170, 240, 310), 4)):
+        got, _ = _regions(_photos_pdf(tops, 203), [FIRST, SECOND], [[1], [2]])
+        assert [r["page"] for r in got[0]] == [1]
+        assert near(got[0][0]["rect"], [60, tops[0], 150, tops[-1] + 50]), (expected, got[0])
+
+
+def test_the_stop_cuts_only_on_its_own_page_and_the_page_is_clamped():
+    from app.ingest import figures
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        # The stop lies on page 2 and the task ends on page 1: no cut, bottom of page 1.
+        got = figures.suggest_regions(doc, 1, 95.0, 1, stop=(2, 10.0))
+        assert [r["page"] for r in got] == [1]
+        got = figures.suggest_regions(doc, 1, 95.0, 1, stop=(2, 200.0))  # images above that y
+        assert [r["page"] for r in got] == [1] and near(got[0]["rect"], union(PHOTOS_P1))
+        # The stop lies on a page of the range: cut at its y on that page only.
+        got = figures.suggest_regions(doc, 1, 95.0, 2, stop=(2, 200.0))
+        assert [r["page"] for r in got] == [1, 2]
+        assert near(got[1]["rect"], union(PHOTOS_P2))
+        assert near(got[0]["rect"], union(PHOTOS_P1))
+        # A stop above the images of its page leaves that page without a region.
+        got = figures.suggest_regions(doc, 1, 95.0, 2, stop=(2, 30.0))
+        assert [r["page"] for r in got] == [1]
+        # No start y: no bounds, the nearest image only.
+        nearest = figures.suggest_regions(doc, 2, None, 2)
+        assert len(nearest) == 1 and near(nearest[0]["rect"], PHOTOS_P2[0])
+        assert figures.suggest_regions(doc, 4, 100.0, 4) == []
+    finally:
+        doc.close()
+
+
+def test_the_bottom_task_named_first_keeps_both_of_its_photos(tmp_path):
+    tasks = good_tasks()
+    tasks[1], tasks[2], tasks[0] = tasks[2], tasks[0], tasks[1]  # 1.3 numeric, 1.1, 1.2
+    with import_layout(tmp_path, tasks) as client:
+        one = detail(client, by_number(tmp_path, "1.1")["id"])["figure"]["regions"]
+        two = detail(client, by_number(tmp_path, "1.2")["id"])["figure"]["regions"]
+        assert [r["page"] for r in one] == [1, 2] and near(one[1]["rect"], union(PHOTOS_P2))
+        assert [r["page"] for r in two] == [2] and near(two[0]["rect"], union(CAPTION_PHOTOS))
+
+
+def test_a_repeated_start_gives_no_automatic_suggestion_in_either_order(tmp_path):
+    def task(number, name):
+        return lt(
+            number,
+            "Рассмотрите внимательно препарат и ответьте на вопрос. " + name,
+            "single",
+            (1,),
+            "Б",
+            OPTIONS_1_2,
+            refers_to_figure=True,
         )
+
+    pdf = _same_start_pdf()
+    for order in (("1", "2"), ("2", "1")):
+        tasks = [task(n, "Первое." if n == "1" else "Второе.") for n in order]
+        with import_layout(tmp_path / "".join(order), tasks, pdf=pdf) as client:
+            for number in order:
+                d = detail(client, by_number(tmp_path / "".join(order), number)["id"])
+                assert d["figure"]["regions"] == [] and d["figure"]["suggested"] is False
+                assert d["figure"]["ambiguous"] is True
+                assert d["card"]["kind"] == "needs_figure"
+                assert "вручную" in d["card"]["hint"] and "повторяется" in d["card"]["hint"]
+            # The parent draws the frame by hand: it works.
+            one = by_number(tmp_path / "".join(order), order[0])
+            r = confirm_figure(client, one["id"], rect=[60, 110, 150, 170], page=1)
+            assert r.status_code == 200, r.text
+
+
+def _same_start_pdf():
+    from tests.bank_helpers import doc_bytes
+    from tests.layout_pdf import _text
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    for top, name in ((100, "Первое."), (300, "Второе.")):
+        _text(page, 50, top, "Рассмотрите внимательно препарат и ответьте на вопрос. " + name)
+        page.insert_image(
+            pymupdf.Rect(60, top + 10, 150, top + 70), stream=IMAGE, keep_proportion=False
+        )
+    return doc_bytes(doc)
+
+
+def test_the_page_index_counts_the_whole_material_and_normalises_the_start():
+    from app.ingest.figures import AMBIGUOUS, PageIndex
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        index = PageIndex(doc)
+        cell = "[рисунок] | Фото | ОПРЕДЕЛИТЕ   органоид, показанный на микрофотографии."
+        found = index.find(cell)
+        assert found[0] == 2 and 200 < found[1] < 230  # whitespace, case and cell markers
+        assert index.find("[рисунок] | | ") is None  # nothing to look for
+        assert index.find("Этого текста на странице нет") is None
+        # The start of two different tasks: «1.» is on several pages, so it is not an anchor.
+        assert index.find("1.3 Сколько хромосом содержит") != AMBIGUOUS
+        assert index.find("Вариант 1. Отборочный этап") is not None
+    finally:
+        doc.close()
+    doc = pymupdf.open("pdf", _same_start_pdf())
+    try:
+        index = PageIndex(doc)
+        assert index.find("Рассмотрите внимательно препарат и ответьте на вопрос.") == AMBIGUOUS
+        # The anchor is the first 60 characters: tasks that differ only later are ambiguous.
+        longer = "Рассмотрите внимательно препарат и ответьте на вопрос. Второе."
+        assert index.find(longer) == AMBIGUOUS
+    finally:
+        doc.close()
+
+
+def test_the_following_anchor_is_the_next_one_in_page_order():
+    from app.ingest.importer import _following
+
+    pos = [(2, 5.0), (1, 10.0), None, "ambiguous", (1, 50.0)]
+    assert _following(pos, 1) == (1, 50.0)  # whatever the model order
+    assert _following(pos, 4) == (2, 5.0)
+    assert _following(pos, 0) is None  # nothing known after it: no stop
+    assert _following(pos, 2) is None and _following(pos, 3) is None  # no own anchor
+    assert _following([(1, 10.0), (1, 10.0)], 0) is None  # equal is not after
+
+
+def test_the_index_tiers_the_needle_and_places_it_at_the_first_word():
+    from app.ingest.figures import AMBIGUOUS, PageIndex
+    from tests.bank_helpers import doc_bytes
+    from tests.layout_pdf import _text
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _text(page, 50, 100, "Определите препарат под микроскопом, вариант А. Далее ответ.")
+    _text(page, 50, 300, "Определите препарат под микроскопом, вариант Б. Далее ответ.")
+    _text(page, 50, 500, "Ёж и ёлка растут в лесу, где много снега и ветра зимой")
+    _text(page, 50, 600, "а б в")
+    _text(page, 50, 700, "Определите, пожалуйста, внимательно,")
+    _text(page, 50, 716, "какой орган изображён на рисунке справа сейчас")
+    reopened = pymupdf.open("pdf", doc_bytes(doc))
+    try:
+        index = PageIndex(reopened)
+        a = index.find("Определите препарат под микроскопом, вариант А. Далее ответ.")
+        b = index.find("Определите препарат под микроскопом, вариант Б. Далее ответ.")
+        assert a[1] < 120 and b[1] > 280  # the 60-character start tells them apart
+        assert index.find("Определите препарат под микроскопом, вариант") == AMBIGUOUS
+        # The first 60 characters are not on the page, the first 30 are: a shorter start.
+        assert index.find("Ёж и елка растут в лесу, где совсем другой конец")[1] > 450
+        assert index.find("Ёж и ёлка растут в лесу, где много снега, но дальше иначе")[1] > 450
+        assert index.find("а  б  в") is None  # too short once normalised: not an anchor
+        assert index.find("Х" * 100) is None  # a word longer than the needle: nothing to look for
+        # The place is the first word, also when the start runs over a line.
+        two = index.find("Определите, пожалуйста, внимательно, какой орган изображён на рисунке")
+        assert 680 < two[1] < 700
+    finally:
+        reopened.close()
+
+
+def test_the_figure_is_taken_where_the_anchor_is_not_where_the_model_says():
+    from app.ingest.importer import _figure_record
+
+    doc = pymupdf.open("pdf", layout_pdf())
+    try:
+        task = {
+            "number": "1.1",
+            "pages": [2],
+            "options": None,
+            "type": "single",
+            "text": "x",
+            "refers_to_figure": True,
+            "answer_text": None,
+        }
+        record = _figure_record(doc, 1, task, (1, 95.0), (2, 200.0))
+        assert [r["page"] for r in record["regions"]] == [1, 2]
+        assert record["page"] == 1
     finally:
         doc.close()

@@ -52,21 +52,55 @@ def stored_to_clip(page, stored) -> pymupdf.Rect:
 # ------------------------------------------------------------------------ автопоиск
 
 
-def anchor(page, text: str, after: float | None = None):
-    """Место начала задания на странице: поиск по началу текста, затем по его первой строке
-    или ячейке (в таблице начало задания лежит в ячейке, а не в сплошной строке).
-    after - y предыдущего якоря: при одинаковых началах берётся ближайшее вхождение ниже него."""
-    cleaned = text.replace("[рисунок]", " ")
-    first = next((x.strip() for x in re.split(r"[|\n]", cleaned) if len(x.strip()) >= 6), "")
-    for source in (text, first):
-        for needle in (source[:30], source[:15]):
-            needle = " ".join(needle.split())
-            if len(needle) >= 6:
-                hits = page.search_for(needle)
-                if hits:
-                    below = [h for h in hits if after is not None and h.y0 > after + 1]
-                    return below[0] if below else hits[0]
-    return None
+AMBIGUOUS = "ambiguous"
+NEEDLE_CHARS = (60, 30, 15)
+
+
+def _flat(text: str) -> str:
+    """Регистр, «ё» и пробелы не важны."""
+    return " ".join(text.lower().replace("ё", "е").split())
+
+
+class PageIndex:
+    """Якоря заданий по ВСЕМУ материалу. Якорь - начало первой строки или ячейки условия,
+    слова подряд; место берётся у первого слова, поэтому перенос строки не мешает."""
+
+    def __init__(self, doc: pymupdf.Document):
+        self.words = [
+            [(w, y0) for _, y0, _, _, raw, *_ in page.get_text("words") if (w := _flat(raw))]
+            for page in doc
+        ]
+
+    def _where(self, seq: list[str]) -> list[tuple[int, float]]:
+        n, found = len(seq), []
+        for number, words in enumerate(self.words, 1):
+            texts = [w for w, _ in words]
+            found += [
+                (number, words[i][1]) for i in range(len(texts) - n + 1) if texts[i : i + n] == seq
+            ]
+        return found
+
+    def find(self, text: str):
+        """(страница, y), если начало встречается в материале ровно в одном месте; AMBIGUOUS,
+        если больше чем в одном (повторы не разбираются по порядку заданий); None, если нет."""
+        cleaned = text.replace("[рисунок]", " ")
+        first = next((x.strip() for x in re.split(r"[|\n]", cleaned) if len(x.strip()) >= 6), "")
+        words = _flat(first).split()
+        for chars in NEEDLE_CHARS:
+            seq, size = [], 0
+            for word in words:
+                size += len(word) + 1
+                if size > chars + 1:
+                    break
+                seq.append(word)
+            if len(" ".join(seq)) < 6:
+                continue
+            where = self._where(seq)
+            if len(where) > 1:
+                return AMBIGUOUS
+            if where:
+                return where[0]
+        return None
 
 
 def _image_boxes(page) -> list[pymupdf.Rect]:
@@ -102,49 +136,41 @@ def _nearest(boxes, anchor):
 def suggest_regions(
     doc: pymupdf.Document,
     first_page: int,
-    task_text: str,
+    start_y: float | None,
     last_page: int,
-    next_page: int | None = None,
-    next_text: str | None = None,
-    *,
-    start_y: float | None = None,
-    stop_y: float | None = None,
+    stop: tuple[int, float] | None = None,
 ) -> list[dict]:
-    """Области рисунка: все растровые изображения между якорем этого задания и якорем
-    следующего, по одной области (объединению) на страницу. Задание на нескольких страницах
-    даёт несколько областей, но не дальше последней страницы самого задания. Если между якорями
-    изображений нет, берётся ближайшее к якорю. start_y и stop_y - уже найденные положения якорей
-    на первой странице и на странице следующего задания (при одинаковых началах поиск по тексту
-    находил бы одно и то же место).
+    """Области рисунка по геометрии: все растровые изображения от начала этого задания
+    (страница first_page, y = start_y) до начала следующего по месту задания (stop = страница и
+    y), по одной области (объединению) на страницу, но не дальше последней страницы самого
+    задания. Положение stop действует только на странице stop: если она дальше последней
+    страницы задания, рисунок идёт до низа последней страницы. Без start_y границ нет и берётся
+    ближайшее изображение; если между границами изображений нет, берётся ближайшее к началу.
 
     Скан (изображение почти на всю страницу) и векторная схема (изображений нет) не
     предлагаются: рамку рисует родитель.
     """
     first = doc[first_page - 1]
-    start = pymupdf.Rect(0, start_y, 1, start_y) if start_y is not None else None
-    start = start or anchor(first, task_text)
-    if start is None:  # без якоря границ нет: объединять нечего, берётся ближайшее изображение
+    if start_y is None:
         boxes = _image_boxes(first)
         return (
             [{"page": first_page, "rect": _stored(first, _nearest(boxes, None))}] if boxes else []
         )
-    end, stop = max(last_page, first_page), None
-    if next_page is not None and next_text and first_page <= next_page <= len(doc):
-        stop = pymupdf.Rect(0, stop_y, 1, stop_y) if stop_y is not None else None
-        stop = stop or anchor(doc[next_page - 1], next_text)
-        if stop is not None:
-            end = min(next_page, end)  # дальше своей последней страницы рисунок не уходит
+    end, cut = max(last_page, first_page), None
+    if stop is not None and first_page <= stop[0] <= end:
+        end, cut = stop
     regions = []
     for number in range(first_page, end + 1):
         page = doc[number - 1]
-        top = start.y0 if number == first_page else float("-inf")
-        bottom = stop.y0 if number == end and stop is not None else float("inf")
+        top = start_y if number == first_page else float("-inf")
+        bottom = cut if number == end and cut is not None else float("inf")
         inside = [r for r in _image_boxes(page) if top - 1 <= r.y0 < bottom]
         if inside:
             regions.append({"page": number, "rect": _stored(page, _union(inside))})
     if regions:
         return regions
     boxes = _image_boxes(first)
+    start = pymupdf.Rect(0, start_y, 1, start_y)
     return [{"page": first_page, "rect": _stored(first, _nearest(boxes, start))}] if boxes else []
 
 
