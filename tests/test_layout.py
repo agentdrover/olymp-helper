@@ -372,7 +372,20 @@ def test_ac2(tmp_path):
         assert r.status_code == 200, r.text
         decided = detail(client, t11["id"])["figure"]
         assert decided["leak_ack"] is True and "минога" in decided["leak"]
-        assert len(decided["regions"]) == 1
+        # A manual frame edits the region of its page only; the other page stays.
+        assert [r["page"] for r in decided["regions"]] == [1, 2]
+        assert near(decided["regions"][0]["rect"], table)
+        assert near(decided["regions"][1]["rect"], union(PHOTOS_P2))
+        assert detail(client, t11["id"])["figure"]["confirmed"]
+        stacked = pymupdf.Pixmap((tmp_path / decided["file"]).read_bytes())
+        assert stacked.height >= 2 * (210 + union(PHOTOS_P2).height) - 3
+        # The frame of the second page is edited without touching the first.
+        r = confirm_figure(client, t11["id"], rect=[60, 55, 190, 120], page=2, leak_ack=True)
+        assert r.status_code == 200, r.text
+        again = detail(client, t11["id"])["figure"]["regions"]
+        assert near(again[0]["rect"], table) and near(again[1]["rect"], [60, 55, 190, 120])
+        r = confirm_figure(client, t11["id"], rect=[60, 55, 190, 120], page=3, leak_ack=True)
+        assert r.status_code == 409, r.text
 
         # A caption of the answer lies between two photos of the next task: the proposal is
         # flagged, and the confirmation needs an explicit decision.
@@ -403,7 +416,7 @@ def test_the_crop_guard_compares_text_in_the_frame_with_the_key_and_the_options(
             "улитка"
         ]  # case does not matter
         # A single character or a bare designation is not an answer text.
-        assert crop_leaks(doc, [{"page": 3, "rect": [0, 0, 595, 842]}], ["А", "", "1"]) == []
+        assert crop_leaks(doc, [{"page": 3, "rect": [0, 0, 595, 842]}], ["", " "]) == []
         # A line of the frame that is a part of a longer answer is the answer too.
         row = [{"page": 3, "rect": [50, 275, 300, 301]}]
         assert crop_leaks(doc, row, ["1 Стебель 2 Лист 3 Корень"]) == ["1 стебель 2 лист 3 корень"]
@@ -602,7 +615,9 @@ def test_designations_and_unreadable_regions_and_the_size_of_the_answer_text():
         crop_units(None, [], [{"label": "А", "text": "1, 2"}, {"label": "Б", "text": "3-4"}]) == []
     )
     assert crop_units(None, [], [{"label": "А", "text": "ядро"}]) == ["ядро"]
-    assert crop_units("ядро", ["ядро", "Б"], None) == ["ядро"]
+    assert crop_units("ядро", ["ядро", "Б"], None) == ["ядро", "б"]
+    assert crop_units(None, ["Б", "7"], None) == ["б", "7"]  # a short key is looked for as a token
+    assert crop_units("Ответ 7", [], None) == ["ответ 7", "7"]
 
     doc = pymupdf.open()
     try:
@@ -711,6 +726,7 @@ def test_the_crop_guard_looks_at_every_region_and_at_parts_of_a_line():
         sheet.new_page().insert_text((70, 100), "1", fontsize=12, fontname="helv")
         frame = [{"page": 1, "rect": [50, 80, 200, 120]}]
         assert crop_leaks(sheet, frame, ["1 стебель 2 лист"]) == []
+        assert crop_leaks(sheet, frame, ["1"]) == ["1"]  # a short answer as a whole token
     finally:
         sheet.close()
 
@@ -773,3 +789,117 @@ def test_the_answer_text_is_checked_against_the_frame_even_without_a_candidate(t
         assert detail(client, task["id"])["key_candidate"] is None
         r = confirm_figure(client, task["id"], rect=[150, 510, 400, 536])
         assert r.status_code == 422 and "28" in r.json()["error"]
+
+
+def test_short_answers_are_looked_for_by_context_in_the_condition():
+    from app.ingest.leaks import condition_leaks
+
+    def leaks(condition, answer, kind="single"):
+        return bool(condition_leaks(condition, answer, kind))
+
+    assert leaks("Подсчитайте. Ответ: 7", "7", "numeric")
+    assert leaks("Подсчитайте. ответ 7", "7")
+    assert leaks("Какой? Ответ - Б", "Б")
+    assert leaks("Какой? 2+5 = 7", "7")
+    assert leaks("Какой? 2+5 → 7", "7")
+    assert leaks("Выберите верное | Б", "Б")  # alone in a table cell
+    assert leaks("Выберите верное.\nБ", "Б")  # alone in the last line
+    assert leaks("Выберите верное.\nБ.", "Б")
+    assert leaks("У паука 7 глаз.", "7", "numeric")  # a number of a numeric task, anywhere
+    assert leaks("У паука 7,0 глаз.", "7", "numeric")
+    assert not leaks("У паука 17 глаз.", "7", "numeric")
+    assert not leaks("Среди 7 видов выберите верное.", "Б")  # an ordinary number
+    assert not leaks("Выберите верное. Б) ядро и А) клетка", "Б")
+    assert not leaks("Ответ запишите числом.", "7", "numeric")
+    assert not leaks("Выберите верное.\nБ\nВыберите ещё.", "Б")  # not the last line
+    assert not leaks("Ответ: 8", "7")
+
+
+def test_a_short_answer_left_in_the_condition_is_not_published(tmp_path):
+    tasks = good_tasks()
+    tasks[2] = lt("1.3", "Подсчитайте хромосомы. Ответ: 7", "numeric", (2,), "7")
+    with import_layout(tmp_path, tasks) as client:
+        task = by_number(tmp_path, "1.3")
+        assert detail(client, task["id"])["publication"]["blocked"]
+        assert confirm(client, task["id"]).status_code == 422
+        assert client.get(f"/api/tasks/{task['id']}", headers=CHILD).status_code == 404
+        assert not client.get("/api/search", params={"q": "хромосомы"}, headers=CHILD).json()[
+            "results"
+        ]
+
+
+def _cell_figure_task(tmp_path, tasks=None):
+    cell = [150, 510, 400, 536]  # the cell with 28
+    client = import_layout(tmp_path, tasks or _numeric_figure_tasks(None))
+    task = by_number(tmp_path, "1.3")
+    assert confirm_figure(client, task["id"], rect=cell).status_code == 200  # no key yet
+    return client, task, cell
+
+
+def test_a_key_added_after_the_figure_is_confirmed_reruns_the_crop_guard(tmp_path):
+    client, task, cell = _cell_figure_task(tmp_path)
+    with client:
+        r = client.post(f"/parent/tasks/{task['id']}/key", headers=PARENT, json={"answer": "28"})
+        assert r.status_code == 200, r.text
+        d = detail(client, task["id"])
+        assert d["status"] == "unsupported" and not d["figure"]["confirmed"]
+        assert "28" in d["figure"]["leak"] and d["figure"]["leak_ack"] is False
+        r = confirm(client, task["id"])
+        assert r.status_code == 422, r.text
+        assert client.get(f"/api/tasks/{task['id']}", headers=CHILD).status_code == 404
+        assert confirm_figure(client, task["id"], rect=cell).status_code == 422
+        assert confirm_figure(client, task["id"], rect=cell, leak_ack=True).status_code == 200
+        assert confirm(client, task["id"]).status_code == 200
+        assert client.get(f"/api/tasks/{task['id']}", headers=CHILD).status_code == 200
+        # Another key resets the acknowledgement: it was given for the other key.
+        r = client.post(f"/parent/tasks/{task['id']}/key", headers=PARENT, json={"answer": "29"})
+        assert r.status_code == 200
+        fig = detail(client, task["id"])["figure"]
+        assert fig["leak_ack"] is False and fig["leak"] == []
+
+
+def test_a_candidate_confirmed_after_the_figure_reruns_the_crop_guard(tmp_path):
+    from tests.bank_helpers import key_pdf
+
+    client, task, _cell = _cell_figure_task(tmp_path)
+    with client:
+        assert upload(client, key_pdf({"1.3": "28"}), kind="key", name="k.pdf").status_code == 202
+        r = confirm(client, task["id"])
+        assert r.status_code == 422, r.text
+        d = detail(client, task["id"])
+        assert d["status"] == "unsupported" and "28" in d["figure"]["leak"]
+        assert client.get(f"/api/tasks/{task['id']}", headers=CHILD).status_code == 404
+
+
+def test_a_numeric_key_is_compared_as_a_string_without_rounding():
+    from app.ingest.answers import normalize_answer, same_answer
+
+    a, b = "123456789012345678901234567890", "123456789012345678901234567891"
+    assert not same_answer("numeric", normalize_answer(a, "numeric"), b)
+    assert normalize_answer(a, "numeric") == a
+    assert normalize_answer("0." + "0" * 40 + "1", "numeric") == "0." + "0" * 40 + "1"
+    for given in ("28", " 28 ", "28,0", "028", "28.", "+28", "0028,000"):
+        assert same_answer("numeric", "28", given), given
+    assert normalize_answer("-0", "numeric") == "0" and normalize_answer("-0,0", "numeric") == "0"
+    assert normalize_answer("-028,50", "numeric") == "-28.5"
+    assert (
+        normalize_answer(".5", "numeric") is None and normalize_answer("1 000", "numeric") is None
+    )
+    assert normalize_answer("1" * 200, "numeric") is None
+
+
+def test_readability_is_judged_at_the_scale_of_the_stacked_picture():
+    from app.ingest import figures
+
+    doc = pymupdf.open()
+    try:
+        doc.new_page().insert_text((55, 90), "1 2", fontsize=4, fontname="helv")
+        doc.new_page()
+        regions = [
+            {"page": 1, "rect": [50, 70, 150, 110]},  # 100 pt wide, a 4 pt label
+            {"page": 2, "rect": [50, 70, 550, 110]},  # 500 pt wide
+        ]
+        assert figures.regions_readable(doc, regions[:1])  # alone it is shown 5.6 times larger
+        assert not figures.regions_readable(doc, regions)  # stacked: 560 / 500 = 1.12 times
+    finally:
+        doc.close()

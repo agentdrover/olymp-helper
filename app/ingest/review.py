@@ -75,8 +75,9 @@ def _parse_answer(task, raw) -> object:
     return value
 
 
-def set_key(conn, task_id: int, value, source: str) -> dict:
-    """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято."""
+def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
+    """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято.
+    Подтверждённый рисунок проходит защиту от текста ответа заново: решение было для другого ключа."""
     task = _task(conn, task_id)
     if key_value(task["answer_key"]) == value and task["key_source"] == source:
         return {"revision": task["revision"], "key_version": task["key_version"]}
@@ -90,15 +91,18 @@ def set_key(conn, task_id: int, value, source: str) -> dict:
     else:
         update_task(conn, task_id, **cols)
         save_snapshot(conn, task_id)
+    from app.ingest.figure_service import recheck_figure  # figure_service импортирует review
+
+    recheck_figure(ctx, conn, task_id)
     task = get_task(conn, task_id)
     return {"revision": task["revision"], "key_version": task["key_version"]}
 
 
-def set_parent_key(conn, task_id: int, raw) -> dict:
+def set_parent_key(ctx, conn, task_id: int, raw) -> dict:
     task = _task(conn, task_id)
     if task["excluded"]:
         raise Refusal("Задание исключено.")
-    return set_key(conn, task_id, _parse_answer(task, raw), "parent")
+    return set_key(ctx, conn, task_id, _parse_answer(task, raw), "parent")
 
 
 # ------------------------------------------------------------------------ правки
@@ -183,12 +187,14 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     if has_answer:
         value = _parse_answer(task, answer)
         if value != key_value(task["answer_key"]):
-            set_key(conn, task_id, value, "parent")
+            set_key(ctx, conn, task_id, value, "parent")
     elif task["answer_key"] is None:
         cand = candidate(conn, task)
         if cand:
-            set_key(conn, task_id, cand["value"], "official")
+            set_key(ctx, conn, task_id, cand["value"], "official")
     task = _task(conn, task_id)
+    if task["import_status"] == "unsupported":  # новый ключ вернул рисунок на проверку
+        raise Refusal(task["unsupported_reason"])
     update_task(conn, task_id, import_status="checked")
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)

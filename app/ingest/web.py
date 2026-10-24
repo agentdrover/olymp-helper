@@ -329,8 +329,8 @@ def task_edit(task_id: int, body: EditBody, conn: Db):
 
 @parent.post("/parent/tasks/{task_id}/key")
 @_action
-def task_key(task_id: int, body: KeyBody, conn: Db):
-    return review.set_parent_key(conn, task_id, body.answer)
+def task_key(task_id: int, body: KeyBody, request: Request, conn: Db):
+    return review.set_parent_key(ctx_of(request), conn, task_id, body.answer)
 
 
 @parent.post("/parent/tasks/{task_id}/resolve")

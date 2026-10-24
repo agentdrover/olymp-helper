@@ -16,7 +16,7 @@ def has_key(task) -> bool:
 
 def leak_of(task) -> list[str]:
     """Части ответа со страницы, оставшиеся в условии: пока они там, задание не публикуется."""
-    return condition_leaks(task["text"], task["answer_text"])
+    return condition_leaks(task["text"], task["answer_text"], task["type"])
 
 
 def leak_notice(task) -> str | None:

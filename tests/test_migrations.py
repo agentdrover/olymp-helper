@@ -177,7 +177,42 @@ def test_numeric_type_migration_keeps_the_data(tmp_path):
         ).fetchone()[0]
         == 2
     )
+    # Foreign keys are on again and work: the rebuilt table is the one they point to.
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    try:
+        conn.execute("INSERT INTO task_revision VALUES (999, 1, 1, '{}', 't')")
+        raise AssertionError("a revision of a missing task was accepted")
+    except sqlite3.IntegrityError:
+        pass
+    conn.execute("DELETE FROM task_item WHERE id = 1")
+    assert conn.execute("SELECT COUNT(*) FROM task_revision").fetchone()[0] == 0  # cascade
+    assert conn.execute("SELECT task_item_id FROM event").fetchall() == [(None,)]  # set null
     # A second start changes nothing.
     assert migrate(conn) == SCHEMA_VERSION
     other = connect(tmp_path / "olymp.db")
     other.execute("INSERT INTO task_item(material_id, type, text) VALUES (1, 'numeric', 'r')")
+
+
+def test_a_migration_that_leaves_orphans_is_rolled_back(tmp_path):
+    from app.db import _FK_OFF, _apply
+
+    conn = connect(tmp_path / "olymp.db")
+    migrate(conn)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO task_revision VALUES (77, 1, 1, '{}', 't')")  # an orphan
+    conn.execute("PRAGMA foreign_keys = ON")
+    script = f"{_FK_OFF}\nCREATE TABLE marker (id INTEGER);\n"
+    try:
+        _apply(conn, 99, script, fk_off=True)
+        raise AssertionError("an orphan row passed the migration")
+    except RuntimeError:
+        pass
+    assert (
+        conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'marker'").fetchone()[0] == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 99").fetchone()[0] == 0
+    )
+    assert not conn.in_transaction
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1

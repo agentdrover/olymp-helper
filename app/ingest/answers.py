@@ -2,11 +2,10 @@
 
 import json
 import re
-from decimal import Decimal
 
 _LATIN = str.maketrans("ABCEHKMOPTX", "АВСЕНКМОРТХ")
 _TOKEN = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
-_NUMBER = re.compile(r"[+-]?\d{1,30}(?:\.\d{1,30})?")
+_NUMBER = re.compile(r"([+-]?)(\d{1,60})(?:\.(\d{0,60}))?")
 _PAIR = re.compile(r"([0-9A-Za-zА-Яа-яЁё]+)\s*[-–—:=>→]*\s*([A-Za-zА-Яа-яЁё0-9]+)")
 
 
@@ -39,12 +38,15 @@ def normalize_answer(raw, task_type: str):
 
 
 def _number(text: str) -> str | None:
-    """Число для точного сравнения: запятая = точка, лишние нули и знак плюс не важны."""
-    plain = text.replace(",", ".")
-    if not _NUMBER.fullmatch(plain):
+    """Число для точного сравнения, строкой и без округления: запятая = точка, нули в начале
+    целой части и в конце дробной, знак плюс и «-0» не важны."""
+    found = _NUMBER.fullmatch(text.replace(",", "."))
+    if not found:
         return None
-    value = Decimal(plain)
-    return "0" if value == 0 else format(value.normalize(), "f")
+    sign, whole, fraction = found.group(1), found.group(2).lstrip("0") or "0", found.group(3) or ""
+    fraction = fraction.rstrip("0")
+    number = whole + ("." + fraction if fraction else "")
+    return "-" + number if sign == "-" and number != "0" else number
 
 
 def same_answer(task_type: str, key, given) -> bool:

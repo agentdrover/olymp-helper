@@ -145,11 +145,21 @@ def render_figure_png(doc: pymupdf.Document, page_no: int, stored) -> bytes:
     return pix.tobytes("png")
 
 
-def smallest_label_px(doc: pymupdf.Document, page_no: int, stored) -> float | None:
-    """Высота самой мелкой подписи внутри рамки при показе шириной 560 px; None - подписей нет."""
+def shown_width(doc: pymupdf.Document, page_no: int, stored) -> float:
+    """Ширина рамки в пунктах так, как она видна на показанной (повёрнутой) странице."""
     page = doc[page_no - 1]
     area = cropbox_relative(page, stored)
-    shown_width = area.height if page.rotation in (90, 270) else area.width
+    return area.height if page.rotation in (90, 270) else area.width
+
+
+def smallest_label_px(
+    doc: pymupdf.Document, page_no: int, stored, width: float | None = None
+) -> float | None:
+    """Высота самой мелкой подписи внутри рамки при показе шириной 560 px; None - подписей нет.
+    width - ширина всей показываемой картинки, если рамка лишь её часть."""
+    page = doc[page_no - 1]
+    area = cropbox_relative(page, stored)
+    shown_width = width or (area.height if page.rotation in (90, 270) else area.width)
     if shown_width <= 0:
         return None
     factor = DISPLAY_WIDTH_PX / shown_width
@@ -162,13 +172,16 @@ def smallest_label_px(doc: pymupdf.Document, page_no: int, stored) -> float | No
     return min(sizes) if sizes else None
 
 
-def labels_readable(doc, page_no, stored) -> bool:
-    smallest = smallest_label_px(doc, page_no, stored)
+def labels_readable(doc, page_no, stored, width: float | None = None) -> bool:
+    smallest = smallest_label_px(doc, page_no, stored, width)
     return smallest is None or smallest >= MIN_LABEL_PX
 
 
 def regions_readable(doc, regions) -> bool:
-    return all(labels_readable(doc, r["page"], r["rect"]) for r in regions)
+    """Области лежат друг под другом в одной картинке шириной 560 px: масштаб общий, по самой
+    широкой области, и мелкая подпись узкой области уменьшается вместе с ней."""
+    width = max(shown_width(doc, r["page"], r["rect"]) for r in regions)
+    return all(labels_readable(doc, r["page"], r["rect"], width) for r in regions)
 
 
 def render_regions_png(doc: pymupdf.Document, regions: list[dict]) -> bytes:
@@ -208,7 +221,7 @@ def crop_leaks(doc: pymupdf.Document, regions: list[dict], units: list[str]) -> 
     wanted = []
     for unit in units:
         unit = norm(unit)
-        if significant(unit) and unit not in wanted:
+        if unit and unit not in wanted:
             wanted.append(unit)
     lines = [line for region in regions for line in _crop_lines(doc, region)]
     return [
