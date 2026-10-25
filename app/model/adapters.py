@@ -24,6 +24,7 @@ def build_env(channel: str, source: dict, home: str) -> dict:
     env = {k: source[k] for k in (*SERVICE_VARS, *PROXY_VARS, *CA_VARS) if k in source}
     env["HOME"] = home
     # Корень контейнера только для чтения: временные файлы CLI - в записываемом каталоге запуска.
+    # Под лаунчером с capabilities (secure-execution) glibc эту переменную выбросит: runner ставит её заново.
     env["TMPDIR"] = home
     token = TOKEN_VARS[channel]
     if source.get(token):

@@ -176,9 +176,12 @@ def run_cli(
             cli_env = build_env(channel, env, home)
             if launcher:
                 # Сервер не может зайти в каталог пользователя CLI (0700): в него переходит
-                # уже CLI-пользователь, процесс сервера стартует из корня запуска.
+                # уже CLI-пользователь, процесс сервера стартует из корня запуска. TMPDIR ставится
+                # здесь, после смены UID: у лаунчера файловые capabilities, glibc считает запуск
+                # secure-execution и выбрасывает TMPDIR (unsecvars.h), так что от build_env он не
+                # доходит. HOME переживает лаунчер и равен каталогу запуска.
                 proc = as_cli(
-                    launcher, ["sh", "-c", 'cd -- "$0" && exec "$@"', work, *cli], cli_env,
+                    launcher, ["sh", "-c", 'cd -- "$0" && TMPDIR="$HOME" exec "$@"', work, *cli], cli_env,
                     spawn=spawn, cwd=root, input=stdin, timeout=timeout,
                 )  # fmt: skip
             else:

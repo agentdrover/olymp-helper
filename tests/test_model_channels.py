@@ -325,3 +325,22 @@ def test_cursor_trusts_the_run_dir_without_yolo():
     argv = CursorAdapter().build("auto", SYSTEM, None)
     assert "--trust" in argv
     assert not {"--yolo", "-f", "--force"} & set(argv)
+
+
+def test_tmpdir_is_set_after_the_uid_switch(tmp_path):
+    """Настоящий sh-обёртка, без подмены spawn. setpriv с файловыми capabilities запускает ребёнка
+    в secure-execution, и glibc выбрасывает TMPDIR; стенд-ин лаунчера делает то же (`env -u`).
+    TMPDIR обязан выставляться ПОСЛЕ лаунчера, иначе CLI пишет в /tmp на корне только для чтения."""
+    bin_dir, out = tmp_path / "bin", tmp_path / "seen.txt"
+    bin_dir.mkdir()
+    fake = bin_dir / "claude"
+    fake.write_text(f'#!/bin/sh\nprintf "%s\\n%s\\n" "$TMPDIR" "$HOME" > {out}\n', encoding="utf-8")
+    fake.chmod(0o755)
+    env = dict(ENV, PATH=f"{bin_dir}:/usr/bin:/bin")
+    run_cli(
+        "claude", "sonnet", SYSTEM, HISTORY, None,
+        env=env, workroot=str(tmp_path), launcher=["env", "-u", "TMPDIR", "--"],
+    )  # fmt: skip
+    tmpdir, home = out.read_text(encoding="utf-8").splitlines()
+    assert tmpdir == home
+    assert home.startswith(str(tmp_path))
