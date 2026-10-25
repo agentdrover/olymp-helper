@@ -6,6 +6,9 @@ from pathlib import Path
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
+# Первая строка миграции: перестройка таблицы требует выключенных внешних ключей, а PRAGMA
+# foreign_keys внутри транзакции не действует: раннер выключает их до BEGIN.
+_FK_OFF = "-- migrate: foreign_keys=off"
 
 
 def _migration_files() -> list[tuple[int, Path]]:
@@ -48,18 +51,32 @@ def migrate(conn: sqlite3.Connection) -> int:
     for version, path in _migration_files():
         if version in applied:
             continue
+        script = path.read_text(encoding="utf-8")
+        _apply(conn, version, script, fk_off=script.startswith(_FK_OFF))
+    return schema_version(conn)
+
+
+def _apply(conn: sqlite3.Connection, version: int, script: str, fk_off: bool) -> None:
+    was_on = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    if fk_off:
+        conn.execute("PRAGMA foreign_keys = OFF")
+    try:
         conn.execute("BEGIN IMMEDIATE")
         try:
             # executescript коммитит неявно, поэтому выполняем по одному оператору.
-            for stmt in _statements(path.read_text(encoding="utf-8")):
+            for stmt in _statements(script):
                 conn.execute(stmt)
+            if fk_off and conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise RuntimeError(f"migration {version}: foreign_key_check is not empty")
             conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
             conn.execute(f"PRAGMA user_version = {int(version)}")
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
-    return schema_version(conn)
+    finally:
+        if fk_off and was_on:
+            conn.execute("PRAGMA foreign_keys = ON")
 
 
 def _statements(script: str):

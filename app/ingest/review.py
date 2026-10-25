@@ -5,9 +5,10 @@ import json
 from app.ingest.answers import display, key_json, key_value, normalize_answer
 from app.ingest.keys import candidate
 from app.ingest.model_answer import compute_model_answer, model_value
-from app.ingest.publish import publication
+from app.ingest.publish import leak_notice, publication
 from app.ingest.schema import InvalidStructure, check_options
 from app.ingest.store import (
+    atomic,
     figure_of,
     get_task,
     new_revision,
@@ -66,7 +67,8 @@ def _labels_of(task) -> set[str]:
 def _parse_answer(task, raw) -> object:
     value = normalize_answer(raw, task["type"])
     if value is None:
-        raise Refusal(f"Не удалось понять ответ «{raw}». Укажите обозначение варианта.")
+        what = "число" if task["type"] == "numeric" else "обозначение варианта"
+        raise Refusal(f"Не удалось понять ответ «{raw}». Укажите {what}.")
     labels = _labels_of(task)
     named = [value] if isinstance(value, str) else value if isinstance(value, list) else []
     if labels and any(v not in labels for v in named):
@@ -74,66 +76,91 @@ def _parse_answer(task, raw) -> object:
     return value
 
 
-def set_key(conn, task_id: int, value, source: str) -> dict:
-    """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято."""
+def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
+    """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято.
+    Подтверждённый рисунок проходит защиту от текста ответа заново: решение было для другого ключа;
+    то же для рисунков других заданий материала: новый ключ не должен быть напечатан в их вырезках."""
     task = _task(conn, task_id)
     if key_value(task["answer_key"]) == value and task["key_source"] == source:
         return {"revision": task["revision"], "key_version": task["key_version"]}
-    cols = {
-        "answer_key": key_json(value, task["type"]),
-        "key_source": source,
-        "key_version": task["key_version"] + 1,
-    }
-    if task["import_status"] == "checked":
-        new_revision(conn, task_id, **cols)
-    else:
-        update_task(conn, task_id, **cols)
-        save_snapshot(conn, task_id)
-    task = get_task(conn, task_id)
-    return {"revision": task["revision"], "key_version": task["key_version"]}
+    # Чтение PDF не зависит от правки: делается до блокировки записи.
+    from app.ingest.figure_service import prepare_crop_lines
+
+    prepared = prepare_crop_lines(ctx, conn, task["material_id"])
+    with atomic(conn):
+        task = _task(conn, task_id)
+        if key_value(task["answer_key"]) == value and task["key_source"] == source:
+            return {"revision": task["revision"], "key_version": task["key_version"]}
+        cols = {
+            "answer_key": key_json(value, task["type"]),
+            "key_source": source,
+            "key_version": task["key_version"] + 1,
+        }
+        if task["import_status"] == "checked":
+            new_revision(conn, task_id, **cols)
+        else:
+            update_task(conn, task_id, **cols)
+            save_snapshot(conn, task_id)
+        # figure_service импортирует review
+        from app.ingest.figure_service import recheck_material_figures
+
+        recheck_material_figures(ctx, conn, task_id, prepared)
+        task = get_task(conn, task_id)
+        return {"revision": task["revision"], "key_version": task["key_version"]}
 
 
-def set_parent_key(conn, task_id: int, raw) -> dict:
+def set_parent_key(ctx, conn, task_id: int, raw) -> dict:
     task = _task(conn, task_id)
     if task["excluded"]:
         raise Refusal("Задание исключено.")
-    return set_key(conn, task_id, _parse_answer(task, raw), "parent")
+    return set_key(ctx, conn, task_id, _parse_answer(task, raw), "parent")
 
 
 # ------------------------------------------------------------------------ правки
 
 
 def edit_task(
-    conn, task_id: int, *, text=None, options=None, teacher_note=None, manual_condition=False
+    ctx, conn, task_id: int, *, text=None, options=None, teacher_note=None, manual_condition=False
 ) -> dict:
-    task = _task(conn, task_id)
-    if task["excluded"]:
-        raise Refusal("Задание исключено.")
-    cols: dict = {}
-    if text is not None:
-        if not str(text).strip():
-            raise Refusal("Условие не может быть пустым.")
-        cols["text"] = str(text).strip()
-    if options is not None:
-        try:
-            cols["options"] = check_options(task["type"], options)
-        except InvalidStructure as exc:
-            raise Refusal(str(exc)) from exc
-    figure = figure_of(task)
-    if teacher_note is not None:
-        if figure is None:
-            raise Refusal("У задания нет рисунка: пояснение не нужно.")
-        figure["teacher_note"] = str(teacher_note)
-        cols["figure"] = figure
-    if manual_condition:
-        if task["type"] == "open":
-            raise Refusal("Открытое задание вне v1: его можно только исключить.")
-        cols.update(figure=None, unsupported_reason=None)
-        if task["import_status"] == "unsupported":
-            cols["import_status"] = "draft"
-    if not cols:
-        raise Refusal("Нечего менять.")
-    return {"revision": new_revision(conn, task_id, **cols)}
+    prepared = None
+    if options is not None:  # чтение PDF для проверки рисунков - до блокировки записи
+        from app.ingest.figure_service import prepare_crop_lines
+
+        prepared = prepare_crop_lines(ctx, conn, _task(conn, task_id)["material_id"])
+    with atomic(conn):
+        task = _task(conn, task_id)
+        if task["excluded"]:
+            raise Refusal("Задание исключено.")
+        cols: dict = {}
+        if text is not None:
+            if not str(text).strip():
+                raise Refusal("Условие не может быть пустым.")
+            cols["text"] = str(text).strip()
+        if options is not None:
+            try:
+                cols["options"] = check_options(task["type"], options)
+            except InvalidStructure as exc:
+                raise Refusal(str(exc)) from exc
+        figure = figure_of(task)
+        if teacher_note is not None:
+            if figure is None:
+                raise Refusal("У задания нет рисунка: пояснение не нужно.")
+            figure["teacher_note"] = str(teacher_note)
+            cols["figure"] = figure
+        if manual_condition:
+            if task["type"] == "open":
+                raise Refusal("Открытое задание вне v1: его можно только исключить.")
+            cols.update(figure=None, unsupported_reason=None)
+            if task["import_status"] == "unsupported":
+                cols["import_status"] = "draft"
+        if not cols:
+            raise Refusal("Нечего менять.")
+        new_revision(conn, task_id, **cols)
+        if options is not None:  # варианты задают кандидата ключа, а он - защиту рисунков соседей
+            from app.ingest.figure_service import recheck_material_figures
+
+            recheck_material_figures(ctx, conn, task_id, prepared)
+        return {"revision": _task(conn, task_id)["revision"]}  # проверка могла создать новую
 
 
 def exclude_task(conn, task_id: int) -> None:
@@ -172,6 +199,9 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
             task["unsupported_reason"]
             or "Задание не поддерживается: подтвердите рисунок или впишите условие."
         )
+    blocked = leak_notice(task)
+    if blocked:
+        raise Refusal(blocked)
     figure = figure_of(task)
     if figure is not None and not figure.get("confirmed"):
         raise Refusal("Сначала подтвердите рисунок.")
@@ -179,12 +209,14 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     if has_answer:
         value = _parse_answer(task, answer)
         if value != key_value(task["answer_key"]):
-            set_key(conn, task_id, value, "parent")
+            set_key(ctx, conn, task_id, value, "parent")
     elif task["answer_key"] is None:
         cand = candidate(conn, task)
         if cand:
-            set_key(conn, task_id, cand["value"], "official")
+            set_key(ctx, conn, task_id, cand["value"], "official")
     task = _task(conn, task_id)
+    if task["import_status"] == "unsupported":  # новый ключ вернул рисунок на проверку
+        raise Refusal(task["unsupported_reason"])
     update_task(conn, task_id, import_status="checked")
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
@@ -253,7 +285,8 @@ def build_card(ctx, conn, task) -> dict | None:
         kind, hint = "child_dispute", "Ребёнок считает ключ спорным. Проверьте ответ."
     elif status == "unsupported":
         if task["type"] == "open":
-            kind, hint = "open_exclude", "Открытое задание вне v1: исключите его."
+            kind = "open_exclude"
+            hint = task["unsupported_reason"] or "Открытое задание вне v1: исключите его."
         else:
             kind = "needs_figure"
             hint = task["unsupported_reason"] or (
@@ -297,6 +330,8 @@ def build_card(ctx, conn, task) -> dict | None:
         "label": LABELS[kind],
         "hint": hint,
         "note": task["review_note"],
+        "parent_note": task["parent_note"],
+        "warning": leak_notice(task),
         "button": button,
         "field": "answer" if kind == "no_key" else None,
         "retry": kind == "model_missing",
@@ -344,7 +379,13 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         "key_source": task["key_source"],
         "key_candidate": None
         if cand is None
-        else {"answer": cand["answer"], "material_id": cand["material_id"]},
+        else {
+            "answer": cand["answer"],
+            "material_id": cand["material_id"],
+            "source": cand["source"],
+        },
+        "answer_text": task["answer_text"],
+        "parent_note": task["parent_note"],
         "model_answer": None
         if not task["model_answer"]
         else json.loads(task["model_answer"])["answer"],

@@ -30,6 +30,8 @@
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
       <p class="hint">{{ card.hint }}</p>
       {% if card.note %}<p class="err">Обратите внимание: {{ card.note }}.</p>{% endif %}
+      {% if card.warning %}<p class="err" role="alert">{{ card.warning }}</p>{% endif %}
+      {% if card.parent_note %}<p class="hint">Заметка для родителя (ребёнку не показывается): {{ card.parent_note }}</p>{% endif %}
 
       {% if card.kind in ("confirm", "child_dispute") %}
         <button class="primary" data-action="confirm">{{ card.button or "Ключ прав — оставить" }}</button>
@@ -51,6 +53,10 @@
           <p class="hint">Рамка: {% if card.figure and card.figure.rect %}найдена автоматически{% else %}нарисуйте её мышью на странице слева{% endif %}.</p>
           <p><label>Описание для ребёнка (alt)<br><input id="alt" size="50" value="{{ card.figure.alt if card.figure else '' }}"></label></p>
           <p><label>Пояснение для модели (ребёнку не показывается)<br><textarea id="teacher_note" rows="3" cols="50">{{ card.figure.teacher_note if card.figure else '' }}</textarea></label></p>
+          {% if card.figure and card.figure.leak %}
+          <p class="err" role="alert">В рамке напечатан текст ответа или вариантов: {{ card.figure.leak|join(", ") }}.</p>
+          {% endif %}
+          <p><label><input type="checkbox" id="leak_ack"> если в рамку попал текст ответа или вариантов, так и надо</label></p>
           <p><label><input type="checkbox" id="no_answer_ack"> в рисунке и в описании нет ответа</label></p>
           <p><label><input type="checkbox" id="teacher_note_ack"> в пояснении названо, что обозначено</label></p>
           <button class="primary" data-action="figure">Подтвердить рисунок</button>

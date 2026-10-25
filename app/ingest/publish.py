@@ -4,6 +4,7 @@ import json
 import re
 
 from app.ingest.answers import key_value
+from app.ingest.leaks import condition_leaks
 from app.ingest.store import figure_of, options_of
 
 PUBLISHED_STATUS = "checked"
@@ -13,10 +14,25 @@ def has_key(task) -> bool:
     return task["answer_key"] is not None
 
 
+def leak_of(task) -> list[str]:
+    """Части ответа со страницы, оставшиеся в условии: пока они там, задание не публикуется."""
+    return condition_leaks(task["text"], task["answer_text"], task["type"])
+
+
+def leak_notice(task) -> str | None:
+    found = leak_of(task)
+    if not found:
+        return None
+    return (
+        "В условии остался текст ответа: «" + "», «".join(found) + "». "
+        "Поправьте условие: без правки задание не публикуется."
+    )
+
+
 def is_published(task) -> bool:
-    """checked, не исключено; рисунок - только с подтверждённым ключом и подтверждённым рисунком;
+    """checked, не исключено, в условии нет текста ответа; рисунок - только с подтверждённым ключом и подтверждённым рисунком;
     без рисунка нужен ключ или model_answer."""
-    if task["import_status"] != PUBLISHED_STATUS or task["excluded"]:
+    if task["import_status"] != PUBLISHED_STATUS or task["excluded"] or leak_of(task):
         return False
     figure = figure_of(task)
     if figure is not None:
@@ -88,6 +104,7 @@ def publication(task) -> dict:
         "published": is_published(task),
         "assist": assist_mode(task),
         "parent_notice": parent_notice(task),
+        "blocked": leak_notice(task),
     }
 
 

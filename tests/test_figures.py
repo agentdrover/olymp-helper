@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from contextlib import contextmanager
@@ -14,7 +15,9 @@ from tests.bank_helpers import (
     StubModel,
     answer_by_number,
     build_app,
+    db,
     figure_pdf,
+    key_pdf,
     make_task,
     reply,
     row,
@@ -339,6 +342,387 @@ def test_ac14(tmp_path):
         shown = c.get(f"/api/tasks/{tid}", headers=CHILD).json()
         assert "teacher_note" not in shown["figure"] and note not in str(shown)
         assert "rect" not in shown["figure"] and "file" not in shown["figure"]
+
+
+def _printed_number_pdf(printed="42") -> bytes:
+    """Task 11 with a picture on which the number 42 is printed; task 12 follows below."""
+    from tests.bank_helpers import doc_bytes, quad_png, write_lines
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_image(pymupdf.Rect(60, 120, 260, 260), stream=quad_png(), keep_proportion=False)
+    page.insert_text((80, 200), printed, fontsize=14, fontname="helv")
+    write_lines(page, ["11. Рассмотрите рисунок и выберите верный ответ."], y=400)
+    write_lines(page, ["12. Сколько хромосом в клетке?"], y=500)
+    return doc_bytes(doc)
+
+
+def test_a_neighbours_new_key_unpublishes_a_figure_that_prints_it(tmp_path):
+    numeric = make_task(12, "Сколько хромосом в клетке?", type="numeric")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 200
+
+        r = c.post(f"/parent/tasks/{other}/key", headers=PARENT, json={"answer": "42"})
+        assert r.status_code == 200, r.text
+        got = detail(c, fig)
+        assert got["figure"]["confirmed"] is False and got["status"] == "unsupported"
+        assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 404
+        assert c.get(f"/tasks/{fig}/figure.png", headers=CHILD).status_code == 404
+
+
+def test_an_uploaded_key_file_unpublishes_a_figure_that_prints_its_answer(tmp_path):
+    numeric = make_task(12, "Сколько хромосом в клетке?", type="numeric")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, _ = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 200
+
+        assert upload(c, key_pdf({"12": "42"}), kind="key", name="k.pdf").status_code == 202
+        got = detail(c, fig)
+        assert got["figure"]["confirmed"] is False and got["status"] == "unsupported"
+        assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 404
+
+
+def _key_import_material(tmp_path):
+    conn = db(tmp_path)
+    try:
+        return conn.execute("SELECT * FROM material WHERE kind = 'key'").fetchall()
+    finally:
+        conn.close()
+
+
+def _key_entries(tmp_path):
+    conn = db(tmp_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM key_entry").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_a_failed_figure_recheck_rolls_the_key_import_back(tmp_path, monkeypatch):
+    from app.ingest import figure_service
+
+    numeric = make_task(12, "Сколько хромосом в клетке?", type="numeric")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, _ = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+
+        def boom(*a, **kw):
+            raise RuntimeError("recheck failed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(figure_service, "recheck_figure", boom)
+            upload(c, key_pdf({"12": "42"}), kind="key", name="k.pdf")
+        (key,) = _key_import_material(tmp_path)
+        assert key["import_status"] == "failed" and _key_entries(tmp_path) == 0
+        assert detail(c, fig)["figure"]["confirmed"] is True  # nothing was learned from the key
+        assert c.get(f"/api/tasks/{fig}", headers=CHILD).status_code == 200
+
+
+def test_edited_options_recheck_the_neighbours_figures(tmp_path):
+    def opts(first):
+        return [{"label": first, "text": "ядро"}, {"label": "40", "text": "рибосома"}]
+
+    single = dict(make_task(12, "Выберите органоид.", options=opts("41")), answer_text="ядро")
+    model = StubModel(split=reply(fig_task(11), single), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)  # the page answer of task 12 maps to the label 41
+        r = c.post(f"/parent/tasks/{other}/edit", headers=PARENT, json={"options": opts("42")})
+        assert r.status_code == 200, r.text
+        got = detail(c, fig)
+        assert got["figure"]["confirmed"] is False and got["status"] == "unsupported"
+
+
+def test_an_unrelated_or_unchanged_leak_keeps_the_parents_approval(tmp_path, monkeypatch):
+    numeric = dict(make_task(12, "Сколько хромосом в клетке?", type="numeric"), answer_text="42")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, _ = task_ids(tmp_path)
+        assert confirm_figure(c, fig, leak_ack=True).status_code == 200  # 42 is printed, ack'd
+        assert detail(c, fig)["figure"]["leak_ack"] is True
+
+        # A key of another year matches nothing; a key for this collection changes the
+        # candidate of task 12 but not the text printed in the picture.
+        from app.ingest import figure_service
+
+        calls = []
+        real = figure_service.recheck_figure
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                figure_service, "recheck_figure", lambda *a, **kw: calls.append(a) or real(*a, **kw)
+            )
+            upload(c, key_pdf({"12": "43"}), kind="key", year="2030", name="k30.pdf")
+        assert calls == []  # no candidate of the 2022 collection changed: nothing is scanned
+        upload(c, key_pdf({"12": "43"}), kind="key", name="k.pdf")
+        got = detail(c, fig)["figure"]
+        assert got["confirmed"] is True and got["leak_ack"] is True
+
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("recheck failed")
+
+
+def test_a_failed_recheck_leaves_a_new_key_uncommitted_and_the_retry_rechecks(
+    tmp_path, monkeypatch
+):
+    import pytest
+
+    from app.ingest import figure_service
+
+    numeric = make_task(12, "Сколько хромосом в клетке?", type="numeric")
+    model = StubModel(split=reply(fig_task(11), numeric), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        before = dict(row(tmp_path, other))
+        with monkeypatch.context() as patch, pytest.raises(RuntimeError):
+            patch.setattr(figure_service, "recheck_figure", _boom)
+            c.post(f"/parent/tasks/{other}/key", headers=PARENT, json={"answer": "42"})
+        assert dict(row(tmp_path, other)) == before  # no key, no revision, no snapshot
+        assert detail(c, fig)["figure"]["confirmed"] is True
+
+        # The same key again is not skipped as «unchanged»: nothing was stored.
+        r = c.post(f"/parent/tasks/{other}/key", headers=PARENT, json={"answer": "42"})
+        assert r.status_code == 200, r.text
+        assert detail(c, fig)["figure"]["confirmed"] is False
+
+
+def test_a_failed_recheck_leaves_an_options_edit_uncommitted_and_the_retry_rechecks(
+    tmp_path, monkeypatch
+):
+    import pytest
+
+    from app.ingest import figure_service
+
+    def opts(first):
+        return [{"label": first, "text": "ядро"}, {"label": "40", "text": "рибосома"}]
+
+    single = dict(make_task(12, "Выберите органоид.", options=opts("41")), answer_text="ядро")
+    model = StubModel(split=reply(fig_task(11), single), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        before = dict(row(tmp_path, other))
+        with monkeypatch.context() as patch, pytest.raises(RuntimeError):
+            patch.setattr(figure_service, "recheck_figure", _boom)
+            c.post(f"/parent/tasks/{other}/edit", headers=PARENT, json={"options": opts("42")})
+        assert dict(row(tmp_path, other)) == before
+        assert detail(c, fig)["figure"]["confirmed"] is True
+
+        r = c.post(f"/parent/tasks/{other}/edit", headers=PARENT, json={"options": opts("42")})
+        assert r.status_code == 200, r.text
+        assert detail(c, fig)["figure"]["confirmed"] is False
+
+
+def test_an_edit_returns_the_revision_that_is_stored_after_the_recheck(tmp_path):
+    tasks = [fig_task(11, CELL_OPTS)]
+    with figure_client(tmp_path, "raster", tasks=tasks) as c:
+        tid = task_ids(tmp_path)[0]
+        assert confirm_figure(c, tid).status_code == 200
+        # The new option texts name what the picture shows: the recheck makes another revision.
+        options = [{"label": "А", "text": "Рисунок: части объекта обозначены цифрами"}] + CELL_OPTS[
+            1:
+        ]
+        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"options": options})
+        assert r.status_code == 200, r.text
+        assert detail(c, tid)["figure"]["confirmed"] is False  # the recheck did run
+        assert r.json()["revision"] == row(tmp_path, tid)["revision"]
+
+
+class _OpenSpy:
+    """Stands in for the pymupdf module of figure_service: records every open of a file and
+    whether another connection could take the write lock at that moment."""
+
+    def __init__(self, tmp_path):
+        self.opens, self.db_path = [], tmp_path / "olymp.db"
+
+    def __getattr__(self, name):
+        return getattr(pymupdf, name)
+
+    def open(self, *args, **kwargs):
+        import sqlite3
+
+        probe = sqlite3.connect(str(self.db_path), timeout=0, isolation_level=None)
+        try:
+            probe.execute("BEGIN IMMEDIATE")
+            probe.execute("ROLLBACK")
+            self.opens.append("free")
+        except sqlite3.OperationalError:
+            self.opens.append("locked")
+        finally:
+            probe.close()
+        return pymupdf.open(*args, **kwargs)
+
+
+def test_a_recheck_opens_each_pdf_once_and_outside_the_write_lock(tmp_path, monkeypatch):
+    from app.ingest import figure_service
+
+    def opts(first):
+        return [{"label": first, "text": "ядро"}, {"label": "40", "text": "рибосома"}]
+
+    single = dict(make_task(12, "Выберите органоид.", options=opts("41")), answer_text="ядро")
+    model = StubModel(split=reply(fig_task(11), single), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        spy = _OpenSpy(tmp_path)
+        with monkeypatch.context() as patch:
+            patch.setattr(figure_service, "pymupdf", spy)
+            r = c.post(f"/parent/tasks/{other}/key", headers=PARENT, json={"answer": "40"})
+            assert r.status_code == 200, r.text
+        assert spy.opens == ["free"]  # one open for the whole material, before BEGIN
+        assert detail(c, fig)["figure"]["confirmed"] is True
+
+        spy.opens.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(figure_service, "pymupdf", spy)
+            r = c.post(f"/parent/tasks/{other}/edit", headers=PARENT, json={"options": opts("42")})
+            assert r.status_code == 200, r.text
+        assert spy.opens == ["free"]
+        assert detail(c, fig)["figure"]["confirmed"] is False
+
+
+def test_a_busy_database_answers_503_not_500(tmp_path, monkeypatch):
+    import sqlite3
+
+    from app.ingest import review
+
+    app = build_app(tmp_path, StubModel(split=reply(fig_task(11)), answer=answer_by_number({})))
+    with TestClient(app) as c:
+        assert upload(c, figure_pdf("raster")).status_code == 202
+        (tid,) = task_ids(tmp_path)
+
+        def busy(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(review, "set_parent_key", busy)
+            r = c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": "Б"})
+        assert r.status_code == 503 and "ещё раз" in r.json()["error"]
+        assert r.headers["retry-after"]
+
+
+def _bank_with_figures(c, tmp_path, pages=12):
+    """A textbook-kind material of `pages` pages with two confirmed figures per page, and answers
+    that overlap the printed labels in every direction: equal, the label inside a longer answer,
+    several answer pieces, a stored key, and no overlap at all."""
+    from tests.bank_helpers import doc_bytes, quad_png, write_lines
+
+    doc = pymupdf.open()
+    for n in range(pages):
+        page = doc.new_page(width=600, height=800)
+        write_lines(page, [f"Страница {n + 1}"], y=60)
+        page.insert_image(pymupdf.Rect(60, 100, 260, 240), stream=quad_png(), keep_proportion=False)
+        label = f"{n % 5} mark" if n % 2 == 0 else f"see {n % 5} mark here"
+        page.insert_text((80, 160), label, fontsize=12, fontname="helv")
+        page.insert_image(pymupdf.Rect(60, 400, 260, 540), stream=quad_png(), keep_proportion=False)
+    material = upload(c, doc_bytes(doc), kind="textbook").json()["material_id"]
+    conn = db(tmp_path)
+    ids = []
+    for i in range(pages * 2):
+        page, k = i // 2 + 1, i % 5
+        frame = [60, 100, 260, 240] if i % 2 == 0 else [60, 400, 260, 540]
+        figure = {
+            "material_id": material,
+            "page": page,
+            "rect": frame,
+            "regions": [{"page": page, "rect": frame}],
+            "confirmed": True,
+            "alt": "Рисунок к заданию",
+            "leak": [],
+            "leak_ack": False,
+            "teacher_note": "",
+        }
+        answer = [
+            f"{k} mark",
+            f"а б {k} mark в",
+            "ничего общего",
+            f"{k} mark\nвторая строка",
+        ][i % 4]
+        key = ('{"type": "numeric", "value": "2 mark"}', "parent") if i % 7 == 0 else (None, None)
+        cur = conn.execute(
+            "INSERT INTO task_item (material_id, page_from, page_to, source_number, type, text, "
+            "answer_text, figure, answer_key, key_source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                material,
+                page,
+                page,
+                str(i + 1),
+                "numeric",
+                f"Задание {i + 1}",
+                answer,
+                json.dumps(figure, ensure_ascii=False),
+                *key,
+            ),
+        )
+        ids.append(cur.lastrowid)
+    conn.close()
+    return material, ids
+
+
+def test_the_material_leak_index_gives_the_same_verdicts_and_is_built_once(tmp_path, monkeypatch):
+    from app.ingest import figure_service
+    from app.ingest.figures import crop_leaks
+
+    app = build_app(tmp_path, StubModel(split=reply(), answer=answer_by_number({})))
+    with TestClient(app) as c:
+        material, ids = _bank_with_figures(c, tmp_path)
+        ctx = c.app.state.ctx
+        conn = db(tmp_path)
+        shared = figure_service._Shared(ctx, conn, material)
+        doc = pymupdf.open(
+            str(
+                ctx.material_path(
+                    conn.execute("SELECT file FROM material WHERE id = ?", (material,)).fetchone()[
+                        "file"
+                    ]
+                )
+            )
+        )
+        verdicts = []
+        for tid in ids:
+            task = conn.execute("SELECT * FROM task_item WHERE id = ?", (tid,)).fetchone()
+            regions = json.loads(task["figure"])["regions"]
+            new = shared.leaks(task, regions)
+            old = crop_leaks(doc, regions, figure_service.leak_units(conn, task))
+            assert sorted(new) == sorted(old), (tid, new, old)
+            verdicts.append(bool(new))
+        shared.close()
+        doc.close()
+        conn.close()
+        assert any(verdicts) and not all(verdicts)  # the cases really overlap, and not always
+
+        builds = []
+        real = figure_service._build_leak_index
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                figure_service, "_build_leak_index", lambda f: builds.append(1) or real(f)
+            )
+            r = c.post(f"/parent/tasks/{ids[1]}/key", headers=PARENT, json={"answer": "7"})
+            assert r.status_code == 200, r.text
+        assert builds == [1]  # one index for the material, however many figures it has
 
 
 # -------------------------------------------------------------------- AC-22

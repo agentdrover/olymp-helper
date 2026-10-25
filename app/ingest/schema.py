@@ -2,7 +2,11 @@
 
 import re
 
-TYPES = ("single", "multiple", "match", "open")
+from app.ingest.leaks import is_drawing, split_elements
+
+TYPES = ("single", "multiple", "match", "open", "numeric")
+NO_OPTIONS = ("open", "numeric")
+MAX_ANSWER_TEXT = 4000
 # Номер задания: цифры, необязательные «.цифры» и необязательная буква; ничего другого.
 NUMBER = re.compile(r"^\d{1,4}(\.\d{1,3})?[A-Za-zА-Яа-я]?$")
 
@@ -35,7 +39,7 @@ def _option_list(value, where: str, minimum: int) -> list[dict]:
 
 
 def _options(kind: str, value, where: str):
-    if kind == "open":
+    if kind in NO_OPTIONS:
         return None
     if kind == "match":
         if not isinstance(value, dict):
@@ -97,9 +101,22 @@ def validate_tasks(payload, pages: set[int]) -> list[dict]:
             number = str(number)
         if not isinstance(number, str) or not NUMBER.fullmatch(number.strip()):
             _fail(where, "номер задания должен быть числом, например 12, 5.2 или 3а")
-        text = raw.get("text")
+        # condition - условие БЕЗ ответов; text - прежнее имя того же поля.
+        text = raw.get("condition", raw.get("text"))
         if not isinstance(text, str) or not text.strip():
             _fail(where, "пустое условие")
+        answer_text = raw.get("answer_text")
+        if answer_text is not None and not isinstance(answer_text, str):
+            _fail(where, "answer_text должен быть строкой")
+        if answer_text and len(answer_text) > MAX_ANSWER_TEXT:
+            _fail(where, f"answer_text длиннее {MAX_ANSWER_TEXT} знаков")
+        text, elements = split_elements(text.strip())
+        if not text:
+            _fail(where, "пустое условие")
+        if elements:  # «Элементы ответа» остались в условии: это часть ответа
+            answer_text = f"{answer_text}\n{elements}" if answer_text else elements
+        if is_drawing(text):  # ответ рисуется: проверить его нельзя, тип - открытое
+            kind = "open"
         task_pages = raw.get("pages")
         if (
             not isinstance(task_pages, list)
@@ -116,7 +133,8 @@ def validate_tasks(payload, pages: set[int]) -> list[dict]:
             {
                 "number": number.strip(),
                 "type": kind,
-                "text": text.strip(),
+                "text": text,
+                "answer_text": (answer_text or "").strip() or None,
                 "options": _options(kind, raw.get("options"), where),
                 "pages": sorted(set(task_pages)),
                 "refers_to_figure": bool(raw.get("refers_to_figure", False)),

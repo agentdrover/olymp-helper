@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,24 @@ def open_db(path: str | Path) -> sqlite3.Connection:
     conn = connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+@contextmanager
+def atomic(conn: sqlite3.Connection):
+    """Правка и проверка рисунков, которые от неё зависят, - одна транзакция: при отказе проверки
+    не остаётся ни правки, ни опубликованного рисунка с устаревшим решением. Внутри уже открытой
+    транзакции владелец - вызывающий."""
+    if conn.in_transaction:
+        yield
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
 
 
 def now() -> str:

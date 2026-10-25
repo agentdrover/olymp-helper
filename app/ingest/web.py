@@ -236,6 +236,7 @@ class FigureBody(BaseModel):
     teacher_note: str | None = None
     no_answer_ack: bool = False
     teacher_note_ack: bool = False
+    leak_ack: bool = False  # явное решение: текст ответа в вырезке оставлен намеренно
 
 
 def _advance(request: Request, conn, task_id: int, *, stay_if_open: bool = False) -> dict:
@@ -287,6 +288,14 @@ def task_detail(task_id: int, request: Request, conn: Db):
         return _refusal(exc)
 
 
+BUSY_MESSAGE = "База занята другой операцией. Попробуйте ещё раз через несколько секунд."
+
+
+def _is_busy(exc: sqlite3.OperationalError) -> bool:
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
 def _action(handler):
     """Единый разбор отказов: Refusal -> JSON с понятным текстом."""
 
@@ -296,6 +305,12 @@ def _action(handler):
             return handler(*args, **kwargs)
         except Refusal as exc:
             return _refusal(exc)
+        except sqlite3.OperationalError as exc:
+            if not _is_busy(exc):
+                raise
+            return JSONResponse(
+                {"error": BUSY_MESSAGE}, status_code=503, headers={"Retry-After": "2"}
+            )
 
     return wrapper
 
@@ -315,8 +330,9 @@ def task_skip(task_id: int, request: Request, conn: Db):
 
 @parent.post("/parent/tasks/{task_id}/edit")
 @_action
-def task_edit(task_id: int, body: EditBody, conn: Db):
+def task_edit(task_id: int, body: EditBody, request: Request, conn: Db):
     return review.edit_task(
+        ctx_of(request),
         conn,
         task_id,
         text=body.text,
@@ -328,8 +344,8 @@ def task_edit(task_id: int, body: EditBody, conn: Db):
 
 @parent.post("/parent/tasks/{task_id}/key")
 @_action
-def task_key(task_id: int, body: KeyBody, conn: Db):
-    return review.set_parent_key(conn, task_id, body.answer)
+def task_key(task_id: int, body: KeyBody, request: Request, conn: Db):
+    return review.set_parent_key(ctx_of(request), conn, task_id, body.answer)
 
 
 @parent.post("/parent/tasks/{task_id}/resolve")
@@ -367,6 +383,7 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
         teacher_note=body.teacher_note,
         no_answer_ack=body.no_answer_ack,
         teacher_note_ack=body.teacher_note_ack,
+        leak_ack=body.leak_ack,
     )
 
 
