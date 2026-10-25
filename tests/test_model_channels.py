@@ -57,7 +57,7 @@ def test_ac1():
     cargv = CursorAdapter().build("auto", SYSTEM, None)
     assert cargv[:6] == ["cursor-agent", "-p", "--output-format", "json", "--model", "auto"]
     assert cargv[cargv.index("--mode") + 1] == "ask"
-    assert not {"--force", "--yolo", "--trust", "--approve-mcps"} & set(cargv)
+    assert not {"--force", "--yolo", "--approve-mcps"} & set(cargv)
     # История и system передаются явно.
     seen = []
     res = run_cli(
@@ -303,3 +303,25 @@ def test_proxy_vars_reach_the_cli():
     # Без прокси в окружении состав прежний.
     plain = build_env("claude", dict(ENV), "/work/home")
     assert not set(proxy) & set(plain)
+
+
+def test_the_cli_gets_the_proxy_ca_and_a_writable_tmpdir():
+    """sbx-прокси подменяет TLS своим CA: пути к нему доходят до CLI. TMPDIR - каталог запуска."""
+    ca = {"NODE_EXTRA_CA_CERTS": "/etc/sbx/ca.pem", "SSL_CERT_FILE": "/etc/sbx/ca.pem"}
+    source = dict(ENV, **ca, TMPDIR="/tmp", EXECUTOR_SHARED_KEY="shared")
+    for channel in ("claude", "cursor"):
+        env = build_env(channel, source, "/work/home")
+        assert {k: env.get(k) for k in ca} == ca
+        # Корень контейнера только для чтения: TMPDIR - записываемый HOME запуска, не из окружения.
+        assert env["TMPDIR"] == env["HOME"] == "/work/home"
+        assert "EXECUTOR_SHARED_KEY" not in env
+    # Без переменных CA в окружении они и не появляются; TMPDIR задан и тогда.
+    plain = build_env("claude", dict(ENV), "/work/home")
+    assert not set(ca) & set(plain)
+    assert plain["TMPDIR"] == "/work/home"
+
+
+def test_cursor_trusts_the_run_dir_without_yolo():
+    argv = CursorAdapter().build("auto", SYSTEM, None)
+    assert "--trust" in argv
+    assert not {"--yolo", "-f", "--force"} & set(argv)
