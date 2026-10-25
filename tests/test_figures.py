@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from contextlib import contextmanager
@@ -621,6 +622,107 @@ def test_a_busy_database_answers_503_not_500(tmp_path, monkeypatch):
             r = c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": "Б"})
         assert r.status_code == 503 and "ещё раз" in r.json()["error"]
         assert r.headers["retry-after"]
+
+
+def _bank_with_figures(c, tmp_path, pages=12):
+    """A textbook-kind material of `pages` pages with two confirmed figures per page, and answers
+    that overlap the printed labels in every direction: equal, the label inside a longer answer,
+    several answer pieces, a stored key, and no overlap at all."""
+    from tests.bank_helpers import doc_bytes, quad_png, write_lines
+
+    doc = pymupdf.open()
+    for n in range(pages):
+        page = doc.new_page(width=600, height=800)
+        write_lines(page, [f"Страница {n + 1}"], y=60)
+        page.insert_image(pymupdf.Rect(60, 100, 260, 240), stream=quad_png(), keep_proportion=False)
+        label = f"{n % 5} mark" if n % 2 == 0 else f"see {n % 5} mark here"
+        page.insert_text((80, 160), label, fontsize=12, fontname="helv")
+        page.insert_image(pymupdf.Rect(60, 400, 260, 540), stream=quad_png(), keep_proportion=False)
+    material = upload(c, doc_bytes(doc), kind="textbook").json()["material_id"]
+    conn = db(tmp_path)
+    ids = []
+    for i in range(pages * 2):
+        page, k = i // 2 + 1, i % 5
+        frame = [60, 100, 260, 240] if i % 2 == 0 else [60, 400, 260, 540]
+        figure = {
+            "material_id": material,
+            "page": page,
+            "rect": frame,
+            "regions": [{"page": page, "rect": frame}],
+            "confirmed": True,
+            "alt": "Рисунок к заданию",
+            "leak": [],
+            "leak_ack": False,
+            "teacher_note": "",
+        }
+        answer = [
+            f"{k} mark",
+            f"а б {k} mark в",
+            "ничего общего",
+            f"{k} mark\nвторая строка",
+        ][i % 4]
+        key = ('{"type": "numeric", "value": "2 mark"}', "parent") if i % 7 == 0 else (None, None)
+        cur = conn.execute(
+            "INSERT INTO task_item (material_id, page_from, page_to, source_number, type, text, "
+            "answer_text, figure, answer_key, key_source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                material,
+                page,
+                page,
+                str(i + 1),
+                "numeric",
+                f"Задание {i + 1}",
+                answer,
+                json.dumps(figure, ensure_ascii=False),
+                *key,
+            ),
+        )
+        ids.append(cur.lastrowid)
+    conn.close()
+    return material, ids
+
+
+def test_the_material_leak_index_gives_the_same_verdicts_and_is_built_once(tmp_path, monkeypatch):
+    from app.ingest import figure_service
+    from app.ingest.figures import crop_leaks
+
+    app = build_app(tmp_path, StubModel(split=reply(), answer=answer_by_number({})))
+    with TestClient(app) as c:
+        material, ids = _bank_with_figures(c, tmp_path)
+        ctx = c.app.state.ctx
+        conn = db(tmp_path)
+        shared = figure_service._Shared(ctx, conn, material)
+        doc = pymupdf.open(
+            str(
+                ctx.material_path(
+                    conn.execute("SELECT file FROM material WHERE id = ?", (material,)).fetchone()[
+                        "file"
+                    ]
+                )
+            )
+        )
+        verdicts = []
+        for tid in ids:
+            task = conn.execute("SELECT * FROM task_item WHERE id = ?", (tid,)).fetchone()
+            regions = json.loads(task["figure"])["regions"]
+            new = shared.leaks(task, regions)
+            old = crop_leaks(doc, regions, figure_service.leak_units(conn, task))
+            assert sorted(new) == sorted(old), (tid, new, old)
+            verdicts.append(bool(new))
+        shared.close()
+        doc.close()
+        conn.close()
+        assert any(verdicts) and not all(verdicts)  # the cases really overlap, and not always
+
+        builds = []
+        real = figure_service._build_leak_index
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                figure_service, "_build_leak_index", lambda f: builds.append(1) or real(f)
+            )
+            r = c.post(f"/parent/tasks/{ids[1]}/key", headers=PARENT, json={"answer": "7"})
+            assert r.status_code == 200, r.text
+        assert builds == [1]  # one index for the material, however many figures it has
 
 
 # -------------------------------------------------------------------- AC-22

@@ -1,5 +1,6 @@
 """Подтверждение рисунка родителем: рамка, alt, пометки, PNG (SPEC-1.0 1.1)."""
 
+import bisect
 import contextlib
 import json
 
@@ -228,6 +229,49 @@ def _open_material(ctx, conn, material_id: int):
     return pymupdf.open(str(ctx.material_path(material["file"])))
 
 
+class _LeakIndex:
+    """Ответы и ключи всех заданий материала, собранные один раз: общий для рисунков индекс.
+
+    Текст рамки сопоставляется с ним без перебора всех ответов: ответ внутри строки находится
+    по словесным отрезкам строки, строка внутри ответа - одним поиском подстроки по сплошному
+    тексту ответов."""
+
+    def __init__(self, foreign: dict[int, list[str]]):
+        # Ответы самого задания входят в его собственные юниты (crop_units), поэтому отдельно
+        # исключать их из общего индекса не нужно.
+        self.owners = dict.fromkeys(t for texts in foreign.values() for t in texts)
+        self.texts = list(self.owners)
+        self.order = {t: i for i, t in enumerate(self.texts)}
+        self.blob = "\n".join(f" {t} " for t in self.texts)
+        self.starts, at = [], 0
+        for text in self.texts:
+            self.starts.append(at)
+            at += len(text) + 3
+        self.longest = max((len(t.split()) for t in self.texts), default=0)
+
+    def matches(self, lines: list[str]) -> list[str]:
+        """Чужие тексты, которые есть в строках рамки (правило crop_leaks), по порядку заданий."""
+        hits: set[str] = set()
+        for line in lines:
+            words = line.split()
+            for i in range(len(words)):
+                for j in range(i + 1, min(len(words), i + self.longest) + 1):
+                    gram = " ".join(words[i:j])
+                    if gram in self.owners:
+                        hits.add(gram)
+            if significant(line):
+                needle = f" {line} "
+                pos = self.blob.find(needle)
+                while pos != -1:
+                    hits.add(self.texts[bisect.bisect_right(self.starts, pos) - 1])
+                    pos = self.blob.find(needle, pos + 1)
+        return sorted(hits, key=self.order.__getitem__)
+
+
+def _build_leak_index(foreign: dict[int, list[str]]) -> _LeakIndex:
+    return _LeakIndex(foreign)
+
+
 class _Shared:
     """Входы проверки рисунков одного материала: кандидаты, ключи, ответы и подготовленный
     текст рамок считаются один раз, PDF открывается не чаще одного раза."""
@@ -243,21 +287,16 @@ class _Shared:
         self.keys = {i: _keys_from(t, cands[i]) for i, t in self.tasks.items()}
         self.labels = {i: _labels_from(t, cands[i]) for i, t in self.tasks.items()}
         self.foreign = {i: _foreign_units(t, self.keys[i]) for i, t in self.tasks.items()}
+        self.index = _build_leak_index(self.foreign)
         self._doc = None
 
-    def units(self, task) -> list[str]:
-        units = crop_units(
-            task["answer_text"], self.keys[task["id"]], options_of(task), task["type"]
-        )
-        seen = set(units)
-        for other, texts in self.foreign.items():
-            if other == task["id"]:
-                continue
-            for text in texts:
-                if text not in seen:
-                    seen.add(text)
-                    units.append(text)
-        return units
+    def leaks(self, task, regions) -> list[str]:
+        """Тексты из защиты (свои и чужие ответы, ключи, варианты), напечатанные в рамках."""
+        lines = self.lines(task, regions)
+        own = crop_units(task["answer_text"], self.keys[task["id"]], options_of(task), task["type"])
+        found = figures.leaks_in_lines(lines, own)
+        mine = set(map(norm, own))
+        return found + [t for t in self.index.matches(lines) if t not in mine]
 
     def lines(self, task, regions) -> list[str]:
         hit = self.prepared.get(task["id"])
@@ -297,7 +336,7 @@ def recheck_figure(
         regions = figures.regions_of(figure)
         found = []
         if regions:
-            found = figures.leaks_in_lines(shared.lines(task, regions), shared.units(task))
+            found = shared.leaks(task, regions)
         alt_bad = figures.alt_problem(
             figure.get("alt", ""), options_of(task), shared.labels[task_id]
         )
