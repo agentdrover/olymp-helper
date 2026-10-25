@@ -309,12 +309,21 @@ def crop_leaks(doc: pymupdf.Document, regions: list[dict], units: list[str]) -> 
 
     Текст рамки сравнивается по строкам в обе стороны: строка содержит текст ответа или
     сама входит в него. Однознаковое и пустое не берётся."""
+    return leaks_in_lines(region_lines(doc, regions), units)
+
+
+def region_lines(doc: pymupdf.Document, regions: list[dict]) -> list[str]:
+    """Строки текста всех рамок рисунка: единственная часть проверки, читающая PDF."""
+    return [line for region in regions for line in _crop_lines(doc, region)]
+
+
+def leaks_in_lines(lines: list[str], units: list[str]) -> list[str]:
+    """Тексты из units, которые есть в строках рамки (см. crop_leaks)."""
     wanted = []
     for unit in units:
         unit = norm(unit)
         if unit and unit not in wanted:
             wanted.append(unit)
-    lines = [line for region in regions for line in _crop_lines(doc, region)]
     return [
         unit
         for unit in wanted

@@ -80,6 +80,13 @@ def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
     """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято.
     Подтверждённый рисунок проходит защиту от текста ответа заново: решение было для другого ключа;
     то же для рисунков других заданий материала: новый ключ не должен быть напечатан в их вырезках."""
+    task = _task(conn, task_id)
+    if key_value(task["answer_key"]) == value and task["key_source"] == source:
+        return {"revision": task["revision"], "key_version": task["key_version"]}
+    # Чтение PDF не зависит от правки: делается до блокировки записи.
+    from app.ingest.figure_service import prepare_crop_lines
+
+    prepared = prepare_crop_lines(ctx, conn, task["material_id"])
     with atomic(conn):
         task = _task(conn, task_id)
         if key_value(task["answer_key"]) == value and task["key_source"] == source:
@@ -97,7 +104,7 @@ def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
         # figure_service импортирует review
         from app.ingest.figure_service import recheck_material_figures
 
-        recheck_material_figures(ctx, conn, task_id)
+        recheck_material_figures(ctx, conn, task_id, prepared)
         task = get_task(conn, task_id)
         return {"revision": task["revision"], "key_version": task["key_version"]}
 
@@ -115,6 +122,11 @@ def set_parent_key(ctx, conn, task_id: int, raw) -> dict:
 def edit_task(
     ctx, conn, task_id: int, *, text=None, options=None, teacher_note=None, manual_condition=False
 ) -> dict:
+    prepared = None
+    if options is not None:  # чтение PDF для проверки рисунков - до блокировки записи
+        from app.ingest.figure_service import prepare_crop_lines
+
+        prepared = prepare_crop_lines(ctx, conn, _task(conn, task_id)["material_id"])
     with atomic(conn):
         task = _task(conn, task_id)
         if task["excluded"]:
@@ -147,7 +159,7 @@ def edit_task(
         if options is not None:  # варианты задают кандидата ключа, а он - защиту рисунков соседей
             from app.ingest.figure_service import recheck_material_figures
 
-            recheck_material_figures(ctx, conn, task_id)
+            recheck_material_figures(ctx, conn, task_id, prepared)
         return {"revision": _task(conn, task_id)["revision"]}  # проверка могла создать новую
 
 

@@ -288,6 +288,14 @@ def task_detail(task_id: int, request: Request, conn: Db):
         return _refusal(exc)
 
 
+BUSY_MESSAGE = "База занята другой операцией. Попробуйте ещё раз через несколько секунд."
+
+
+def _is_busy(exc: sqlite3.OperationalError) -> bool:
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
 def _action(handler):
     """Единый разбор отказов: Refusal -> JSON с понятным текстом."""
 
@@ -297,6 +305,12 @@ def _action(handler):
             return handler(*args, **kwargs)
         except Refusal as exc:
             return _refusal(exc)
+        except sqlite3.OperationalError as exc:
+            if not _is_busy(exc):
+                raise
+            return JSONResponse(
+                {"error": BUSY_MESSAGE}, status_code=503, headers={"Retry-After": "2"}
+            )
 
     return wrapper
 

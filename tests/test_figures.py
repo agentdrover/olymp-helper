@@ -548,6 +548,81 @@ def test_an_edit_returns_the_revision_that_is_stored_after_the_recheck(tmp_path)
         assert r.json()["revision"] == row(tmp_path, tid)["revision"]
 
 
+class _OpenSpy:
+    """Stands in for the pymupdf module of figure_service: records every open of a file and
+    whether another connection could take the write lock at that moment."""
+
+    def __init__(self, tmp_path):
+        self.opens, self.db_path = [], tmp_path / "olymp.db"
+
+    def __getattr__(self, name):
+        return getattr(pymupdf, name)
+
+    def open(self, *args, **kwargs):
+        import sqlite3
+
+        probe = sqlite3.connect(str(self.db_path), timeout=0, isolation_level=None)
+        try:
+            probe.execute("BEGIN IMMEDIATE")
+            probe.execute("ROLLBACK")
+            self.opens.append("free")
+        except sqlite3.OperationalError:
+            self.opens.append("locked")
+        finally:
+            probe.close()
+        return pymupdf.open(*args, **kwargs)
+
+
+def test_a_recheck_opens_each_pdf_once_and_outside_the_write_lock(tmp_path, monkeypatch):
+    from app.ingest import figure_service
+
+    def opts(first):
+        return [{"label": first, "text": "ядро"}, {"label": "40", "text": "рибосома"}]
+
+    single = dict(make_task(12, "Выберите органоид.", options=opts("41")), answer_text="ядро")
+    model = StubModel(split=reply(fig_task(11), single), answer=answer_by_number({}))
+    app = build_app(tmp_path, model)
+    with TestClient(app) as c:
+        assert upload(c, _printed_number_pdf()).status_code == 202
+        fig, other = task_ids(tmp_path)
+        _publish(c, tmp_path, fig)
+        spy = _OpenSpy(tmp_path)
+        with monkeypatch.context() as patch:
+            patch.setattr(figure_service, "pymupdf", spy)
+            r = c.post(f"/parent/tasks/{other}/key", headers=PARENT, json={"answer": "40"})
+            assert r.status_code == 200, r.text
+        assert spy.opens == ["free"]  # one open for the whole material, before BEGIN
+        assert detail(c, fig)["figure"]["confirmed"] is True
+
+        spy.opens.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(figure_service, "pymupdf", spy)
+            r = c.post(f"/parent/tasks/{other}/edit", headers=PARENT, json={"options": opts("42")})
+            assert r.status_code == 200, r.text
+        assert spy.opens == ["free"]
+        assert detail(c, fig)["figure"]["confirmed"] is False
+
+
+def test_a_busy_database_answers_503_not_500(tmp_path, monkeypatch):
+    import sqlite3
+
+    from app.ingest import review
+
+    app = build_app(tmp_path, StubModel(split=reply(fig_task(11)), answer=answer_by_number({})))
+    with TestClient(app) as c:
+        assert upload(c, figure_pdf("raster")).status_code == 202
+        (tid,) = task_ids(tmp_path)
+
+        def busy(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(review, "set_parent_key", busy)
+            r = c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": "Б"})
+        assert r.status_code == 503 and "ещё раз" in r.json()["error"]
+        assert r.headers["retry-after"]
+
+
 # -------------------------------------------------------------------- AC-22
 
 

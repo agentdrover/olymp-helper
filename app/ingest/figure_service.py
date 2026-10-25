@@ -1,5 +1,6 @@
 """Подтверждение рисунка родителем: рамка, alt, пометки, PNG (SPEC-1.0 1.1)."""
 
+import contextlib
 import json
 
 import pymupdf
@@ -28,10 +29,9 @@ UNREADABLE = (
 )
 
 
-def _correct_labels(conn, task) -> list[str]:
+def _labels_from(task, cand) -> list[str]:
     value = key_value(task["answer_key"])
     if value is None:
-        cand = candidate(conn, task)
         value = cand["value"] if cand else None
     if isinstance(value, str):
         return [value]
@@ -42,10 +42,13 @@ def _correct_labels(conn, task) -> list[str]:
     return []
 
 
-def _keys_of(conn, task) -> list[str]:
+def _correct_labels(conn, task) -> list[str]:
+    return _labels_from(task, candidate(conn, task))
+
+
+def _keys_from(task, cand) -> list[str]:
     keys = []
     value = key_value(task["answer_key"])
-    cand = candidate(conn, task)
     for item in (value, cand["value"] if cand else None):
         if isinstance(item, str):
             keys.append(item)
@@ -54,6 +57,16 @@ def _keys_of(conn, task) -> list[str]:
         elif isinstance(item, dict):  # сопоставление: ответ - пара, а не обозначение стороны
             keys.extend(f"{k} {v}" for k, v in item.items())
     return keys
+
+
+def _keys_of(conn, task) -> list[str]:
+    return _keys_from(task, candidate(conn, task))
+
+
+def _foreign_units(task, keys) -> list[str]:
+    """Что из ответа и ключа задания не должно стоять в вырезке ЧУЖОГО задания."""
+    texts = [*answer_units(task["answer_text"]), *map(norm, keys)]
+    return [t for t in texts if significant(t)]
 
 
 def leak_units(conn, task) -> list[str]:
@@ -66,8 +79,8 @@ def leak_units(conn, task) -> list[str]:
         (task["material_id"], task["id"]),
     ).fetchall()
     for other in others:
-        for text in (*answer_units(other["answer_text"]), *map(norm, _keys_of(conn, other))):
-            if significant(text) and text not in units:
+        for text in _foreign_units(other, _keys_of(conn, other)):
+            if text not in units:
                 units.append(text)
     return units
 
@@ -192,31 +205,105 @@ LEAK_REASON = (
 )
 
 
-def recheck_figure(ctx, conn, task_id: int, *, keep_ack: bool = False) -> None:
+def prepare_crop_lines(ctx, conn, material_id: int) -> dict:
+    """{задание: (области, строки текста в них)} подтверждённых рисунков материала.
+
+    Читает только PDF и не зависит от правки ключа или вариантов, поэтому выполняется ДО
+    транзакции: под блокировкой записи остаётся одно сравнение. Если области задания успели
+    измениться, проверка читает их заново."""
+    tasks = [
+        (t, figures.regions_of(f))
+        for t in conn.execute("SELECT * FROM task_item WHERE material_id = ?", (material_id,))
+        if (f := figure_of(t)) and f.get("confirmed")
+    ]
+    tasks = [(t, regions) for t, regions in tasks if regions]
+    if not tasks:
+        return {}
+    with contextlib.closing(_open_material(ctx, conn, material_id)) as doc:
+        return {t["id"]: (regions, figures.region_lines(doc, regions)) for t, regions in tasks}
+
+
+def _open_material(ctx, conn, material_id: int):
+    material = conn.execute("SELECT file FROM material WHERE id = ?", (material_id,)).fetchone()
+    return pymupdf.open(str(ctx.material_path(material["file"])))
+
+
+class _Shared:
+    """Входы проверки рисунков одного материала: кандидаты, ключи, ответы и подготовленный
+    текст рамок считаются один раз, PDF открывается не чаще одного раза."""
+
+    def __init__(self, ctx, conn, material_id: int, prepared: dict | None = None):
+        self.ctx, self.conn, self.material_id = ctx, conn, material_id
+        self.prepared = prepared or {}
+        self.tasks = {
+            t["id"]: t
+            for t in conn.execute("SELECT * FROM task_item WHERE material_id = ?", (material_id,))
+        }
+        cands = {i: candidate(conn, t) for i, t in self.tasks.items()}
+        self.keys = {i: _keys_from(t, cands[i]) for i, t in self.tasks.items()}
+        self.labels = {i: _labels_from(t, cands[i]) for i, t in self.tasks.items()}
+        self.foreign = {i: _foreign_units(t, self.keys[i]) for i, t in self.tasks.items()}
+        self._doc = None
+
+    def units(self, task) -> list[str]:
+        units = crop_units(
+            task["answer_text"], self.keys[task["id"]], options_of(task), task["type"]
+        )
+        seen = set(units)
+        for other, texts in self.foreign.items():
+            if other == task["id"]:
+                continue
+            for text in texts:
+                if text not in seen:
+                    seen.add(text)
+                    units.append(text)
+        return units
+
+    def lines(self, task, regions) -> list[str]:
+        hit = self.prepared.get(task["id"])
+        if hit is not None and hit[0] == regions:
+            return hit[1]
+        if self._doc is None:
+            self._doc = _open_material(self.ctx, self.conn, self.material_id)
+        return figures.region_lines(self._doc, regions)
+
+    def close(self) -> None:
+        if self._doc is not None:
+            self._doc.close()
+            self._doc = None
+
+    def confirmed(self) -> list[int]:
+        return [i for i, t in self.tasks.items() if (figure_of(t) or {}).get("confirmed")]
+
+
+def recheck_figure(
+    ctx, conn, task_id: int, *, keep_ack: bool = False, shared: _Shared | None = None
+) -> None:
     """Ключ задания изменился: прежние решения о рисунке относились к другому ключу.
 
     Защита от текста ответа в вырезке и проверка описания (alt) проходят заново с новым
     ключом; решение leak_ack сбрасывается. При нарушении рисунок снимается с подтверждения
     и задание возвращается на карточку рисунка. keep_ack: проверка из-за ключа ДРУГОГО задания;
-    если найденное не изменилось, прежнее решение родителя остаётся."""
+    если найденное не изменилось, прежнее решение родителя остаётся. shared - входы материала,
+    посчитанные один раз для всех его рисунков."""
     task = get_task(conn, task_id)
     figure = figure_of(task) if task is not None else None
     if figure is None or not figure.get("confirmed"):
         return
-    found = []
-    regions = figures.regions_of(figure)
-    if regions:
-        material = conn.execute(
-            "SELECT file FROM material WHERE id = ?", (task["material_id"],)
-        ).fetchone()
-        doc = pymupdf.open(str(ctx.material_path(material["file"])))
-        try:
-            found = crop_leaks(doc, regions, leak_units(conn, task))
-        finally:
-            doc.close()
-    alt_bad = figures.alt_problem(
-        figure.get("alt", ""), options_of(task), _correct_labels(conn, task)
-    )
+    own = shared is None
+    if own:
+        shared = _Shared(ctx, conn, task["material_id"])
+    try:
+        regions = figures.regions_of(figure)
+        found = []
+        if regions:
+            found = figures.leaks_in_lines(shared.lines(task, regions), shared.units(task))
+        alt_bad = figures.alt_problem(
+            figure.get("alt", ""), options_of(task), shared.labels[task_id]
+        )
+    finally:
+        if own:
+            shared.close()
     if keep_ack and not alt_bad and sorted(found) == sorted(figure.get("leak") or []):
         return
     if not found and not alt_bad and not figure.get("leak_ack") and not figure.get("leak"):
@@ -233,13 +320,21 @@ def recheck_figure(ctx, conn, task_id: int, *, keep_ack: bool = False) -> None:
         save_snapshot(conn, task_id)
 
 
-def recheck_material_figures(ctx, conn, task_id: int) -> None:
+def recheck_material_figures(ctx, conn, task_id: int, prepared: dict | None = None) -> None:
     """Ключ или варианты задания изменились: они входят в защиту от утечки (leak_units) у каждого
-    другого задания материала, поэтому уже подтверждённые рисунки соседей проходят проверку заново."""
-    recheck_figure(ctx, conn, task_id)
+    другого задания материала, поэтому уже подтверждённые рисунки соседей проходят проверку заново.
+    prepared - prepare_crop_lines, выполненный до транзакции."""
     task = get_task(conn, task_id)
-    if task is not None:
-        recheck_materials_figures(ctx, conn, [task["material_id"]])
+    if task is None:
+        return
+    shared = _Shared(ctx, conn, task["material_id"], prepared)
+    try:
+        recheck_figure(ctx, conn, task_id, shared=shared)
+        for other in shared.confirmed():
+            if other != task_id:
+                recheck_figure(ctx, conn, other, keep_ack=True, shared=shared)
+    finally:
+        shared.close()
 
 
 def recheck_materials_figures(ctx, conn, material_ids) -> None:
@@ -247,9 +342,12 @@ def recheck_materials_figures(ctx, conn, material_ids) -> None:
     утечки включает ответы остальных заданий материала. Решение родителя об ответе в вырезке
     остаётся, если найденное не изменилось."""
     for material_id in sorted(material_ids):
-        ids = conn.execute("SELECT id FROM task_item WHERE material_id = ?", (material_id,))
-        for row in ids.fetchall():
-            recheck_figure(ctx, conn, row["id"], keep_ack=True)
+        shared = _Shared(ctx, conn, material_id)
+        try:
+            for task_id in shared.confirmed():
+                recheck_figure(ctx, conn, task_id, keep_ack=True, shared=shared)
+        finally:
+            shared.close()
 
 
 def candidate_snapshot(conn) -> dict[int, tuple[int, str]]:
