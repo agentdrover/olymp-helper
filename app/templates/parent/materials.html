@@ -23,7 +23,7 @@
   {% for m in materials %}
   <tr>
     <td>{{ m.id }}</td><td>{{ m.kind }}</td><td>{{ m.year or "" }}</td><td>{{ m.variant or "" }}</td>
-    <td>{{ m.import_status }}{% if m.import_error %}: <span class="err">{{ m.import_error }}</span>{% endif %}</td>
+    <td>{{ m.import_status }}{% if m.import_error %}{% if m.import_status == "done" %}<p class="warn-note">{{ m.import_error }}</p>{% else %}: <span class="err">{{ m.import_error }}</span>{% endif %}{% endif %}</td>
     <td>{{ m.tasks }}</td>
   </tr>
   {% endfor %}

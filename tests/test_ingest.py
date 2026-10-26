@@ -491,7 +491,9 @@ def test_section_at_end_is_validated_like_the_task_labels(tmp_path):
         ) as c:
             r = upload(c, text_pdf([["1. текст"]]))
             st = c.get(f"/parent/materials/{r.json()['material_id']}", headers=PARENT).json()
-            assert st["import_status"] == "failed" and "структур" in st["import_error"], bad
+            # A broken section_at_end alone is ignored (T05c): the valid task is kept.
+            assert st["import_status"] == "done" and st["tasks"] == 1, bad
+            assert not st["import_error"], bad
 
 
 def test_a_new_section_does_not_inherit_the_old_variant_and_stage(tmp_path):

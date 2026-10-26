@@ -12,7 +12,12 @@ from app.ingest.figures import PageIndex, crop_leaks, suggest_regions
 from app.ingest.keys import parse_key_text
 from app.ingest.leaks import answer_units, crop_units, is_drawing
 from app.ingest.prompt import SYSTEM_PROMPT, TASKS_SCHEMA, build_chunk_message
-from app.ingest.schema import InvalidStructure, validate_section_at_end, validate_tasks
+from app.ingest.schema import (
+    InvalidStructure,
+    validate_section_at_end,
+    validate_task,
+    validate_tasks,
+)
 from app.ingest.store import open_db, save_snapshot
 from app.ingest.topics import catalog_prompt, load_catalog
 from app.search import index_pages
@@ -141,9 +146,93 @@ def merge_repeat(old: dict, new: dict) -> dict:
     return merged
 
 
-def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
+RETRY_NOTE = "Предыдущий ответ отклонён: {error} Верни ответ строго по схеме."
+MAX_SKIPPED_NOTE = 1000
+
+
+def _reason(exc: InvalidStructure) -> str:
+    return str(exc).partition("): ")[2].rstrip(".") or str(exc)
+
+
+def _span(numbers: list[int]) -> str:
+    first, last = min(numbers), max(numbers)
+    return f"стр. {first}" if first == last else f"стр. {first}–{last}"
+
+
+def _ask(ctx, system: str, message: str, cancel: threading.Event):
+    _check(cancel)
+    result = ctx.model.complete(system, [{"role": "user", "content": message}], TASKS_SCHEMA)
+    _check(cancel)
+    if not getattr(result, "ok", False):
+        raise ImportFailure("Модель не ответила при разборе страниц. Повторите загрузку позже.")
+    return result.json
+
+
+def _validate_chunk(payload, numbers: set[int], catalog) -> tuple[list[dict], dict | None]:
+    return validate_tasks(payload, numbers, catalog), validate_section_at_end(payload)
+
+
+def _salvage(payload, numbers: set[int], catalog, skipped: list[str]):
+    """Ответ не прошёл проверку дважды: годные задания берутся поштучно, негодные - в отчёт."""
+    chunk_span = _span(sorted(numbers))
+    if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
+        try:
+            validate_tasks(payload, numbers, catalog)
+        except InvalidStructure as exc:
+            skipped.append(f"{chunk_span} ({_reason(exc)})")
+        return [], None
+    good = []
+    for i, raw in enumerate(payload["tasks"]):
+        try:
+            good.append(validate_task(raw, i, numbers, catalog))
+        except InvalidStructure as exc:
+            where = chunk_span
+            if isinstance(raw, dict):
+                pages = raw.get("pages")
+                if isinstance(pages, list) and pages and all(isinstance(p, int) for p in pages):
+                    where = _span(pages)
+                if raw.get("number") not in (None, ""):
+                    where = f"задание {raw['number']} на {where}"
+            skipped.append(f"{where} ({_reason(exc)})")
+    if not good:
+        return [], None
+    try:
+        return good, validate_section_at_end(payload)
+    except InvalidStructure:  # заголовок раздела не разобран: состояние не меняется
+        return good, None
+
+
+def _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped):
+    """(задания порции, section_at_end). Неверная структура: одна повторная просьба с текстом
+    ошибки, затем поштучный разбор; порция не валит импорт."""
+    numbers = {n for n, _ in chunk}
+    message = build_chunk_message(chunk, state)
+    payload = _ask(ctx, system, message, cancel)
+    try:
+        return _validate_chunk(payload, numbers, catalog)
+    except InvalidStructure as exc:
+        note = RETRY_NOTE.format(error=str(exc))
+    payload = _ask(ctx, system, f"{message}\n\n{note}", cancel)
+    try:
+        return _validate_chunk(payload, numbers, catalog)
+    except InvalidStructure:
+        return _salvage(payload, numbers, catalog, skipped)
+
+
+def skipped_note(skipped: list[str]) -> str | None:
+    if not skipped:
+        return None
+    text = "Не разобраны: " + "; ".join(skipped)
+    if len(text) > MAX_SKIPPED_NOTE:
+        text = text[: MAX_SKIPPED_NOTE - 1].rstrip() + "…"
+    return text
+
+
+def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None = None):
     """Задания из всех порций. Номера повторяются по разделам: ключ дедупликации - (раздел,
-    номер); состояние раздела (раздел, вариант, этап) переходит между порциями."""
+    номер); состояние раздела (раздел, вариант, этап) переходит между порциями. Не разобранное
+    добавляется в skipped."""
+    skipped = [] if skipped is None else skipped
     seen: dict[tuple, dict] = {}
     state = dict.fromkeys(META)  # состояние на конец предыдущей порции
     conn = open_db(ctx.db_path)
@@ -153,17 +242,7 @@ def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
         conn.close()
     system = SYSTEM_PROMPT + "\n" + catalog_prompt(catalog)
     for chunk in chunk_pages(pages):
-        _check(cancel)
-        message = build_chunk_message(chunk, state)
-        result = ctx.model.complete(system, [{"role": "user", "content": message}], TASKS_SCHEMA)
-        _check(cancel)
-        if not getattr(result, "ok", False):
-            raise ImportFailure("Модель не ответила при разборе страниц. Повторите загрузку позже.")
-        try:
-            parsed = validate_tasks(result.json, {n for n, _ in chunk}, catalog)
-            at_end = validate_section_at_end(result.json)
-        except InvalidStructure as exc:
-            raise ImportFailure(str(exc)) from exc
+        parsed, at_end = _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped)
         for task in parsed:
             state = merge_labels(state, task)
             task.update(state)
@@ -343,7 +422,9 @@ def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
     return len(tasks)
 
 
-def _finish(conn, material_id: int, run_id: str, pages_total: int, write, after=None) -> bool:
+def _finish(
+    conn, material_id: int, run_id: str, pages_total: int, write, after=None, note=None
+) -> bool:
     """Записать результат и status=done одной транзакцией, если запуск run_id ещё running.
     after выполняется в той же транзакции после status=done: его отказ откатывает всё."""
     conn.execute("BEGIN IMMEDIATE")
@@ -356,9 +437,9 @@ def _finish(conn, material_id: int, run_id: str, pages_total: int, write, after=
             return False
         write()
         conn.execute(
-            "UPDATE material SET import_status = 'done', import_error = NULL, pages_total = ? "
+            "UPDATE material SET import_status = 'done', import_error = ?, pages_total = ? "
             "WHERE id = ?",
-            (pages_total, material_id),
+            (note, pages_total, material_id),
         )
         if after is not None:
             after()
@@ -434,15 +515,22 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
 
                 _finish(conn, material_id, run_id, len(pages), write_key, recheck)
             else:
-                tasks = split_tasks(ctx, pages, cancel)
+                skipped: list[str] = []
+                tasks = split_tasks(ctx, pages, cancel, skipped)
+                note = skipped_note(skipped)
                 if not tasks:
-                    raise ImportFailure("Модель не нашла в файле ни одного задания.")
+                    raise ImportFailure(
+                        f"Модель вернула неверную структуру, ни одно задание не принято. {note}"
+                        if note
+                        else "Модель не нашла в файле ни одного задания."
+                    )
                 _finish(
                     conn,
                     material_id,
                     run_id,
                     len(pages),
                     lambda: _write_tasks(conn, material, tasks, pdf),
+                    note=note,
                 )
         except ImportAborted:
             log.info("import %s aborted", material_id)
