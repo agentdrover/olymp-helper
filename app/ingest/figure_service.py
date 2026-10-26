@@ -206,12 +206,14 @@ LEAK_REASON = (
 )
 
 
-def prepare_crop_lines(ctx, conn, material_id: int) -> dict:
+def prepare_crop_lines(ctx, conn, material_id: int | None) -> dict:
     """{задание: (области, строки текста в них)} подтверждённых рисунков материала.
 
     Читает только PDF и не зависит от правки ключа или вариантов, поэтому выполняется ДО
     транзакции: под блокировкой записи остаётся одно сравнение. Если области задания успели
-    измениться, проверка читает их заново."""
+    измениться, проверка читает их заново. У сгенерированного задания материала нет: {}."""
+    if material_id is None:
+        return {}
     tasks = [
         (t, figures.regions_of(f))
         for t in conn.execute("SELECT * FROM task_item WHERE material_id = ?", (material_id,))
@@ -364,7 +366,7 @@ def recheck_material_figures(ctx, conn, task_id: int, prepared: dict | None = No
     другого задания материала, поэтому уже подтверждённые рисунки соседей проходят проверку заново.
     prepared - prepare_crop_lines, выполненный до транзакции."""
     task = get_task(conn, task_id)
-    if task is None:
+    if task is None or task["material_id"] is None:  # сгенерированное: материала и рисунков нет
         return
     shared = _Shared(ctx, conn, task["material_id"], prepared)
     try:

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Новая пачка вопросов{% endblock %}
+{% block content %}
+<h1>Новая пачка вопросов</h1>
+<p class="hint">Модель составит вопросы по теме. Они попадут в ленту проверки черновиками: ребёнок увидит вопрос только после вашего подтверждения.</p>
+{% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
+<form id="generate" method="post" action="/parent/generate">
+  <p><label for="topic">Тема</label><br>
+    <select id="topic" name="topic" required>
+      {% for t in topics %}<option value="{{ t.code }}">{% if t.parent_code %}— {% endif %}{{ t.title }}</option>{% endfor %}
+    </select></p>
+  <p><label for="kind">Тип вопросов</label><br>
+    <select id="kind" name="kind" required>
+      {% for code, title in kinds %}<option value="{{ code }}">{{ title }}</option>{% endfor %}
+    </select></p>
+  <p><label for="count">Сколько вопросов (1–{{ max_count }})</label><br>
+    <input id="count" name="count" type="number" min="1" max="{{ max_count }}" value="5" required></p>
+  <p class="hint" id="external-notice">Условия до 5 подтверждённых заданий выбранной темы отправляются внешней модели (Claude или Cursor) как образцы стиля. Запрос занимает до минуты.</p>
+  <button class="primary">Составить пачку</button>
+</form>
+{% if recent %}
+<h2>Последние пачки</h2>
+<ul>
+  {% for p in recent %}
+  <li><a href="/parent/packs/{{ p.id }}">Пачка {{ p.id }}</a>: {{ titles[p.topic] }}, запрошено {{ p.requested_count }}, принято {{ p.accepted_count }} ({{ p.status }})</li>
+  {% endfor %}
+</ul>
+{% endif %}
+<p><a href="/parent/review">Лента проверки</a> · <a href="/parent/materials">Материалы</a></p>
+{% endblock %}

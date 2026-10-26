@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Пачка {{ pack.id }}{% endblock %}
+{% block content %}
+<h1>Пачка {{ pack.id }}</h1>
+<p>Тема: <b>{{ topic_title }}</b>. Тип: {{ kind_title }}. Запрошено: {{ pack.requested_count }}.</p>
+{% if pack.status == "failed" %}
+<p class="err" role="alert" id="pack-error">Пачка не создана: {{ pack.error }}</p>
+{% elif pack.status == "running" %}
+<p>Модель ещё составляет вопросы. Обновите страницу через минуту.</p>
+{% else %}
+<p id="accepted">Принято в ленту проверки: <b>{{ pack.accepted_count }}</b>.</p>
+{% if pack.accepted_count %}<p><a href="/parent/review">Открыть ленту проверки</a></p>{% endif %}
+{% if rejected %}
+<h2>Отклонено: {{ rejected|length }}</h2>
+<ol id="rejected">
+  {% for r in rejected %}<li value="{{ r.number }}">{{ r.text }} <span class="err">— {{ r.reason }}</span></li>{% endfor %}
+</ol>
+{% endif %}
+{% endif %}
+<p><a href="/parent/generate">Новая пачка</a></p>
+{% endblock %}

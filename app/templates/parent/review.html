@@ -3,6 +3,7 @@
 {% block content %}
 <h1>Проверка заданий <span class="hint" id="counter">{{ counter or "" }}</span></h1>
 <div id="feed">{% include "parent/card.html" %}</div>
+<p><a href="/parent/generate">Составить пачку вопросов</a></p>
 <p class="hint">Enter — верно и подтвердить, → — пропустить, E — поправить.</p>
 <script src="/static/feed.js"></script>
 {% endblock %}

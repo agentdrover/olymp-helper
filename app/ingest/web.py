@@ -2,6 +2,7 @@
 
 import functools
 import hashlib
+import json
 import sqlite3
 from pathlib import Path
 from typing import Annotated
@@ -12,12 +13,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from app.ingest import review
+from app.ingest import packs, review
 from app.ingest.figure_service import confirm_figure
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
 from app.ingest.publish import child_view, is_published
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
+from app.ingest.topics import load_catalog
 from app.roles import (
     COOKIE,
     PARENT,
@@ -207,6 +209,70 @@ def material_page(material_id: int, page: int, request: Request, conn: Db):
 
     return Response(
         ctx.page_cache.get(f"{sha}:{page}:{PAGE_SCALE}", render), media_type="image/png"
+    )
+
+
+# ------------------------------------------------------------------ пачки вопросов
+
+
+def _generate_form(request: Request, conn, error=None, status=200):
+    catalog = load_catalog(conn)
+    recent = conn.execute("SELECT * FROM question_pack ORDER BY id DESC LIMIT 10").fetchall()
+    page = TEMPLATES.TemplateResponse(
+        request,
+        "parent/generate.html",
+        {
+            "topics": list(catalog.values()),
+            "kinds": [(code, title) for code, (_, title) in packs.KINDS.items()],
+            "max_count": packs.MAX_COUNT,
+            "error": error,
+            "recent": recent,
+            "titles": {code: t["title"] for code, t in catalog.items()},
+        },
+    )
+    page.status_code = status
+    return page
+
+
+@parent.get("/parent/generate", response_class=HTMLResponse)
+def generate_page(request: Request, conn: Db):
+    return _generate_form(request, conn)
+
+
+@parent.post("/parent/generate")
+def generate_submit(
+    request: Request,
+    conn: Db,
+    topic: Annotated[str, Form()] = "",
+    kind: Annotated[str, Form()] = "",
+    count: Annotated[str, Form()] = "",
+):
+    try:
+        number = int(count.strip())
+    except ValueError:
+        return _generate_form(request, conn, f"Число вопросов - от 1 до {packs.MAX_COUNT}.", 422)
+    try:
+        pack_id = packs.generate_pack(ctx_of(request), conn, topic.strip(), kind.strip(), number)
+    except packs.PackRefused as exc:
+        return _generate_form(request, conn, str(exc), 422)
+    return RedirectResponse(f"/parent/packs/{pack_id}", status_code=303)
+
+
+@parent.get("/parent/packs/{pack_id}", response_class=HTMLResponse)
+def pack_page(pack_id: int, request: Request, conn: Db):
+    pack = conn.execute("SELECT * FROM question_pack WHERE id = ?", (pack_id,)).fetchone()
+    if pack is None:
+        raise HTTPException(404, "Пачка не найдена")
+    catalog = load_catalog(conn)
+    return TEMPLATES.TemplateResponse(
+        request,
+        "parent/pack.html",
+        {
+            "pack": pack,
+            "topic_title": catalog[pack["topic"]]["title"],
+            "kind_title": packs.KINDS[pack["task_type"]][1],
+            "rejected": json.loads(pack["rejected"]),
+        },
     )
 
 
