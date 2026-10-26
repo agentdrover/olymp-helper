@@ -236,6 +236,7 @@ class EditBody(BaseModel):
     options: list | dict | None = None
     teacher_note: str | None = None
     manual_condition: bool = False
+    topic: str | None = None
 
 
 class KeyBody(BaseModel):
@@ -359,6 +360,7 @@ def task_edit(task_id: int, body: EditBody, request: Request, conn: Db):
         options=body.options,
         teacher_note=body.teacher_note,
         manual_condition=body.manual_condition,
+        topic=body.topic,
     )
 
 

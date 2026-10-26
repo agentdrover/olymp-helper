@@ -14,6 +14,7 @@ from app.ingest.leaks import answer_units, crop_units, is_drawing
 from app.ingest.prompt import SYSTEM_PROMPT, TASKS_SCHEMA, build_chunk_message
 from app.ingest.schema import InvalidStructure, validate_section_at_end, validate_tasks
 from app.ingest.store import open_db, save_snapshot
+from app.ingest.topics import catalog_prompt, load_catalog
 from app.search import index_pages
 
 log = logging.getLogger("app.ingest")
@@ -136,6 +137,7 @@ def merge_repeat(old: dict, new: dict) -> dict:
     if options_differ:
         note = OPTIONS_NOTE
     merged["review_note"] = note
+    merged["topic"] = keep.get("topic") or old.get("topic") or new.get("topic")
     return merged
 
 
@@ -144,17 +146,21 @@ def split_tasks(ctx, pages, cancel: threading.Event) -> list[dict]:
     номер); состояние раздела (раздел, вариант, этап) переходит между порциями."""
     seen: dict[tuple, dict] = {}
     state = dict.fromkeys(META)  # состояние на конец предыдущей порции
+    conn = open_db(ctx.db_path)
+    try:
+        catalog = load_catalog(conn)
+    finally:
+        conn.close()
+    system = SYSTEM_PROMPT + "\n" + catalog_prompt(catalog)
     for chunk in chunk_pages(pages):
         _check(cancel)
         message = build_chunk_message(chunk, state)
-        result = ctx.model.complete(
-            SYSTEM_PROMPT, [{"role": "user", "content": message}], TASKS_SCHEMA
-        )
+        result = ctx.model.complete(system, [{"role": "user", "content": message}], TASKS_SCHEMA)
         _check(cancel)
         if not getattr(result, "ok", False):
             raise ImportFailure("Модель не ответила при разборе страниц. Повторите загрузку позже.")
         try:
-            parsed = validate_tasks(result.json, {n for n, _ in chunk})
+            parsed = validate_tasks(result.json, {n for n, _ in chunk}, catalog)
             at_end = validate_section_at_end(result.json)
         except InvalidStructure as exc:
             raise ImportFailure(str(exc)) from exc

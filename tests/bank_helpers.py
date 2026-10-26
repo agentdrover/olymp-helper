@@ -114,6 +114,7 @@ def make_task(
     section=None,
     variant=None,
     stage=None,
+    topic=None,
 ):
     task = {
         "number": str(number),
@@ -123,7 +124,12 @@ def make_task(
         "pages": list(pages),
         "refers_to_figure": figure,
     }
-    for name, value in (("section", section), ("variant", variant), ("stage", stage)):
+    for name, value in (
+        ("section", section),
+        ("variant", variant),
+        ("stage", stage),
+        ("topic", topic),
+    ):
         if value is not None:
             task[name] = value
     return task
