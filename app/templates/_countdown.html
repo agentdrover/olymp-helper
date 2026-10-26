@@ -1,0 +1,7 @@
+{# Счётчик дней до этапа. Контекст: countdown = exam_countdown(conn, today) или None. #}
+{% if countdown %}
+<div class="stat" id="exam-countdown">
+  <span class="num">{{ countdown.days }}</span>
+  <span class="label">{{ "день" if countdown.days % 10 == 1 and countdown.days % 100 != 11 else "дня" if countdown.days % 10 in (2, 3, 4) and countdown.days // 10 % 10 != 1 else "дней" }} до этапа, {{ countdown.date_label }}</span>
+</div>
+{% endif %}

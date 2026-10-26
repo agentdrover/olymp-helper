@@ -20,14 +20,13 @@
 <div class="today-grid">
   <section class="card" aria-label="Сегодня">
     <div class="kicker">Сегодня</div>
-    <div class="today-num">{{ t.solved_today }}</div>
-    <p>разобрано заданий · подсказок взято: {{ t.hints_today }}</p>
+    <div class="stat"><span class="num">{{ t.solved_today }}</span> <span class="label">разобрано заданий</span></div>
+    <div class="stat"><span class="num">{{ t.hints_today }}</span> <span class="label">подсказок взято</span></div>
   </section>
-  {% if t.countdown is not none %}
+  {% if t.countdown %}
   <section class="card" aria-label="До этапа">
     <div class="kicker">До этапа</div>
-    <div class="today-num">{{ t.countdown }}</div>
-    <p>дней</p>
+    {% with countdown = t.countdown %}{% include "_countdown.html" %}{% endwith %}
   </section>
   {% endif %}
 </div>

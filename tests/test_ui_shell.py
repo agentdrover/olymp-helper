@@ -88,11 +88,18 @@ def test_the_child_shell_never_offers_parent_screens(tmp_path):
 
 
 def test_parent_logout_ends_the_parent_session(tmp_path):
-    with TestClient(build_app(tmp_path, StubModel())) as c:
-        c.post("/parent/login", data={"key": "test-parent-key"}, follow_redirects=False)
+    with TestClient(build_app(tmp_path, StubModel(), parent=False)) as c:
+        c.post(
+            "/parent/setup",
+            data={"key": "test-parent-key", "pin": "2580", "pin2": "2580"},
+            follow_redirects=False,
+        )
         html = {"Accept": "text/html"}
-        assert c.get("/parent/review", headers=html).status_code == 200
-        out = c.post("/parent/logout", follow_redirects=False)
+        page = c.get("/parent/review", headers=html)
+        assert page.status_code == 200
+        token = re.search(r'name="csrf-token" content="([^"]+)"', page.text).group(1)
+        assert c.post("/parent/logout", follow_redirects=False).status_code == 403  # no token
+        out = c.post("/parent/logout", data={"csrf": token}, follow_redirects=False)
         assert out.status_code == 303
         assert out.headers["location"] == "/"
         back = c.get("/parent/review", headers=html, follow_redirects=False)

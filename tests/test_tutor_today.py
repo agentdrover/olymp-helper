@@ -22,3 +22,29 @@ def test_today_lists_progress_and_revisit_order(tmp_path):
         assert "2 из 3 разобрано" in html
         assert "[ИМЯ]" not in html
         assert "До этапа" not in html  # счётчик выключен по умолчанию
+
+
+def test_the_exam_countdown_number_has_the_same_style_as_the_other_numbers(tmp_path):
+    """SPEC 1.3а / OH-T08 AC-10: одна цифра - один размер на экране «Сегодня»."""
+    import re
+    from pathlib import Path
+
+    from tests.bank_helpers import db
+
+    c, clock, _model = boot(tmp_path)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        attempt(c, tid, "Б")
+        conn = db(tmp_path)
+        conn.execute(
+            "UPDATE settings SET show_exam_countdown = 1, stage_date = '2026-11-22' WHERE id = 1"
+        )
+        html = c.get("/today", headers=CHILD).text
+        assert 'id="exam-countdown"' in html and "до этапа, 22 ноября" in html
+        nums = re.findall(r'<div class="stat"[^>]*>\s*<span class="(num[^"]*)"', html)
+        assert len(nums) >= 3 and set(nums) == {"num"}  # разобрано, подсказки, дни до этапа
+        css = Path("app/static/app.css").read_text()
+        assert len(re.findall(r"\.stat \.num \{", css)) == 1 and "today-num" not in css
+        # выключен - счётчика нет
+        conn.execute("UPDATE settings SET show_exam_countdown = 0 WHERE id = 1")
+        assert "exam-countdown" not in c.get("/today", headers=CHILD).text

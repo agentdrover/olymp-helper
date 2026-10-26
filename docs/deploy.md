@@ -25,7 +25,8 @@
 | `OLYMP_TLS_CERT` | app | `/certs/server.pem` в compose | сертификат сервера; задан — приложение слушает HTTPS |
 | `OLYMP_TLS_KEY` | app | `/certs/server.key` в compose | ключ сервера |
 | `WHISPER_BIN`, `WHISPER_MODEL` | app | `/usr/local/bin/whisper-cli`, `/opt/whisper/ggml-small.bin` | заданы в образе, менять не нужно |
-| `OLYMP_PARENT_KEY` | app | нет (родительский доступ закрыт) | ключ входа родителя через `/parent/login` до PIN (OH-T08); cookie `olymp_parent` = HMAC ключа, HttpOnly, SameSite=Strict; передаётся при запуске, значение в compose не пишется; не задан — все родительские маршруты отвечают 403 |
+| `OLYMP_PARENT_KEY` | app | нет (PIN задать нельзя) | ключ первого входа (OH-T08): нужен один раз, чтобы задать PIN родителя на `/parent/login`; после установки PIN ключ ни во что не пускает и не меняет PIN. Сессия родителя - серверная, cookie `olymp_parent` = случайный id (HttpOnly, SameSite=Strict), простой 30 минут; значение ключа в compose не пишется. Забытый PIN: обнулить `settings.parent_pin_hash` в базе и задать заново по ключу |
+| `OLYMP_TZ` | app | пояс сервера | имя пояса IANA для времени «Вход закрыт до ЧЧ:ММ» |
 | `OLYMP_DATA_DIR` | app | каталог базы (`/srv/olymp`) | PDF материалов, PNG рисунков и кэш рендера страниц (лимит кэша 500 МБ) |
 | `EXECUTOR_CLAUDE_URL`, `EXECUTOR_CURSOR_URL` | app | `http://executor-claude:8099`, `http://executor-cursor:8099` | адреса исполнителей, к которым приложение обращается при разборе заданий |
 | `OLYMP_CERT_DIR` | хост | `/srv/olymp-certs` | каталог на хосте с `server.pem` и `server.key`, монтируется в `/certs` только для чтения |

@@ -127,6 +127,8 @@ def child_view(task, material) -> dict:
 
 
 def _source_label(task, material) -> str:
+    if material is None:  # сгенерированное задание: сборника и страницы нет
+        return "составлено помощником, проверено родителем"
     year = material["year"]
     year_text = f"{year}/{str(year + 1)[-2:]}" if year else "без года"
     page = task["page_from"]

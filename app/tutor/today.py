@@ -7,6 +7,7 @@
 import json
 from datetime import date, datetime
 
+from app.exam_countdown import exam_countdown
 from app.ingest.publish import is_published
 from app.model.ledger import moscow_day
 from app.tutor import state
@@ -95,13 +96,7 @@ def build_today(conn, now: datetime) -> dict:
             "keyed": all(t["answer_key"] is not None for t in mine),
         })  # fmt: skip
 
-    settings = conn.execute(
-        "SELECT show_exam_countdown, stage_date FROM settings WHERE id = 1"
-    ).fetchone()
-    countdown = None
-    if settings and settings["show_exam_countdown"] and settings["stage_date"]:
-        left = (date.fromisoformat(settings["stage_date"]) - date.fromisoformat(day)).days
-        countdown = max(left, 0)
+    countdown = exam_countdown(conn, date.fromisoformat(day))
     return {
         "resume": resume,
         "solved_today": len(solved_today),

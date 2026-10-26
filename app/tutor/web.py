@@ -12,6 +12,9 @@ from pydantic import BaseModel
 
 from app.ingest.publish import is_published
 from app.ingest.store import atomic, get_task, open_db
+from app.ingest.web import child_notice_gate
+from app.notice import notice_redirect, notice_seen
+from app.roles import PARENT, current_role
 from app.tutor import state
 from app.tutor.flow import Flow
 from app.tutor.state import Refused
@@ -51,6 +54,12 @@ def _published(conn, task_id: int):
     return task, material
 
 
+def _needs_notice(request: Request, conn) -> bool:
+    """Ребёнок видит задания только после уведомления о внешней модели (SPEC 1.6); родителю оно
+    не нужно. HTML-маршруты отправляют на уведомление, JSON и POST отвечают 403."""
+    return current_role(request) != PARENT and not notice_seen(conn)
+
+
 def _is_fragment(request: Request) -> bool:
     return request.headers.get("hx-request") == "true"
 
@@ -88,7 +97,7 @@ def _flow(request: Request, conn) -> Flow:
 
 def _act(name: str):
     def decorate(fn):
-        @router.post("/tasks/{task_id}/" + name)
+        @router.post("/tasks/{task_id}/" + name, dependencies=[Depends(child_notice_gate)])
         def route(task_id: int, request: Request, conn: Db, body: Body | None = None):
             _published(conn, task_id)
             flow = _flow(request, conn)
@@ -147,7 +156,7 @@ def dispute(flow: Flow, task_id, body, request):
     flow.dispute(task_id)
 
 
-@router.get("/api/tasks/{task_id}/tutor")
+@router.get("/api/tasks/{task_id}/tutor", dependencies=[Depends(child_notice_gate)])
 def tutor_json(task_id: int, request: Request, conn: Db):
     return _respond_json(request, conn, task_id)
 
@@ -165,6 +174,8 @@ def _respond_json(request, conn, task_id):
 @router.get("/tasks/{task_id}/tutor", response_class=HTMLResponse)
 def tutor_fragment(task_id: int, request: Request, conn: Db):
     task, material = _published(conn, task_id)
+    if _needs_notice(request, conn):
+        return notice_redirect(f"/tasks/{task_id}")
     app = request.app
     view = build_view(
         conn, task, material, state.active_run(conn, task), app.state.clock(),
@@ -178,6 +189,8 @@ def tutor_fragment(task_id: int, request: Request, conn: Db):
 @router.get("/tasks/{task_id}", response_class=HTMLResponse)
 def task_page(task_id: int, request: Request, conn: Db):
     task, material = _published(conn, task_id)
+    if _needs_notice(request, conn):
+        return notice_redirect(f"/tasks/{task_id}")
     app = request.app
     with atomic(conn):  # экран открыт: с этого момента идут 60 секунд до подсказки 1
         state.ensure_run(conn, task_id, app.state.clock())
@@ -190,5 +203,7 @@ def task_page(task_id: int, request: Request, conn: Db):
 
 @router.get("/today", response_class=HTMLResponse)
 def today_page(request: Request, conn: Db):
+    if _needs_notice(request, conn):
+        return notice_redirect("/today")
     data = build_today(conn, request.app.state.clock())
     return TEMPLATES.TemplateResponse(request, "child/today.html", {"t": data})

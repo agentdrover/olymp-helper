@@ -111,11 +111,11 @@ class Blocking(Scripted):
         return super().complete(*a, **kw)
 
 
-def boot(tmp_path, model=None, clock=None):
+def boot(tmp_path, model=None, clock=None, notice=True):
     """(client, clock, model); the caller uses it as a context manager."""
     clock = clock or Clock()
     model = model if model is not None else Scripted()
-    app = build_app(tmp_path, model, clock=clock)
+    app = build_app(tmp_path, model, clock=clock, notice=notice)
     client = TestClient(app)
     client.__enter__()
     return client, clock, model

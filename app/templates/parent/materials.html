@@ -4,6 +4,7 @@
 <h1>Материалы и модель</h1>
 <h2>Материалы</h2>
 <form id="upload" class="card" method="post" action="/parent/materials" enctype="multipart/form-data">
+  <input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
   <p><input type="file" name="file" aria-label="PDF-файл" accept="application/pdf" required></p>
   <p>
     <select name="kind" aria-label="Что это за файл">
@@ -19,13 +20,15 @@
   <span class="hint">До 50 МБ и 400 страниц. Импорт идёт в фоне, статус виден ниже.</span>
 </form>
 <div class="panel"><table>
-  <thead><tr><th scope="col">№</th><th scope="col">Тип</th><th scope="col">Год</th><th scope="col">Вариант</th><th scope="col">Статус</th><th scope="col">Заданий</th></tr></thead>
+  <thead><tr><th scope="col">№</th><th scope="col">Тип</th><th scope="col">Год</th><th scope="col">Вариант</th><th scope="col">Статус</th><th scope="col">Заданий</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
   {% for m in materials %}
   <tr>
     <td>{{ m.id }}</td><td>{{ m.kind }}</td><td>{{ m.year or "" }}</td><td>{{ m.variant or "" }}</td>
-    <td>{{ m.import_status }}{% if m.import_error %}: <span class="err">{{ m.import_error }}</span>{% endif %}</td>
+    <td>{% if m.deleted_at %}файл удалён{% else %}{{ m.import_status }}{% endif %}{% if m.import_error %}: <span class="err">{{ m.import_error }}</span>{% endif %}</td>
     <td>{{ m.tasks }}</td>
+    <td>{% if m.import_status not in ("queued", "running") %}<a href="/parent/materials/{{ m.id }}/delete">Удалить</a>{% endif %}</td>
   </tr>
   {% endfor %}
 </table></div>
+<p><a href="/parent/review">Лента проверки</a> · <a href="/parent/generate">Составить пачку вопросов</a></p>
 {% endblock %}
