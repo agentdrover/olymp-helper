@@ -30,6 +30,16 @@ PUBLIC = {
     ("GET", "/api/tasks"),
     ("GET", "/api/tasks/{task_id}"),
     ("GET", "/api/search"),
+    # разбор задания (OH-T06): все за уведомлением о внешней модели, см. test_tutor_notice.py
+    ("GET", "/today"),
+    ("GET", "/tasks/{task_id}/tutor"),
+    ("GET", "/api/tasks/{task_id}/tutor"),
+    ("POST", "/tasks/{task_id}/attempt"),
+    ("POST", "/tasks/{task_id}/hint"),
+    ("POST", "/tasks/{task_id}/explain"),
+    ("POST", "/tasks/{task_id}/show-answer"),
+    ("POST", "/tasks/{task_id}/repeat"),
+    ("POST", "/tasks/{task_id}/dispute"),
 }
 FRAMEWORK = {"/static"}  # the API description is switched off: no /docs, /redoc, /openapi.json
 

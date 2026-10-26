@@ -19,6 +19,8 @@ from app.ingest.render import PageCache
 from app.ingest.web import parent as parent_router
 from app.ingest.web import public as public_router
 from app.sessions import utcnow
+from app.tutor.panel import Inflight
+from app.tutor.web import router as tutor_router
 
 DEFAULT_DB_PATH = "/srv/olymp/olymp.db"
 INTERRUPTED = "прервано перезапуском"
@@ -96,6 +98,9 @@ def create_app(
     )
     app.state.clock = clock
     app.state.model = model or ExecutorModel(path)
+    # Часы одни на всё приложение (clock выше): тест подменяет их, и 60 секунд до подсказки,
+    # простой занятия и сессия родителя идут по одному времени.
+    app.state.inflight = Inflight()
     ctx = AppContext(path, data, app.state, PageCache(data / "cache" / "pages"))
     app.state.ctx = ctx
     app.state.page_cache = ctx.page_cache
@@ -104,6 +109,7 @@ def create_app(
     app.include_router(account_parent)
     app.include_router(account_public)
     app.include_router(parent_router)
+    app.include_router(tutor_router)
     app.include_router(public_router)
 
     @app.get("/healthz")

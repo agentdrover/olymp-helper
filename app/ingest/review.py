@@ -17,6 +17,7 @@ from app.ingest.store import (
     update_task,
 )
 from app.ingest.topics import load_catalog
+from app.tutor.state import discrepancies
 
 LABELS = {
     "no_key": "ключа нет",
@@ -260,6 +261,9 @@ def resolve(ctx, conn, task_id: int, choice: str, answer=None) -> None:
         raise Refusal("Выберите «ключ прав» или «мой ответ».")
     if seen is not None:
         update_task(conn, task_id, discrepancy_ack=json.dumps(seen, ensure_ascii=False))
+    from app.tutor.state import resolve_discrepancies  # T06: расхождения из разбора
+
+    resolve_discrepancies(conn, task_id)
 
 
 def retry_model(ctx, conn, task_id: int) -> bool:
@@ -417,6 +421,7 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         if not task["model_answer"]
         else json.loads(task["model_answer"])["answer"],
         "figure": figure_of(task),
+        "model_discrepancies": discrepancies(conn, task_id),
         "publication": publication(task),
         "card": card,
     }
