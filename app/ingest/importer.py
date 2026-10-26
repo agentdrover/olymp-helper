@@ -14,6 +14,7 @@ from app.ingest.leaks import answer_units, crop_units, is_drawing
 from app.ingest.prompt import SYSTEM_PROMPT, TASKS_SCHEMA, build_chunk_message
 from app.ingest.schema import (
     InvalidStructure,
+    _label,
     validate_section_at_end,
     validate_task,
     validate_tasks,
@@ -172,6 +173,18 @@ def _validate_chunk(payload, numbers: set[int], catalog) -> tuple[list[dict], di
     return validate_tasks(payload, numbers, catalog), validate_section_at_end(payload)
 
 
+def _labels_only(raw) -> dict:
+    """Отклонённое задание всё равно переключает раздел, вариант и этап: каждое поле отдельно,
+    негодное поле игнорируется."""
+    out: dict = {"labels_only": True}
+    for name, limit in (("section", 120), ("variant", 20), ("stage", 60)):
+        try:
+            out[name] = _label(raw.get(name) if isinstance(raw, dict) else None, "", name, limit)
+        except InvalidStructure:
+            out[name] = None
+    return out
+
+
 def _salvage(payload, numbers: set[int], catalog, skipped: list[str]):
     """Ответ не прошёл проверку дважды: годные задания берутся поштучно, негодные - в отчёт."""
     chunk_span = _span(sorted(numbers))
@@ -186,6 +199,7 @@ def _salvage(payload, numbers: set[int], catalog, skipped: list[str]):
         try:
             good.append(validate_task(raw, i, numbers, catalog))
         except InvalidStructure as exc:
+            good.append(_labels_only(raw))
             where = chunk_span
             if isinstance(raw, dict):
                 pages = raw.get("pages")
@@ -194,8 +208,8 @@ def _salvage(payload, numbers: set[int], catalog, skipped: list[str]):
                 if raw.get("number") not in (None, ""):
                     where = f"задание {raw['number']} на {where}"
             skipped.append(f"{where} ({_reason(exc)})")
-    if not good:
-        return [], None
+    if not any("labels_only" not in t for t in good):
+        return [t for t in good if "labels_only" in t], None
     try:
         return good, validate_section_at_end(payload)
     except InvalidStructure:  # заголовок раздела не разобран: состояние не меняется
@@ -211,7 +225,7 @@ def _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped):
     try:
         return _validate_chunk(payload, numbers, catalog)
     except InvalidStructure as exc:
-        note = RETRY_NOTE.format(error=str(exc))
+        note = RETRY_NOTE.format(error=exc.safe)
     payload = _ask(ctx, system, f"{message}\n\n{note}", cancel)
     try:
         return _validate_chunk(payload, numbers, catalog)
@@ -245,6 +259,8 @@ def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None =
         parsed, at_end = _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped)
         for task in parsed:
             state = merge_labels(state, task)
+            if task.get("labels_only"):
+                continue
             task.update(state)
             key = (task["section"], task["number"])
             seen[key] = merge_repeat(seen[key], task) if key in seen else task

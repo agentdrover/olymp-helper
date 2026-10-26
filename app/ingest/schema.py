@@ -13,11 +13,20 @@ NUMBER = re.compile(r"^\d{1,4}(\.\d{1,3})?[A-Za-zА-Яа-я]?$")
 
 
 class InvalidStructure(Exception):
-    """Ответ модели не соответствует схеме; текст читает родитель."""
+    """Ответ модели не соответствует схеме; текст читает родитель. safe - то же без единого
+    значения из ответа модели: только он годится для повторной просьбы модели."""
+
+    def __init__(self, message: str, safe: str | None = None):
+        super().__init__(message)
+        self.safe = safe or message
 
 
-def _fail(where: str, what: str):
-    raise InvalidStructure(f"Модель вернула неверную структуру ({where}): {what}.")
+def _fail(where: str, what: str, safe: str | None = None):
+    """safe - фиксированная формулировка категории, если what содержит значение из ответа."""
+    raise InvalidStructure(
+        f"Модель вернула неверную структуру ({where}): {what}.",
+        f"Модель вернула неверную структуру ({where}): {safe or what}.",
+    )
 
 
 def _option_list(value, where: str, minimum: int) -> list[dict]:
@@ -31,9 +40,9 @@ def _option_list(value, where: str, minimum: int) -> list[dict]:
         if not isinstance(label, str) or not label.strip():
             _fail(where, "у варианта нет обозначения")
         if not isinstance(text, str) or not text.strip():
-            _fail(where, f"у варианта {label} нет текста")
+            _fail(where, f"у варианта {label} нет текста", "у варианта нет текста")
         if label in labels:
-            _fail(where, f"обозначение {label} повторяется")
+            _fail(where, f"обозначение {label} повторяется", "обозначение варианта повторяется")
         labels.add(label)
         out.append({"label": label.strip(), "text": text.strip()})
     return out
@@ -92,7 +101,7 @@ def validate_task(raw, i: int, pages: set[int], catalog=()) -> dict:
         _fail(where, "ожидался объект")
     kind = raw.get("type")
     if kind not in TYPES:
-        _fail(where, f"неизвестный тип {kind!r}")
+        _fail(where, f"неизвестный тип {kind!r}", "неизвестный тип задания")
     number = raw.get("number")
     if isinstance(number, int) and not isinstance(number, bool):
         number = str(number)
