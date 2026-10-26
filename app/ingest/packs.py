@@ -245,7 +245,10 @@ def check_item(raw, kind: str) -> dict:
     _check_labels(options)
     if bank_type in ("single", "multiple"):
         size = len(options)
-        if kind == "truefalse" and {_fold(o["text"]) for o in options} != {"верно", "неверно"}:
+        if kind == "truefalse" and sorted(_fold(o["text"]) for o in options) != [
+            "верно",
+            "неверно",
+        ]:
             _fail("для «верно / неверно» нужны ровно варианты «Верно» и «Неверно»")
         if kind != "truefalse" and not 3 <= size <= 8:
             _fail("вариантов должно быть от 3 до 8")
