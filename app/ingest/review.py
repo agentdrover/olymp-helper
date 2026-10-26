@@ -144,12 +144,15 @@ def edit_task(
         if text is not None:
             if not str(text).strip():
                 raise Refusal("Условие не может быть пустым.")
-            cols["text"] = str(text).strip()
+            if str(text).strip() != task["text"]:  # то же условие - не правка, ревизии нет
+                cols["text"] = str(text).strip()
         if options is not None:
             try:
-                cols["options"] = check_options(task["type"], options)
+                checked_options = check_options(task["type"], options)
             except InvalidStructure as exc:
                 raise Refusal(str(exc)) from exc
+            if checked_options != options_of(task):
+                cols["options"] = checked_options
         figure = figure_of(task)
         if teacher_note is not None:
             if figure is None:

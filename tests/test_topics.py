@@ -111,3 +111,36 @@ def test_the_catalog_migration(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO topic (code, title, parent_code) VALUES ('x.y', 'T', 'nope')")
     conn.close()
+
+
+def test_a_topic_change_with_the_unchanged_text_makes_no_revision(tmp_path):
+    c, _model, (tid,) = run(tmp_path, [IN_CATALOG])
+    with c:
+        c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={})
+        before = row(tmp_path, tid)
+        assert before["import_status"] == "checked" and before["model_answer"] is not None
+        assert len(json.loads(c.get("/api/tasks", headers=CHILD).text)["tasks"]) == 1
+
+        # the payload the review card sends: the text as it is, a new topic
+        payload = {"text": before["text"], "manual_condition": False, "topic": "gen.heredity"}
+        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json=payload)
+        assert r.status_code == 200, r.text
+        after = row(tmp_path, tid)
+        assert after["topic"] == "gen.heredity"
+        assert after["revision"] == before["revision"]
+        assert after["import_status"] == "checked"
+        assert after["model_answer"] == before["model_answer"]
+        assert len(json.loads(c.get("/api/tasks", headers=CHILD).text)["tasks"]) == 1
+
+
+def test_a_real_text_change_still_makes_a_revision(tmp_path):
+    c, _model, (tid,) = run(tmp_path, [IN_CATALOG])
+    with c:
+        c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={})
+        before = row(tmp_path, tid)
+        payload = {"text": "Совсем другое условие", "topic": "gen.heredity"}
+        assert c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json=payload).status_code == 200
+        after = row(tmp_path, tid)
+        assert after["revision"] == before["revision"] + 1
+        assert after["import_status"] == "draft" and after["model_answer"] is None
+        assert c.get("/api/tasks", headers=CHILD).json()["tasks"] == []

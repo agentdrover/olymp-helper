@@ -53,9 +53,19 @@
       no_answer_ack: checked("no_answer_ack"), teacher_note_ack: checked("teacher_note_ack"),
       leak_ack: checked("leak_ack"),
     }).then((d) => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter, reason: d.reason })),
-    "save-edit": () => post("edit", { text: val("edit-text"), manual_condition: checked("manual"), topic: val("edit-topic") })
+    "save-edit": () => post("edit", changedEdit())
       .then(() => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter })),
   };
+
+  // Только изменённые поля: неизменённое условие не должно создавать ревизию.
+  function changedEdit() {
+    const body = { manual_condition: checked("manual") };
+    const t = document.getElementById("edit-text");
+    if (t && t.value !== t.defaultValue) body.text = t.value;
+    const s = document.getElementById("edit-topic");
+    if (s && s.value !== (Array.from(s.options).find((o) => o.defaultSelected) || s.options[0]).value) body.topic = s.value;
+    return body;
+  }
 
   function toggleEdit() {
     const p = document.getElementById("edit-panel");
