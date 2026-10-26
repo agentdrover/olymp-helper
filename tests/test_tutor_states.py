@@ -44,13 +44,15 @@ def test_ac21(tmp_path):
         )
         panel = view(c, tid)["panel"]
         assert panel["state"] == "second_channel" and "пробую второй" in panel["text"]
-        # проверка по ключу работает, пока модель думает
-        solved = attempt(c, tid, "Б")
-        assert solved.status_code == 200 and solved.json()["state"] == "solved"
+        # пока модель думает, новая попытка не записывается (иначе её разбор пропадёт): «думаю…»
+        busy = attempt(c, tid, "Б")
+        assert busy.status_code == 200 and busy.json()["panel"]["state"] == "thinking"
+        assert busy.json()["attempts"] == 1 and busy.json()["state"] == "attempted_wrong"
         model.release.set()
         t.join(10)
         assert first["r"].status_code == 200
         assert view(c, tid)["panel"]["state"] == "idle"
+        assert attempt(c, tid, "Б").json()["state"] == "solved"  # проверка по ключу работает
 
     # 2. канал упал
     down = Scripted(

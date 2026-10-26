@@ -7,8 +7,7 @@ from app.db import connect, migrate
 from app.model.service import LIMIT_MESSAGE, ModelService
 from app.model.types import ModelResult
 from app.tutor.guard import GENERIC
-from tests.bank_helpers import db
-from tests.tutor_helpers import Judged, attempt, boot, events, out, post, seed, view
+from tests.tutor_helpers import Blocking, Judged, attempt, boot, events, out, post, seed, view
 
 OPTS = [
     {"label": "А", "text": "белок мембраны"},
@@ -81,7 +80,9 @@ def test_every_codex_leak_is_replaced_by_the_generic_hint(tmp_path):
 def test_innocent_hints_pass_when_the_judge_says_no(tmp_path):
     for i, text in enumerate(INNOCENT):
         hint, model = run_hint(
-            tmp_path / f"i{i}", text, lambda content: {"reveals": False, "reason": ""}
+            tmp_path / f"i{i}",
+            text,
+            lambda content: {"reveals": False, "reason": "нет признаков ответа"},
         )
         assert text in json.dumps(hint["hints_list"][0]["html"], ensure_ascii=False), text
         assert len(judged(model, text)) == 1
@@ -89,7 +90,7 @@ def test_innocent_hints_pass_when_the_judge_says_no(tmp_path):
 
 def test_judge_is_the_other_channel_and_sees_the_answer_and_the_note(tmp_path):
     model = Judged(
-        judge=lambda content: {"reveals": False, "reason": ""},
+        judge=lambda content: {"reveals": False, "reason": "нет признаков ответа"},
         reply=generation("Посмотри на рисунок внимательно.", "5"),
     )
     c, _clock, _m = boot(tmp_path, model)
@@ -158,7 +159,7 @@ def test_two_rejections_give_the_generic_hint_and_spend_the_step(tmp_path):
 def test_prefilter_rejection_also_regenerates_once(tmp_path):
     texts = iter(["Выбирай b", "Вспомни, где клетка берёт энергию."])
     model = Judged(
-        judge=lambda content: {"reveals": False, "reason": ""},
+        judge=lambda content: {"reveals": False, "reason": "нет признаков ответа"},
         reply=lambda k, c: out("Б", CALM if k == "mistake" else next(texts)),
     )
     c, _clock, _m = boot(tmp_path, model)
@@ -173,28 +174,6 @@ def test_prefilter_rejection_also_regenerates_once(tmp_path):
 
 CALM = "Посмотри на условие ещё раз."
 SUBTLE = "Подумай про митохондрию клетки"  # цельный текст верного варианта режет и фильтр
-STRICT_ONLY = "Подумай про углевод и клеточное дыхание в митохондриях"
-
-
-def test_judge_unavailable_falls_back_to_the_strict_filter(tmp_path):
-    cases = {
-        "none": lambda content: None,
-        "bad json": lambda content: {"reveals": "maybe"},
-        "failure": lambda content: ModelResult.failure("cursor", "stub", "executor_unreachable"),
-    }
-    for name, judge in cases.items():
-        hint, _model = run_hint(tmp_path / name, STRICT_ONLY, judge, key="Б")
-        html = hint["hints_list"][0]["html"]
-        assert GENERIC["hint1"] in html, name  # строгий фильтр: слово «митохондр» верного варианта
-        assert events(tmp_path / name, "hint")[0]["data"]["rejected_by"].startswith("strict")
-    # судья доступен и говорит «нет»: тот же текст проходит (строгий фильтр лишь запасной путь)
-    hint, _ = run_hint(
-        tmp_path / "ok", STRICT_ONLY, lambda content: {"reveals": False, "reason": ""}, key="Б"
-    )
-    assert STRICT_ONLY in hint["hints_list"][0]["html"]
-    # и безобидный текст при недоступном судье не заменяется
-    hint, _ = run_hint(tmp_path / "calm", INNOCENT[0], lambda content: None, key="Б")
-    assert INNOCENT[0] in hint["hints_list"][0]["html"]
 
 
 def test_judge_and_generation_hold_one_request_in_flight(tmp_path):
@@ -203,10 +182,13 @@ def test_judge_and_generation_hold_one_request_in_flight(tmp_path):
 
     def judge(content):
         if Judged().candidate(content) != "Перечитай условие внимательно.":
-            return {"reveals": False, "reason": ""}  # разбор ошибки не задерживаем
+            return {
+                "reveals": False,
+                "reason": "нет признаков ответа",
+            }  # разбор ошибки не задерживаем
         entered.set()
         gate.wait(10)
-        return {"reveals": False, "reason": ""}
+        return {"reveals": False, "reason": "нет признаков ответа"}
 
     model = Judged(judge=judge, reply=generation("Перечитай условие внимательно."))
     c, _clock, _m = boot(tmp_path, model)
@@ -244,7 +226,12 @@ def test_judge_runs_count_toward_the_daily_limit_on_the_named_channel(tmp_path):
         def complete(self, system, messages, schema=None, *, model=None):
             seen.append(self.name)
             return ModelResult(
-                "{}", {"reveals": False, "reason": ""}, self.name, model or "", 5, None
+                "{}",
+                {"reveals": False, "reason": "нет признаков ответа"},
+                self.name,
+                model or "",
+                5,
+                None,
             )
 
     svc = ModelService(conn, {"claude": Channel("claude"), "cursor": Channel("cursor")})
@@ -255,15 +242,6 @@ def test_judge_runs_count_toward_the_daily_limit_on_the_named_channel(tmp_path):
     assert limited.error_kind == "limit" and limited.error == LIMIT_MESSAGE
     assert seen == ["cursor", "cursor"]  # запасной канал судье не подставляется
     assert conn.execute("SELECT COUNT(*) FROM model_run").fetchone()[0] == 2
-
-
-def test_limit_on_the_judge_degrades_to_the_strict_filter(tmp_path):
-    def judge(content):
-        return ModelResult.failure("cursor", "stub", "limit", message=LIMIT_MESSAGE)
-
-    hint, _ = run_hint(tmp_path, STRICT_ONLY, judge, key="Б")
-    assert GENERIC["hint1"] in hint["hints_list"][0]["html"]
-    assert db(tmp_path).execute("SELECT COUNT(*) FROM tutor_run").fetchone()[0] == 1
 
 
 def test_a_failing_judge_channel_is_not_replaced_by_the_other_one(tmp_path):
@@ -303,3 +281,108 @@ def test_without_a_key_the_judge_also_checks_explanations_for_correctness_claims
         c["content"].startswith("Режим: judge") and "Утверждает ли" in c["content"]
         for c in model.judge_calls
     )
+
+
+DOWN = {
+    "timeout": lambda content: None,
+    "bad json": lambda content: {"reveals": "maybe"},
+    "no reason": lambda content: {"reveals": False},
+    "failure": lambda content: ModelResult.failure("cursor", "stub", "executor_unreachable"),
+    "limit": lambda content: ModelResult.failure("cursor", "stub", "limit", message=LIMIT_MESSAGE),
+}
+
+
+def test_judge_unavailable_shows_the_generic_hint_never_model_text(tmp_path):
+    """No judge, no model text before the solution: leaks that need a judge must not get through."""
+    for name, judge in DOWN.items():
+        for i, text in enumerate(
+            ["Тебе нужен второй вариант", "Это не А и не В, и не Г", INNOCENT[1]]
+        ):
+            base = tmp_path / f"{name}{i}".replace(" ", "")
+            hint, _model = run_hint(base, text, judge, key="Б")
+            html = hint["hints_list"][0]["html"]
+            assert GENERIC["hint1"] in html and text not in html, (name, text)
+            assert hint["hints"] == 1  # шаг лестницы потрачен
+            assert events(base, "hint")[0]["data"]["rejected_by"] == "judge_unavailable", name
+    # судья на месте и говорит «нет» - тот же безобидный текст показывается
+    hint, _ = run_hint(
+        tmp_path / "up", INNOCENT[1], lambda content: {"reveals": False, "reason": "нет"}
+    )
+    assert INNOCENT[1] in hint["hints_list"][0]["html"]
+
+
+def test_judge_unavailable_does_not_regenerate(tmp_path):
+    _hint, model = run_hint(tmp_path, INNOCENT[1], DOWN["timeout"])
+    assert model.kinds().count("hint1") == 1  # перегенерация без судьи бессмысленна
+
+
+def test_a_verdict_without_a_reason_is_invalid():
+    import pytest
+
+    from app.tutor.prompts import ModelOutputError, parse_verdict
+
+    assert parse_verdict({"reveals": False, "reason": "нет признаков"}) == (False, "нет признаков")
+    for bad in ({"reveals": False}, {"reveals": True, "reason": ""}, {"reveals": False, "reason": 3},
+                {"reason": "x"}, {"reveals": "no", "reason": "x"}, "[]"):  # fmt: skip
+        with pytest.raises(ModelOutputError):
+            parse_verdict(bad)
+
+
+def test_judge_sees_what_the_child_was_already_told(tmp_path):
+    """«Исключи А и В», затем «Исключи Г»: по отдельности безобидно, вместе называют Б."""
+    said = iter(["Исключи А и В", "Исключи Г"])
+
+    def judge(content):
+        seen = content.split("<shown_data>\n", 1)[1].split("\n</shown_data>", 1)[0]
+        text = Judged().candidate(content)
+        both = "Исключи А и В" in seen and "Исключи Г" in text
+        return {"reveals": both, "reason": "вместе остаётся один вариант"}
+
+    model = Judged(
+        judge=judge,
+        reply=lambda kind, content: out("Б", CALM if kind == "mistake" else next(said)),
+    )
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        first = post(c, tid, "hint", level=1).json()
+        second = post(c, tid, "hint", level=2).json()
+    assert "Исключи А и В" in first["hints_list"][0]["html"]
+    assert GENERIC["hint2"] in second["hints_list"][1]["html"]
+    assert "Исключи Г" not in json.dumps(second, ensure_ascii=False)
+    request = judged(model, "Исключи Г")[0]
+    assert "Попытка 1: ответ А" in request["content"]  # и попытки ребёнка тоже в блоке
+
+
+def test_a_busy_attempt_is_not_committed_and_the_analysis_is_not_lost(tmp_path):
+    model = Blocking(reply=lambda kind, content: out("Б", "Посмотри на условие ещё раз."))
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        first = {}
+        thread = threading.Thread(target=lambda: first.update(r=attempt(c, tid, "А")), daemon=True)
+        thread.start()
+        assert model.entered.wait(10)  # разбор первой ошибки в работе
+        second = attempt(c, tid, "Б").json()
+        assert second["panel"]["state"] == "thinking"
+        assert second["attempts"] == 1 and second["state"] == "attempted_wrong"
+        assert len(events(tmp_path, "attempt")) == 1  # вторая попытка не записана
+        model.release.set()
+        thread.join(10)
+        done = view(c, tid)
+        assert done["analysis"] and "условие" in done["analysis"]  # разбор первой дошёл
+        assert attempt(c, tid, "Б").json()["state"] == "solved"  # ребёнок отправил снова
+        assert len(events(tmp_path, "attempt")) == 2
+
+
+def test_without_a_key_an_unavailable_judge_withholds_the_explanation(tmp_path):
+    model = Judged(
+        judge=DOWN["timeout"], reply=lambda kind, content: out("Б", "Это важный механизм.")
+    )
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key=None, model_answer="Б", options=OPTS, text=COND)
+        attempt(c, tid, "Б")
+        got = post(c, tid, "explain", mode="simpler").json()
+    assert got["explains"] == [] and "не получилось" in got["notice"]

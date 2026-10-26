@@ -19,6 +19,8 @@ CREATE TABLE tutor_run (
     last_answer TEXT,
     last_confidence TEXT CHECK (last_confidence IS NULL OR last_confidence IN ('sure', 'doubt')),
     hints_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(hints_json)),
+    -- Всё, что модель уже показала ребёнку по заданию (текстом): судья оценивает новый текст вместе с ним.
+    shown_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(shown_json)),
     analysis_json TEXT CHECK (analysis_json IS NULL OR json_valid(analysis_json)),
     explains_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(explains_json)),
     solution_json TEXT CHECK (solution_json IS NULL OR json_valid(solution_json)),

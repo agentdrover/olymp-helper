@@ -275,6 +275,23 @@ def begin_hint(conn, task_id: int, level, confirm: bool, now: datetime):
     return run
 
 
+def _plain(html: str) -> str:
+    import re
+
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
+
+
+def _remember(conn, run_id: int, html: str) -> None:
+    """Показанный ребёнку текст модели - в память прогона (читает судья)."""
+    run = get_run(conn, run_id)
+    seen = json.loads(run["shown_json"])
+    seen.append(_plain(html))
+    conn.execute(
+        "UPDATE tutor_run SET shown_json = ? WHERE id = ?",
+        (json.dumps(seen, ensure_ascii=False), run_id),
+    )
+
+
 def store_hint(
     conn, run_id: int, level: int, html: str, generic: bool, uncertainty: str, now, reason=None
 ):
@@ -289,6 +306,7 @@ def store_hint(
             "UPDATE tutor_run SET hints = ?, state = ?, hints_json = ? WHERE id = ?",
             (level, f"hint{level}", json.dumps(hints, ensure_ascii=False), run_id),
         )
+        _remember(conn, run_id, html)
         add_event(conn, now, "hint", run["task_item_id"], {
             "level": level, "generic": generic, "rejected_by": reason, "uncertainty": uncertainty,
             "text": html,
@@ -397,6 +415,7 @@ def store_analysis(
         run = get_run(conn, run_id)
         if is_terminal(run) or run["attempts"] != attempts:
             return
+        _remember(conn, run_id, html)
         update_run_json(
             conn, run_id, "analysis_json",
             {"html": html, "generic": generic, "rejected_by": reason, "uncertainty": uncertainty},

@@ -2,11 +2,10 @@
 
 1. Разметка: всё, что похоже на HTML, вырезается, остальное экранируется; из Markdown
    разрешены только абзацы, списки, **жирный**, *курсив* и `код`. Ссылки и картинки - в текст.
-2. Верный вариант (до открытия решения): текст модели ОТКЛОНЯЕТСЯ и заменяется общей подсказкой,
-   если он содержит ЛЮБОЙ признак ответа: обозначение верного варианта как отдельное слово,
-   значимое слово его текста (которого нет в условии), число эталона цифрами или словами,
-   слова «верн*/правильн*/ответ*» рядом с обозначением или словом варианта. Это не список
-   формулировок, а закрытие по составу слов: проходит только текст без таких признаков.
+2. Верный вариант (до открытия решения): очевидное режет дешёвый фильтр `prefilter_reason`
+   (обозначение в контексте обозначения, число эталона, точный текст верного варианта);
+   синонимы, порядок и исключение ловит независимый судья (flow.py). Без судьи текст модели
+   до решения не показывается вовсе.
 3. teacher_note: ни его фразы, ни пары «обозначение + слово» ребёнку не показываются никогда.
 4. Без ключа в решении и «объясни иначе» предложения с «верно/правильно/правильный» вырезаются:
    ответ модели не проверен, утверждать его верность нельзя.
@@ -94,8 +93,6 @@ def plain(text: str) -> str:
 
 _TOKENS = re.compile(r"[0-9a-zа-я]+")
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
-CUES = ("верн", "правильн", "ответ")
-CUE_RANGE = 3
 
 _UNITS = ["ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять"]
 _TEENS = ["десять", "одиннадцать", "двенадцать", "тринадцать", "четырнадцать", "пятнадцать",
@@ -155,10 +152,6 @@ def _is_word(tok: str) -> bool:
 
 def _label(raw: str) -> str | None:
     return normalize_answer(raw, "single")
-
-
-def _label_of_token(tok: str) -> str | None:
-    return _label(tok) if len(tok) <= 2 else None
 
 
 def _options_flat(options) -> list[dict]:
@@ -311,62 +304,6 @@ def label_positions(text: str, all_labels: set[str]) -> list[tuple[int, frozense
     return sorted((i, frozenset(c)) for i, c in found.items())
 
 
-def answer_reason(
-    text: str, task_type: str, options, reference, condition: str = "", own=()
-) -> str | None:
-    """Почему текст нельзя показывать до открытия решения; None - признаков ответа нет."""
-    toks = tokens_of(text)
-    if not toks:
-        return None
-    items = _options_flat(options)
-    all_labels = {x for o in items if (x := _label(o["label"]))}
-    own = set(own)
-    correct = {x for v in _flat(reference) if (x := _label(v))} if task_type != "numeric" else set()
-    # 1. обозначение верного варианта, употреблённое как обозначение
-    text = fold_numerals(text)
-    marks = label_positions(text, all_labels)
-    if any(labs & correct for _, labs in marks):
-        return "label"
-    # 2. значимые слова текста верного варианта: их нет в условии и не у всех вариантов
-    cond = {_stem(t) for t in tokens_of(condition) if _is_word(t)}
-    per_option = [{_stem(t) for t in tokens_of(o["text"]) if _is_word(t)} for o in items]
-    common = set.intersection(*per_option) if per_option else set()
-    banned: set[str] = set()
-    for o in items:
-        if _label(o["label"]) in correct:
-            banned |= {_stem(t) for t in tokens_of(o["text"]) if _is_word(t)}
-    banned -= cond | common
-    if banned & {_stem(t) for t in toks if _is_word(t)}:
-        return "option_word"
-    # 3. число эталона цифрами и словами (и числовое обозначение варианта словами)
-    wanted = []
-    if task_type == "numeric" and reference is not None:
-        want = normalize_answer(reference, "numeric")
-        found = _NUMBER.findall(text.replace("ё", "е"))
-        if any(normalize_answer(n, "numeric") == want for n in found):
-            return "number"
-        wanted = [want]
-    wanted += [lab for lab in correct if lab.isdigit()]
-    for want in wanted:
-        spelled = want and re.fullmatch(r"\d+", want) and int(want) <= 1000
-        if spelled and _number_words_in(toks, number_words(int(want))):
-            return "number"
-    # 4. «верн*/правильн*/ответ*» рядом с обозначением или словом любого варианта
-    option_words = {_stem(t) for o in items for t in tokens_of(o["text"]) if _is_word(t)}
-    for i, tok in enumerate(toks):
-        if not tok.startswith(CUES) or (i and toks[i - 1] == "не"):
-            continue
-        for j in range(max(0, i - CUE_RANGE), min(len(toks), i + CUE_RANGE + 1)):
-            if j == i:
-                continue
-            labs = dict(marks).get(j)
-            if labs and labs - own:
-                return "cue"
-            if _is_word(toks[j]) and _stem(toks[j]) in option_words:
-                return "cue"
-    return None
-
-
 def prefilter_reason(
     text: str, task_type: str, options, reference, condition: str = "", own=()
 ) -> str | None:
@@ -404,10 +341,6 @@ def prefilter_reason(
     return None
 
 
-def names_answer(text: str, task_type: str, options, reference, condition: str = "") -> bool:
-    return answer_reason(plain(text), task_type, options, reference, condition) is not None
-
-
 _CLAIM = re.compile(r"(?<![\w])(верн\w*|правильн\w*)", re.IGNORECASE)
 
 
@@ -429,15 +362,13 @@ def finish(
     keyed: bool = True,
     condition: str = "",
     own=(),
-    level: str = "strict",
 ) -> tuple[str, str | None]:
     """(безопасный HTML, причина отклонения или None). reveal=True - решение уже открыто:
     ответ называть можно, пояснение к рисунку - нет; без ключа утверждения о верности вырезаются."""
     body = plain(text)
     reason = note_reason(body, note)
     if reason is None and not reveal:
-        check = prefilter_reason if level == "prefilter" else answer_reason
-        reason = check(body, task_type, options, reference, condition, own)
+        reason = prefilter_reason(body, task_type, options, reference, condition, own)
     if reason is None and reveal and not keyed:
         text = strip_claims(text)
         if not text.strip():

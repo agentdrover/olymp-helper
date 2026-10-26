@@ -7,8 +7,8 @@
 
 Текст до открытия решения проходит три ступени: дешёвый фильтр очевидного, независимый судья
 (ДРУГОЙ канал модели: «раскрывает ли текст ответ?») и одна перегенерация с причиной от судьи; потом
-общая подсказка. Судья недоступен или ответил не по форме - строгий фильтр `guard` (закрытие по
-составу слов), а не пустая замена.
+общая подсказка. Судья недоступен или ответил не по форме - текст модели до решения не показывается вовсе:
+общая подсказка (ступень потрачена), `rejected_by="judge_unavailable"`.
 """
 
 import json
@@ -107,14 +107,23 @@ class Flow:
         options = json.loads(task["options"]) if task["options"] else None
         return ref, keyed, options, figure.get("teacher_note")
 
-    def _verdict(self, task, text: str, purpose: str = "reveal"):
-        """(раскрывает ли, причина) от ДРУГОГО канала; None - судья недоступен."""
+    def _verdict(self, task, run, text: str, purpose: str = "reveal"):
+        """(раскрывает ли, причина) от ДРУГОГО канала; None - судья недоступен. Судья видит и то,
+        что ребёнку уже показано по заданию (прошлые подсказки, разборы, попытки)."""
         call = getattr(self.model, "complete_on", None)
         if call is None or self.channel not in ("claude", "cursor"):
             return None
         other = "cursor" if self.channel == "claude" else "claude"
         ref, _, options, _ = self._args(task)
-        system, messages = build_judge_request(task, text, _answer_text(ref, options), purpose)
+        fresh = state.get_run(self.conn, run["id"])
+        system, messages = build_judge_request(
+            task,
+            text,
+            _answer_text(ref, options),
+            purpose,
+            shown=json.loads(fresh["shown_json"]),
+            attempts=json.loads(fresh["attempts_json"]),
+        )
         try:
             result = call(other, system, messages, JUDGE_SCHEMA, session_id=self.session)
         except Exception:  # noqa: BLE001
@@ -127,17 +136,18 @@ class Flow:
         except ModelOutputError:
             return None
 
-    def _check_text(self, task, text: str, kind: str, own) -> tuple[str | None, str]:
+    def _check_text(self, task, run, text: str, kind: str, own) -> tuple[str | None, str]:
         """(код отклонения или None, пояснение для перегенерации)."""
         ref, keyed, options, note = self._args(task)
-        common = {"reveal": False, "keyed": keyed, "condition": task["text"], "own": own}
-        pre = finish(text, kind, task["type"], options, ref, note, level="prefilter", **common)[1]
+        pre = finish(
+            text, kind, task["type"], options, ref, note,
+            reveal=False, keyed=keyed, condition=task["text"], own=own,
+        )[1]  # fmt: skip
         if pre:
             return pre, f"в тексте очевидный признак ответа ({pre})"
-        verdict = self._verdict(task, text)
-        if verdict is None:  # судья недоступен: строгий фильтр, а не пустая замена
-            strict = finish(text, kind, task["type"], options, ref, note, **common)[1]
-            return (f"strict:{strict}" if strict else None), "строгий фильтр"
+        verdict = self._verdict(task, run, text)
+        if verdict is None:  # без судьи текст модели до решения не показываем
+            return "judge_unavailable", ""
         if verdict[0]:
             return "judge", verdict[1] or "текст раскрывает ответ"
         return None, ""
@@ -147,10 +157,10 @@ class Flow:
         от судьи (ответ в текст для ребёнка не подставляется), затем общая подсказка."""
         text, uncertainty, reason = out.explanation, out.uncertainty, None
         for attempt in (0, 1):
-            reason, feedback = self._check_text(task, text, mode, own)
+            reason, feedback = self._check_text(task, run, text, mode, own)
             if reason is None:
                 return render_markdown(text), None, uncertainty
-            if attempt == 1:
+            if attempt == 1 or reason == "judge_unavailable":
                 break
             again = self._ask(task, run, mode, feedback=feedback)
             if again is None or self._discrepant(task, run, again):
@@ -168,22 +178,25 @@ class Flow:
 
     # ------------------------------------------------------------------- действия
 
-    def attempt(self, task_id: int, raw, confidence) -> int:
-        info = state.record_attempt(self.conn, task_id, raw, confidence, self.now)
+    def attempt(self, task_id: int, raw, confidence) -> int | None:
+        """Проверка по ключу. В режиме с подсказками сначала берётся замок задания: занят -
+        попытка не записывается (иначе её разбор потерялся бы), ребёнок отправит снова."""
         task = get_task(self.conn, task_id)
-        run = state.get_run(self.conn, info["run_id"])
-        if assist_mode(task) != "hints" or (info["matched"] and not info["keyed"]):
-            return run["id"]
-        if not self._begin(task):
-            return run["id"]
+        locked = assist_mode(task) == "hints"
+        if locked and not self._begin(task):
+            return None
         try:
-            if info["matched"]:
-                self._explain_solution(task, run)
-            else:
-                self._mistake(task, run)
+            info = state.record_attempt(self.conn, task_id, raw, confidence, self.now)
+            run = state.get_run(self.conn, info["run_id"])
+            if locked and not (info["matched"] and not info["keyed"]):
+                if info["matched"]:
+                    self._explain_solution(task, run)
+                else:
+                    self._mistake(task, run)
+            return run["id"]
         finally:
-            self._end(task)
-        return run["id"]
+            if locked:
+                self._end(task)
 
     def _mistake(self, task, run) -> None:
         out = self._ask(task, run, "mistake")
@@ -274,11 +287,13 @@ class Flow:
                 self.notice = DISPUTED[0].upper() + DISPUTED[1:] + "."
                 return
             html, reason = self._safe(task, out.explanation, "explain", reveal=True)
-            if (
-                not reason and not keyed
-            ):  # без ключа судья отдельно проверяет утверждения о верности
-                verdict = self._verdict(task, out.explanation, "claims")
-                reason = "judge" if verdict and verdict[0] else None
+            if not reason and not keyed:
+                # без ключа судья отдельно проверяет утверждения о верности; без судьи - ничего
+                verdict = self._verdict(task, run, out.explanation, "claims")
+                if verdict is None:
+                    reason = "judge_unavailable"
+                elif verdict[0]:
+                    reason = "judge"
             if reason:
                 self.notice = "Объяснение не получилось, попробуй другой способ."
                 return

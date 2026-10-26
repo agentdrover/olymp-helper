@@ -99,37 +99,6 @@ OPTS = [
     {"label": "Г", "text": "липид клетки"},
 ]
 COND = "Что хранит наследственную информацию клетки?"
-
-# (текст модели, эталон, тип, варианты, почему отклоняется)
-CODEX = [
-    ("б — правильный выбор", "Б", "single", OPTS),  # обозначение строчной буквой
-    ("Правильный ответ — молекула ДНК", "Б", "single", OPTS),  # текст верного варианта
-    ("Думаю, нужна молекула с кодом", "Б", "single", OPTS),  # слово текста варианта
-    ("Ответ — двадцать восемь", "28", "numeric", None),  # число словами
-    ("Посчитай: получится 28", "28", "numeric", None),  # число цифрами
-]
-PARAPHRASES = [
-    ("Выбирай Б.", "Б", OPTS),
-    ("выбирай б", "Б", OPTS),
-    ("Нужен вариант (Б)", "Б", OPTS),
-    ("Это под буквой Б", "Б", OPTS),
-    ("Ну, Б же", "Б", OPTS),
-    ("Скорее всего, [б]", "Б", OPTS),
-    ("Ищи среди вариантов молекулу ДНК", "Б", OPTS),
-    ("Речь идёт о молекуле, которая хранит наследственность", "Б", OPTS),
-    ("Это молекула, то есть вариант с молекулой", "Б", OPTS),
-    ("Подходит последний из двух крайних: Г", "Г", OPTS),
-    ("Верный: А", "А", OPTS),
-    ("Правильно тут В", "В", OPTS),
-    ("Ответом служит углевод", "В", OPTS),
-    ("Подумай про запасной углевод", "В", OPTS),
-    ("Липид, конечно", "Г", OPTS),
-    ("Это номер пять", "5", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
-    ("Тут пятёрка? нет: 5", "5", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
-    ("ответ: четыре", "4", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
-    ("Цифрой 3 обозначен лепесток", "5", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
-    ("Оно называется завязь, смотри на цифру 5", "5", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
-]  # fmt: skip
 NOTE = "1 - тычинка, 2 - пестик, 3 - лепесток, 4 - чашелистик, 5 - завязь, 6 - рыльце"
 
 
@@ -139,17 +108,16 @@ def reason(text, ref, kind="single", options=OPTS, note=None, condition=COND):
     return finish(text, "hint1", kind, options, ref, note, condition=condition)[1]
 
 
-def test_every_codex_input_is_rejected():
-    for text, ref, kind, options in CODEX:
+def test_obvious_leaks_are_caught_by_the_cheap_prefilter():
+    """Остальное (синонимы, порядок, исключение) ловит судья: см. test_tutor_judge.py."""
+    for text, ref, kind, options in [
+        ("б — правильный выбор", "Б", "single", OPTS),
+        ("Это молекула ДНК, которая хранит наследственность", "Б", "single", OPTS),
+        ("Посчитай: получится 28", "28", "numeric", None),
+        ("Ответ — двадцать восемь", "28", "numeric", None),
+        ("Выбирай b", "Б", "single", OPTS),
+    ]:
         assert reason(text, ref, kind, options) is not None, text
-
-
-def test_twenty_paraphrases_are_rejected_fail_closed():
-    assert len(PARAPHRASES) == 20
-    for text, ref, options in PARAPHRASES:
-        kind = "single"
-        note = NOTE if ref == "5" or ref in "1234567" else None
-        assert reason(text, ref, kind, options, note=note) is not None, text
 
 
 def test_number_words_cover_0_to_1000():
@@ -167,6 +135,7 @@ def test_innocent_text_passes_and_note_pairs_are_cut():
     ok = "Вспомни, какой процесс отвечает за хранение кода в клетке и где он идёт."
     assert reason(ok, "Б") is None
     assert reason("Обрати внимание на условие.", "Б") is None
+    assert reason("Не спеши с ответом, а сначала перечитай вопрос.", "Б") is None
     # пара «обозначение + слово» из пояснения режется в любом порядке
     nums = [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]
     for text in ("Цифрой 3 обозначен лепесток", "Лепесток - это цифра 3", "3? лепесток!"):

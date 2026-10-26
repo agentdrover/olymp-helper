@@ -51,10 +51,28 @@ class Scripted:
     """Replaces only the model. reply(kind, content) -> payload | None | ModelResult;
     kind is the mode named in the request (hint1, hint2, mistake, solution, explain_*)."""
 
-    def __init__(self, reply=None, default=None):
+    def __init__(self, reply=None, default=None, judge=None):
         self.reply = reply
         self.default = default if default is not None else out()
         self.calls = []
+        self.judge = judge  # None: the judge says "no leak"; a callable may return None = down
+        self.judge_calls = []
+
+    def complete_on(self, channel, system, messages, schema=None, session_id=None):
+        content = messages[-1]["content"]
+        self.judge_calls.append({"channel": channel, "content": content, "system": system})
+        if self.judge is None:
+            payload = {"reveals": False, "reason": "нет признаков ответа"}
+        else:
+            payload = self.judge(content)
+        if isinstance(payload, ModelResult):
+            return payload
+        if payload is None:
+            return ModelResult.failure(channel, "stub", "error")
+        return ModelResult(None, payload, channel, "stub", 1, None)
+
+    def candidate(self, content):
+        return content.split("<candidate_data>\n", 1)[1].rsplit("\n</candidate_data>", 1)[0]
 
     def complete(self, system, messages, schema=None, session_id=None):
         content = messages[-1]["content"]
@@ -78,26 +96,7 @@ MODES = (
 
 
 class Judged(Scripted):
-    """A model with an independent judge: complete_on(channel, ...) answers judge requests.
-    judge(content) -> dict | None | ModelResult; a real judge sees a data block with the text."""
-
-    def __init__(self, judge=None, **kw):
-        super().__init__(**kw)
-        self.judge = judge
-        self.judge_calls = []
-
-    def complete_on(self, channel, system, messages, schema=None, session_id=None):
-        content = messages[-1]["content"]
-        self.judge_calls.append({"channel": channel, "content": content, "system": system})
-        payload = self.judge(content) if callable(self.judge) else {"reveals": False, "reason": ""}
-        if isinstance(payload, ModelResult):
-            return payload
-        if payload is None:
-            return ModelResult.failure(channel, "stub", "error")
-        return ModelResult(None, payload, channel, "stub", 1, None)
-
-    def candidate(self, content):
-        return content.split("<candidate_data>\n", 1)[1].rsplit("\n</candidate_data>", 1)[0]
+    """Scripted with an explicit judge: Judged(judge=callable, reply=...)."""
 
 
 class Blocking(Scripted):
