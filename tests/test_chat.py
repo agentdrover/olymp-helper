@@ -318,3 +318,25 @@ def test_the_judge_remembers_a_disclosure_made_more_than_twenty_exchanges_ago(tm
         r = post(c, tid, "hint", level=1)
         assert "Исключи Г" not in shown(r)
         assert "Перечитай условие" in r.json()["hints_list"][0]["html"]  # the generic hint
+
+
+def test_the_judge_payload_stays_under_the_executor_limit_and_keeps_the_first_disclosure(tmp_path):
+    filler = ("Хороший вопрос про клетку. " * 400)[:8000]
+
+    def reply(kind, content):
+        if "Сообщение ученика: СТАРТ" in content:
+            return chat_reply(("Исключи А и В. " + filler)[:8000])
+        return chat_reply(filler[: 7990 - len(content) % 7] + f" #{content.count('Помощник:')}")
+
+    c, model, _v, _a = boot_chat(tmp_path, Scripted(reply=reply))
+    with c:
+        tid = seed(tmp_path, key="Б")
+        say(c, tid, "СТАРТ")
+        for i in range(22):
+            assert say(c, tid, f"вопрос {i}").status_code == 200
+        last = model.judge_calls[-1]
+        size = len((last["system"] + last["content"]).encode("utf-8"))
+        assert size < 300_000, size  # the executor refuses a request over 1,000,000 bytes
+        shown_block = block_of(last["content"], "shown_data")
+        assert "Исключи А и В" in shown_block  # the earliest disclosure is kept
+        assert events(tmp_path, "chat")[-1]["data"]["withheld"] is None  # the judge still works

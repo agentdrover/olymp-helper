@@ -17,6 +17,10 @@ HISTORY_ON_SCREEN = 20
 # запроса и взят с большим запасом (занятие длится не дольше простоя в 30 минут); при превышении
 # остаются САМЫЕ РАННИЕ обмены: они первыми называли варианты, которые потом складываются.
 EVIDENCE_CAP = 500
+# Запрос судье ограничен по размеру исполнителем (1 000 000 байт), а ответ чата - до 8000 знаков.
+# Часть чата в запросе судьи не больше EVIDENCE_BYTES (UTF-8): половина - самые ранние обмены,
+# вторая - самые поздние, середина отбрасывается целиком.
+EVIDENCE_BYTES = 200_000
 
 
 def open_session(conn, now: datetime) -> int | None:
@@ -62,11 +66,28 @@ def history_for_model(conn, session_id: int | None, task_id: int, run_id: int | 
 
 def visible_texts(conn, session_id: int | None, task_id: int, run_id: int | None) -> list[str]:
     """Всё, что ребёнок прочёл в чате этого занятия и прогона: это видит судья."""
-    return [
+    texts = [
         f"Уже показано в чате: {x['visible']}"
         for x in _all_exchanges(conn, session_id, task_id, run_id)
         if x.get("visible") and not x.get("withheld")
     ]
+    return bound_evidence(texts, EVIDENCE_BYTES)
+
+
+def bound_evidence(texts: list[str], budget: int) -> list[str]:
+    """Не больше budget байт: сначала ранние тексты (до половины), остаток - самые поздние."""
+    sizes = [len(t.encode("utf-8")) for t in texts]
+    if sum(sizes) <= budget:
+        return texts
+    head, used = 0, 0
+    while head < len(texts) and used + sizes[head] <= budget // 2:
+        used += sizes[head]
+        head += 1
+    tail, left = len(texts), budget - used
+    while tail > head and sizes[tail - 1] <= left:
+        left -= sizes[tail - 1]
+        tail -= 1
+    return texts[:head] + texts[tail:]
 
 
 def screen_items(conn, session_id: int | None, task_id: int, run_id: int | None) -> list[dict]:
