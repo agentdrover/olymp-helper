@@ -139,3 +139,55 @@ def test_a_rejected_task_still_switches_the_section(tmp_path):
             ("Б", "8", "отборочный", "Второй"),
         ]
         assert c.get("/parent/review/queue", headers=PARENT).json()["total"] == 2
+
+
+def test_a_wholly_invalid_chunk_still_moves_the_section_at_end(tmp_path):
+    def split(content):
+        if "[[стр. 1]]" in content:
+            return reply(make_task(1, "Первый", section="А", pages=[1]))
+        if "[[стр. 2]]" in content:
+            bad = reply(bad_match(1, 2))
+            bad["section_at_end"] = {"section": "Б", "variant": "2"}
+            return bad
+        return reply(make_task(1, "Третий", pages=[3]))
+
+    model = StubModel(split=split)
+    with TestClient(build_app(tmp_path, model)) as c:
+        pdf = text_pdf([["1. " + LONG], ["2. " + LONG], ["3. " + LONG]])
+        upload(c, pdf, variant="", stage="")
+        last = model.calls_of("tasks_split")[-1].messages[-1]["content"]
+        assert "[[стр. 3]]" in last and "Раздел на начало порции: Б" in last
+        conn = db(tmp_path)
+        try:
+            rows = [tuple(r) for r in conn.execute("SELECT section, variant, text FROM task_item")]
+        finally:
+            conn.close()
+        assert rows == [("А", None, "Первый"), ("Б", "2", "Третий")]
+
+
+def test_the_skip_report_never_uses_pages_claimed_by_the_model(tmp_path):
+    bad4 = make_task(4, "Вопрос", type="match", pages=[99])
+    bad7 = make_task(7, "Вопрос", type="match", pages=[True])
+    model = StubModel(split=reply(bad4, bad7))
+    with TestClient(build_app(tmp_path, model)) as c:
+        upload(c, text_pdf([["1. вопрос"]]))
+        note = material(tmp_path)["import_error"]
+        assert "задание 4 на стр. 1" in note and "задание 7 на стр. 1" in note
+        assert "99" not in note and "True" not in note
+
+
+def test_nothing_accepted_but_something_skipped_is_a_done_import_with_a_warning(tmp_path):
+    model = StubModel(split=reply(bad_match(1, 1)))
+    with TestClient(build_app(tmp_path, model)) as c:
+        upload(c, text_pdf([["1. вопрос"]]))
+        got = material(tmp_path)
+        assert got["import_status"] == "done"
+        assert "Не разобраны" in got["import_error"] and task_ids(tmp_path) == []
+        assert "Не разобраны" in c.get("/parent/materials", headers=PARENT).text
+
+
+def test_a_model_answer_with_no_tasks_and_nothing_skipped_still_fails(tmp_path):
+    with TestClient(build_app(tmp_path, StubModel(split=reply()))) as c:
+        upload(c, text_pdf([["1. вопрос"]]))
+        got = material(tmp_path)
+        assert got["import_status"] == "failed" and "ни одного задания" in got["import_error"]

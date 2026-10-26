@@ -13,6 +13,7 @@ from app.ingest.keys import parse_key_text
 from app.ingest.leaks import answer_units, crop_units, is_drawing
 from app.ingest.prompt import SYSTEM_PROMPT, TASKS_SCHEMA, build_chunk_message
 from app.ingest.schema import (
+    NUMBER,
     InvalidStructure,
     _label,
     validate_section_at_end,
@@ -185,15 +186,23 @@ def _labels_only(raw) -> dict:
     return out
 
 
+def _section_at_end(payload) -> dict | None:
+    try:
+        return validate_section_at_end(payload)
+    except InvalidStructure:  # заголовок раздела не разобран: состояние не меняется
+        return None
+
+
 def _salvage(payload, numbers: set[int], catalog, skipped: list[str]):
-    """Ответ не прошёл проверку дважды: годные задания берутся поштучно, негодные - в отчёт."""
+    """Ответ не прошёл проверку дважды: годные задания берутся поштучно, негодные - в отчёт.
+    Страницы в отчёте - только порции: страницам из ответа модели веры нет."""
     chunk_span = _span(sorted(numbers))
     if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
         try:
             validate_tasks(payload, numbers, catalog)
         except InvalidStructure as exc:
             skipped.append(f"{chunk_span} ({_reason(exc)})")
-        return [], None
+        return [], _section_at_end(payload)
     good = []
     for i, raw in enumerate(payload["tasks"]):
         try:
@@ -201,19 +210,11 @@ def _salvage(payload, numbers: set[int], catalog, skipped: list[str]):
         except InvalidStructure as exc:
             good.append(_labels_only(raw))
             where = chunk_span
-            if isinstance(raw, dict):
-                pages = raw.get("pages")
-                if isinstance(pages, list) and pages and all(isinstance(p, int) for p in pages):
-                    where = _span(pages)
-                if raw.get("number") not in (None, ""):
-                    where = f"задание {raw['number']} на {where}"
+            number = str(raw.get("number", "")).strip() if isinstance(raw, dict) else ""
+            if NUMBER.fullmatch(number):  # номер из ответа модели - только если он годный
+                where = f"задание {number} на {where}"
             skipped.append(f"{where} ({_reason(exc)})")
-    if not any("labels_only" not in t for t in good):
-        return [t for t in good if "labels_only" in t], None
-    try:
-        return good, validate_section_at_end(payload)
-    except InvalidStructure:  # заголовок раздела не разобран: состояние не меняется
-        return good, None
+    return good, _section_at_end(payload)
 
 
 def _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped):
@@ -534,12 +535,8 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 skipped: list[str] = []
                 tasks = split_tasks(ctx, pages, cancel, skipped)
                 note = skipped_note(skipped)
-                if not tasks:
-                    raise ImportFailure(
-                        f"Модель вернула неверную структуру, ни одно задание не принято. {note}"
-                        if note
-                        else "Модель не нашла в файле ни одного задания."
-                    )
+                if not tasks and not note:
+                    raise ImportFailure("Модель не нашла в файле ни одного задания.")
                 _finish(
                     conn,
                     material_id,
