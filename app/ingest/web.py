@@ -60,6 +60,12 @@ def _refusal(exc: Refusal) -> JSONResponse:
 # ------------------------------------------------------------------------- вход
 
 
+@public.get("/", response_class=HTMLResponse)
+def start_page(request: Request):
+    """Две двери: ребёнку и родителю. Банк не читается — на странице нет данных."""
+    return TEMPLATES.TemplateResponse(request, "start.html", {})
+
+
 @public.get("/parent/login", response_class=HTMLResponse)
 def login_page(request: Request):
     return TEMPLATES.TemplateResponse(request, "parent/login.html", {"error": None})
