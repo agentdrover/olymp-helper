@@ -183,9 +183,8 @@ class Flow:
         )
         if out is None:
             return
-        if self._judge(
-            task, run, out
-        ):  # свежее объяснение расходится с ключом: родителю, не ребёнку
+        # свежее объяснение расходится с ключом: родителю, не ребёнку
+        if self._judge(task, run, out):
             state.merge_solution(self.conn, run["id"], disputed=True, explanation_html=None)
             self.notice = DISPUTED[0].upper() + DISPUTED[1:] + "."
             return
