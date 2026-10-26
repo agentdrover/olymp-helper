@@ -2,6 +2,7 @@
 
 import re
 import threading
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -122,3 +123,64 @@ def test_progress_is_reported_per_chunk(tmp_path):
         page = c.get("/parent/materials", headers=HTML).text
         assert "Разбирается" not in page
         assert re.search(r'data-live="0"', page)
+
+
+CHROME = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+
+
+def test_accept_is_parsed_with_q_values(tmp_path):
+    model = StubModel(split=lambda content: reply(make_task(1)))
+    with TestClient(build_app(tmp_path, model)) as c:
+        for n, (accept, browser) in enumerate(
+            [
+                (CHROME, True),
+                ("application/json", False),
+                ("application/json,text/html;q=0", False),
+                ("*/*", False),
+                ("text/html;q=0.5,application/json", False),
+                ("text/html,application/json", True),  # tie, a multipart form: the page
+            ]
+        ):
+            got = post(c, {**PARENT, "Accept": accept}, one_task_pdf(f"1. вопрос {n}"))
+            assert (got.status_code == 303) is browser, accept
+            if not browser:
+                assert got.headers["content-type"].startswith("application/json"), accept
+
+
+def test_a_late_entry_of_an_expired_run_is_not_shown(tmp_path):
+    model = ChunkGate(4)
+    pdf = text_pdf([["1. " + LONG], ["2. " + LONG]])
+    app = build_app(tmp_path, model, sync_imports=False, import_timeout=0.5)
+    with TestClient(app) as c:
+        assert upload(c, pdf).status_code == 202
+        assert model.entered[0].wait(30)
+        conn = db(tmp_path)
+        run_a = conn.execute("SELECT run_id FROM material WHERE id = 1").fetchone()[0]
+        conn.close()
+        for _ in range(100):  # the watchdog expires run A
+            if c.get("/parent/materials/1", headers=API).json()["import_status"] == "failed":
+                break
+            threading.Event().wait(0.1)
+        assert c.get("/parent/materials/1", headers=API).json()["import_status"] == "failed"
+        assert len(app.state.ctx.progress) == 0  # A's entry is dropped on expiry
+        assert upload(c, pdf).json()["requeued"] is True  # run B
+        assert model.entered[1].wait(30)
+        status = c.get("/parent/materials/1", headers=API).json()
+        assert status["import_status"] == "running"
+        assert status["progress"] == {"chunk": 1, "chunks": 2, "accepted": 0}
+        app.state.ctx.progress.update(1, run_a, 2, 2, 7)  # run A writes late
+        status = c.get("/parent/materials/1", headers=API).json()
+        assert status["progress"] is None
+        assert "принято заданий 7" not in c.get("/parent/materials", headers=HTML).text
+        for gate in model.go:
+            gate.set()
+        app.state.imports.wait_idle(30)
+
+
+def test_the_polling_script_chains_timeouts_and_reloads_once():
+    # No JS engine in the test environment: the guard is checked on the source.
+    src = (Path(__file__).parent.parent / "app/static/progress.js").read_text()
+    assert "setInterval" not in src
+    assert "setTimeout(tick" in src and src.count("setTimeout(") == 1
+    assert "if (!reloading) {" in src and src.count("location.reload()") == 1
+    assert src.index("reloading = true") < src.index("location.reload()")

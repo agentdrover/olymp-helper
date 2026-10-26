@@ -27,11 +27,12 @@ class ImportProgress:
             if item is not None and item["run_id"] == run_id:
                 del self._items[material_id]
 
-    def get(self, material_id: int) -> dict | None:
-        """Копия без run_id: наружу уходят только числа."""
+    def get(self, material_id: int, current_run: str | None) -> dict | None:
+        """Ход только текущего запуска материала (run_id из базы): запись истёкшего запуска,
+        который дописал поздно, не показывается. Наружу уходят только числа."""
         with self._lock:
             item = self._items.get(material_id)
-            if item is None:
+            if item is None or item["run_id"] != current_run:
                 return None
             return {k: v for k, v in item.items() if k != "run_id"}
 

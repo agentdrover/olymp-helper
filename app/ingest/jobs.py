@@ -56,6 +56,7 @@ class ImportJobs:
 
     def _expire(self, material_id: int, cancel: threading.Event, run_id: str) -> None:
         cancel.set()
+        self.ctx.progress.clear(material_id, run_id)
         conn = open_db(self.ctx.db_path)
         try:
             fail_material(conn, material_id, run_id, TIMEOUT_MESSAGE)

@@ -91,9 +91,35 @@ FLASH = {
 }
 
 
+def _accept_q(header: str) -> dict[str, float]:
+    """Accept -> {тип: q}; битый q читается как 0."""
+    out: dict[str, float] = {}
+    for part in header.split(","):
+        kind, *params = (piece.strip().lower() for piece in part.split(";"))
+        if not kind:
+            continue
+        q = 1.0
+        for param in params:
+            if param.startswith("q="):
+                try:
+                    q = float(param[2:])
+                except ValueError:
+                    q = 0.0
+        out[kind] = q
+    return out
+
+
 def _wants_html(request: Request) -> bool:
-    """Форму в браузере отличает Accept: text/html; клиенты API получают JSON."""
-    return "text/html" in request.headers.get("accept", "")
+    """Страница, а не JSON. Правило: text/html (или text/*) назван явно с q>0, и его q не ниже q
+    для JSON (application/json, application/*, иначе */*). «*/*» сам по себе - JSON (curl, клиенты
+    API). Ничья между явно названными text/html и application/json - страница: сюда приходит
+    только форма (multipart), а её шлёт браузер."""
+    accept = _accept_q(request.headers.get("accept", ""))
+    html = accept.get("text/html", accept.get("text/*", 0.0))
+    if html <= 0:
+        return False
+    other = accept.get("application/json", accept.get("application/*", accept.get("*/*", 0.0)))
+    return html >= other
 
 
 def _materials_view(request: Request, conn, *, flash=None, error=None, status=200):
@@ -107,7 +133,7 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
         "parent/materials.html",
         {
             "materials": rows,
-            "progress": {m["id"]: progress.get(m["id"]) for m in rows},
+            "progress": {m["id"]: progress.get(m["id"], m["run_id"]) for m in rows},
             "flash": flash,
             "error": error,
         },
@@ -224,7 +250,7 @@ def _store_upload(
 @parent.get("/parent/materials/{material_id}")
 def material_status(material_id: int, request: Request, conn: Db):
     row = conn.execute(
-        "SELECT id, kind, import_status, import_error, pages_total, "
+        "SELECT id, kind, import_status, import_error, pages_total, run_id, "
         "(SELECT COUNT(*) FROM task_item t WHERE t.material_id = material.id) AS tasks "
         "FROM material WHERE id = ?",
         (material_id,),
@@ -232,8 +258,9 @@ def material_status(material_id: int, request: Request, conn: Db):
     if row is None:
         raise HTTPException(404, "Материал не найден")
     out = dict(row)
+    out.pop("run_id")
     running = row["import_status"] in ("queued", "running")
-    out["progress"] = ctx_of(request).progress.get(material_id) if running else None
+    out["progress"] = ctx_of(request).progress.get(material_id, row["run_id"]) if running else None
     return out
 
 
