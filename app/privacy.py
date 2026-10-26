@@ -15,6 +15,14 @@ RETENTION_DAYS = 180
 MESSAGE_TYPES = ("chat", "voice")
 _IN = ",".join("?" for _ in MESSAGE_TYPES)
 
+# Задание, которое нельзя удалять вместе с материалом: подтверждено сейчас, было подтверждено
+# раньше (правка подтверждённого задания поднимает ревизию и возвращает его в черновик) или на него
+# есть события (попытки ребёнка). Условие читает только факты в базе, не текущий статус.
+KEEP = (
+    "(t.import_status = 'checked' OR t.revision > 1 "
+    "OR EXISTS (SELECT 1 FROM event e WHERE e.task_item_id = t.id))"
+)
+
 
 class MaterialBusy(Exception):
     """Импорт материала ещё идёт: удалять нельзя, пока поток пишет его страницы."""
@@ -70,9 +78,9 @@ def material_summary(conn: sqlite3.Connection, material_id: int) -> dict | None:
         "SELECT id, kind, year, variant, import_status, deleted_at, "
         "(SELECT COUNT(*) FROM material_page_text p WHERE p.material_id = material.id) AS pages, "
         "(SELECT COUNT(*) FROM task_item t WHERE t.material_id = material.id "
-        " AND t.import_status <> 'checked') AS unconfirmed, "
+        f" AND NOT {KEEP}) AS unconfirmed, "
         "(SELECT COUNT(*) FROM task_item t WHERE t.material_id = material.id "
-        " AND t.import_status = 'checked') AS confirmed "
+        f" AND {KEEP}) AS confirmed "
         "FROM material WHERE id = ?",
         (material_id,),
     ).fetchone()
@@ -100,8 +108,8 @@ def delete_material(ctx, conn: sqlite3.Connection, material_id: int) -> dict:
         raise MaterialBusy(material_id)
     figures = []
     for (raw,) in conn.execute(
-        "SELECT figure FROM task_item WHERE material_id = ? AND import_status <> 'checked' "
-        "AND figure IS NOT NULL",
+        f"SELECT t.figure FROM task_item t WHERE t.material_id = ? AND NOT {KEEP} "
+        "AND t.figure IS NOT NULL",
         (material_id,),
     ):
         figures.append(json.loads(raw).get("file"))
@@ -111,8 +119,9 @@ def delete_material(ctx, conn: sqlite3.Connection, material_id: int) -> dict:
         conn.execute("DELETE FROM material_page_text WHERE material_id = ?", (material_id,))
         conn.execute("DELETE FROM key_entry WHERE material_id = ?", (material_id,))
         tasks = conn.execute(
-            "DELETE FROM task_item WHERE material_id = ? AND import_status <> 'checked'",
-            (material_id,),
+            f"DELETE FROM task_item WHERE material_id = ? AND id IN "
+            f"(SELECT t.id FROM task_item t WHERE t.material_id = ? AND NOT {KEEP})",
+            (material_id, material_id),
         ).rowcount
         kept = conn.execute(
             "SELECT COUNT(*) FROM task_item WHERE material_id = ?", (material_id,)

@@ -1,15 +1,18 @@
 """Вход и профили (OH-T08): экран PIN, первичная установка, выход, уведомление ребёнку,
 настройки, удаление переписки и материалов."""
 
+import hmac
+import secrets
 from datetime import date
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from app import auth, privacy
 from app.ingest.web import TEMPLATES, Db, ctx_of
-from app.notice import safe_next
+from app.notice import notice_redirect, safe_next
 from app.roles import COOKIE, key_matches, now_of, parent_key, require_csrf, require_parent
 
 parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)])
@@ -128,19 +131,59 @@ def logout(request: Request, conn: Db):
 # ------------------------------------------------------------- уведомление ребёнку
 
 
+NOTICE_COOKIE = "olymp_notice"
+
+
+def _same_origin(request: Request) -> bool:
+    """Браузер присылает Origin (или хотя бы Referer) с формы: чужой сайт отсекается."""
+    for name in ("origin", "referer"):
+        value = request.headers.get(name)
+        if value:
+            return urlsplit(value).netloc == request.url.netloc
+    return True
+
+
 @public.get("/notice", response_class=HTMLResponse)
 def notice_page(request: Request, next: str = "/tasks"):
-    return TEMPLATES.TemplateResponse(request, "notice.html", {"next": safe_next(next)})
+    # Одноразовый токен: в cookie (SameSite=Strict, чужой сайт её не приложит) и в форме.
+    token = secrets.token_urlsafe(24)
+    page = TEMPLATES.TemplateResponse(
+        request, "notice.html", {"next": safe_next(next), "token": token}
+    )
+    page.set_cookie(
+        NOTICE_COOKIE,
+        token,
+        httponly=True,
+        samesite="strict",
+        path="/",
+        secure=request.url.scheme == "https",
+    )
+    return page
 
 
 @public.post("/notice/ack")
-def notice_ack(request: Request, conn: Db, next: Annotated[str, Form()] = "/tasks"):
-    """Ребёнок прочитал уведомление; первый момент не перезаписывается."""
+def notice_ack(
+    request: Request,
+    conn: Db,
+    next: Annotated[str, Form()] = "/tasks",
+    token: Annotated[str, Form()] = "",
+):
+    """Ребёнок прочитал уведомление; первый момент не перезаписывается. Без токена, выданного
+    страницей уведомления, и с чужого сайта отметка не ставится."""
+    cookie = request.cookies.get(NOTICE_COOKIE, "")
+    if (
+        not _same_origin(request)
+        or not token
+        or not hmac.compare_digest(token.encode("utf-8"), cookie.encode("utf-8"))
+    ):
+        return notice_redirect(safe_next(next))
     conn.execute(
         "UPDATE settings SET child_notice_seen_at = COALESCE(child_notice_seen_at, ?) WHERE id = 1",
         (now_of(request).isoformat(),),
     )
-    return RedirectResponse(safe_next(next), status_code=303)
+    response = RedirectResponse(safe_next(next), status_code=303)
+    response.delete_cookie(NOTICE_COOKIE, path="/")
+    return response
 
 
 # ---------------------------------------------------------------------- настройки

@@ -53,6 +53,19 @@ def db_of(request: Request):
 Db = Annotated[sqlite3.Connection, Depends(db_of)]
 
 
+def child_notice_gate(request: Request, conn: Db) -> None:
+    """API ребёнка до уведомления о внешней модели закрыт (SPEC 1.6); родителю оно не нужно."""
+    if current_role(request) != PARENT and not notice_seen(conn):
+        raise HTTPException(
+            403,
+            detail={
+                "error": "notice_required",
+                "message": "Сначала прочитайте уведомление о внешней модели.",
+                "notice_url": "/notice",
+            },
+        )
+
+
 def _refusal(exc: Refusal) -> JSONResponse:
     return JSONResponse({"error": exc.message}, status_code=exc.status)
 
@@ -395,7 +408,7 @@ def _published(conn, task_id: int):
     return task, material
 
 
-@public.get("/api/tasks")
+@public.get("/api/tasks", dependencies=[Depends(child_notice_gate)])
 def api_tasks(conn: Db):
     out = []
     for task in conn.execute("SELECT * FROM task_item ORDER BY id").fetchall():
@@ -407,7 +420,7 @@ def api_tasks(conn: Db):
     return {"tasks": out}
 
 
-@public.get("/api/tasks/{task_id}")
+@public.get("/api/tasks/{task_id}", dependencies=[Depends(child_notice_gate)])
 def api_task(task_id: int, conn: Db):
     task, material = _published(task_id=task_id, conn=conn)
     return child_view(task, material)
@@ -415,6 +428,8 @@ def api_task(task_id: int, conn: Db):
 
 @public.get("/tasks", response_class=HTMLResponse)
 def tasks_page(request: Request, conn: Db):
+    if current_role(request) != PARENT and not notice_seen(conn):
+        return notice_redirect("/tasks")
     data = api_tasks(conn)
     # Ребёнку — название темы из справочника, не код; список уже содержит только опубликованные.
     topics = {
@@ -439,7 +454,7 @@ def task_page(task_id: int, request: Request, conn: Db):
     )
 
 
-@public.get("/tasks/{task_id}/figure.png")
+@public.get("/tasks/{task_id}/figure.png", dependencies=[Depends(child_notice_gate)])
 def task_figure_png(task_id: int, request: Request, conn: Db):
     task = get_task(conn, task_id)
     figure = figure_of(task) if task is not None else None
@@ -450,7 +465,7 @@ def task_figure_png(task_id: int, request: Request, conn: Db):
     return FileResponse(ctx_of(request).material_path(figure["file"]), media_type="image/png")
 
 
-@public.get("/api/search")
+@public.get("/api/search", dependencies=[Depends(child_notice_gate)])
 def api_search(request: Request, conn: Db, q: str = ""):
     """Родитель ищет по страницам материалов; ребёнок - только по опубликованным заданиям."""
     if current_role(request) == PARENT:

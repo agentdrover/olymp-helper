@@ -31,7 +31,7 @@ PUBLIC = {
     ("GET", "/api/tasks/{task_id}"),
     ("GET", "/api/search"),
 }
-FRAMEWORK = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc", "/static"}
+FRAMEWORK = {"/static"}  # the API description is switched off: no /docs, /redoc, /openapi.json
 
 
 class Clock:
@@ -106,6 +106,8 @@ def test_ac1(tmp_path):
     }
     assert non_api <= FRAMEWORK, non_api - FRAMEWORK
     with TestClient(app, raise_server_exceptions=False) as c:
+        for hidden in ("/docs", "/redoc", "/openapi.json"):
+            assert c.get(hidden).status_code == 404, hidden
         for method, path in guarded:
             url = concrete(path)
             for headers in ({}, {"Cookie": "olymp_parent=forged"}, {"Accept": "text/html"}):

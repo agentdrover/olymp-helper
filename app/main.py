@@ -78,6 +78,7 @@ def create_app(
         )
         conn.close()
         sweep(path, clock)
+        ctx.page_cache.purge_legacy()
         app.state.db_path = path
         sweep_task = asyncio.create_task(_sweep_forever(path, clock))
         try:
@@ -87,7 +88,10 @@ def create_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await sweep_task
 
-    app = FastAPI(title="olymp-helper", lifespan=lifespan)
+    # Описание API наружу не отдаётся: ни ребёнку, ни чужому в сети.
+    app = FastAPI(
+        title="olymp-helper", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
+    )
     app.state.clock = clock
     app.state.model = model or ExecutorModel(path)
     ctx = AppContext(path, data, app.state, PageCache(data / "cache" / "pages"))

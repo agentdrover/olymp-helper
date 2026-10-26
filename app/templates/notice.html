@@ -6,6 +6,7 @@
 {% include "_privacy_notice.html" %}
 <form method="post" action="/notice/ack">
   <input type="hidden" name="next" value="{{ next }}">
+  <input type="hidden" name="token" value="{{ token }}">
   <button class="primary">Понятно, начать</button>
 </form>
 {% endblock %}

@@ -1,5 +1,6 @@
 """OH-T08: the notice for the child, deletion of data, retention (AC3, AC4)."""
 
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -35,6 +36,15 @@ def published(tmp_path, **kw):
     return c, tid
 
 
+def ack(c, next_url, **kw):
+    """What the notice page does: open it (token in cookie and form), then confirm."""
+    page = c.get("/notice", params={"next": next_url}, headers=CHILD)
+    token = re.search(r'name="token" value="([^"]+)"', page.text).group(1)
+    return c.post(
+        "/notice/ack", data={"next": next_url, "token": token}, follow_redirects=False, **kw
+    )
+
+
 def test_ac3(tmp_path):
     c, tid = published(tmp_path, notice=False)
     with c:
@@ -47,24 +57,52 @@ def test_ac3(tmp_path):
         assert (
             db(tmp_path).execute("SELECT child_notice_seen_at FROM settings").fetchone()[0] is None
         )
-        # the list of tasks is not a question: no notice there
-        assert c.get("/tasks", headers=CHILD).status_code == 200
-        # a parent opening the same page is not the child
+        # every child door is shut until then: list, JSON, search, figure
+        assert c.get("/tasks", headers=CHILD, follow_redirects=False).status_code == 303
+        for url in (
+            "/api/tasks",
+            f"/api/tasks/{tid}",
+            "/api/search?q=a",
+            f"/tasks/{tid}/figure.png",
+        ):
+            r = c.get(url, headers=CHILD)
+            assert r.status_code == 403, url
+            assert r.json()["detail"]["error"] == "notice_required", url
+        # a parent is not the child
         assert c.get(f"/tasks/{tid}", headers=PARENT, follow_redirects=False).status_code == 200
-        # confirming records the fact and goes on to the question
-        ack = c.post("/notice/ack", data={"next": f"/tasks/{tid}"}, follow_redirects=False)
-        assert ack.status_code == 303 and ack.headers["location"] == f"/tasks/{tid}"
+        assert c.get("/api/tasks", headers=PARENT).status_code == 200
+        # a confirmation without the page's token, or with a wrong one, records nothing
+        c.cookies.clear()
+        r = c.post("/notice/ack", data={"next": "/tasks"}, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"].startswith("/notice")
+        c.get("/notice")
+        r = c.post(
+            "/notice/ack", data={"next": "/tasks", "token": "forged"}, follow_redirects=False
+        )
+        assert r.headers["location"].startswith("/notice")
+        # a form posted from another site is refused even with a valid token
+        r = ack(c, "/tasks", headers={"Origin": "https://evil.example"})
+        assert r.headers["location"].startswith("/notice")
+        r = ack(c, "/tasks", headers={"Referer": "https://evil.example/x"})
+        assert r.headers["location"].startswith("/notice")
+        assert (
+            db(tmp_path).execute("SELECT child_notice_seen_at FROM settings").fetchone()[0] is None
+        )
+        # confirming from this site records the fact and goes on to the question
+        r = ack(c, f"/tasks/{tid}", headers={"Origin": "http://testserver"})
+        assert r.status_code == 303 and r.headers["location"] == f"/tasks/{tid}"
         seen = db(tmp_path).execute("SELECT child_notice_seen_at FROM settings").fetchone()[0]
         assert seen and datetime.fromisoformat(seen)
         assert c.get(f"/tasks/{tid}", headers=CHILD).status_code == 200
-        # it is shown once: a second confirmation keeps the first moment
-        c.post("/notice/ack", data={"next": "/tasks"})
+        assert c.get("/api/tasks", headers=CHILD).status_code == 200
+        # the token is used up; a second confirmation keeps the first moment
+        ack(c, "/tasks")
         assert (
             db(tmp_path).execute("SELECT child_notice_seen_at FROM settings").fetchone()[0] == seen
         )
         # the redirect target stays on this site
         for evil in ("https://evil.example/", "//evil.example", "/\\evil.example"):
-            r = c.post("/notice/ack", data={"next": evil}, follow_redirects=False)
+            r = ack(c, evil)
             assert r.headers["location"] == "/tasks", evil
 
 
@@ -80,6 +118,28 @@ def test_ac4(tmp_path):
             (mid,),
         )
         draft = conn.execute("SELECT MAX(id) FROM task_item").fetchone()[0]
+        # a task that was confirmed once, then edited (back to draft, revision 2), and one the
+        # child has already attempted: neither goes away with the file
+        for text in ("был подтверждён", "есть попытка"):
+            conn.execute(
+                "INSERT INTO task_item (material_id, type, text, import_status, revision) "
+                "VALUES (?, 'single', ?, 'draft', ?)",
+                (mid, text, 2 if "подтв" in text else 1),
+            )
+        edited, attempted = draft + 1, draft + 2
+        conn.execute(
+            "INSERT INTO task_revision (task_item_id, revision, key_version, snapshot, "
+            "created_at) VALUES (?, 1, 1, '{}', 'x')",
+            (edited,),
+        )
+        sess = conn.execute(
+            "INSERT INTO study_session (started_at, last_activity_at) VALUES ('x', 'x')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO event (session_id, type, task_item_id, created_at) "
+            "VALUES (?, 'attempt', ?, 'x')",
+            (sess, attempted),
+        )
         conn.execute(
             "INSERT INTO material_page_text (material_id, page, text) VALUES (?, 1, 'x')", (mid,)
         ) if False else None
@@ -92,7 +152,7 @@ def test_ac4(tmp_path):
 
         page = c.get(f"/parent/materials/{mid}/delete", headers=PARENT)
         assert page.status_code == 200
-        assert "1 неподтверждённое" in page.text and "1 подтверждённое" in page.text
+        assert "1 неподтверждённое" in page.text and "3 подтверждённых задания" in page.text
         assert pdf.exists()  # looking deletes nothing
         r = c.post(f"/parent/materials/{mid}/delete", headers=PARENT, data={})
         assert r.status_code == 200 and pdf.exists()
@@ -214,3 +274,16 @@ def test_retention_runs_when_the_app_starts(tmp_path):
         .fetchone()[0]
         == 1
     )
+
+
+def test_start_clears_page_images_cached_under_the_old_names(tmp_path):
+    app = build_app(tmp_path, StubModel())
+    cache = tmp_path / "cache" / "pages"
+    cache.mkdir(parents=True)
+    legacy = cache / ("a" * 64 + ".png")
+    current = cache / ("b" * 64 + "-" + "c" * 64 + ".png")
+    legacy.write_bytes(b"old")
+    current.write_bytes(b"new")
+    with TestClient(app):
+        pass
+    assert not legacy.exists() and current.exists()
