@@ -94,6 +94,7 @@ def test_ac2(tmp_path):
         r = attempt(c, a, "Б").json()
         assert r["state"] == "solved"
         assert r["solution"]["answer"] == "Б"
+        assert r["last"] is None  # после решения отметки «не то» уже нет
         b = seed(tmp_path, key="В")
         attempt(c, b, "А")
         assert post(c, b, "hint", level=1).json()["state"] == "hint1"

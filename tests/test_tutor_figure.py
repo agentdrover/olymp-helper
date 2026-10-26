@@ -111,3 +111,18 @@ def test_ac12(tmp_path):
         other = seed(tmp_path, key="5", options=NUM, figure={**FIGURE, "teacher_note": SHORT})
         attempt(c, other, "1")
         assert post(c, other, "show-answer", confirm=True).status_code == 409
+
+
+def test_teacher_note_is_never_echoed_to_the_child(tmp_path):
+    """A model that repeats the hidden note about ANOTHER label (not the answer) is cut as well."""
+
+    def reply(kind, content):
+        return out("5", "Помни: 3 - лепесток, это часть цветка.")
+
+    c, _clock, _model = boot(tmp_path, Scripted(reply=reply))
+    with c:
+        tid = seed(tmp_path, key="5", options=NUM, figure=FIGURE)
+        attempt(c, tid, "2")
+        got = post(c, tid, "hint", level=1).json()
+        assert "лепесток" not in json.dumps(got, ensure_ascii=False)
+        assert GENERIC["hint1"] in got["hints_list"][0]["html"]
