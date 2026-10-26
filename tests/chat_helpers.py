@@ -4,6 +4,7 @@ tables, a scripted chat payload, a recognizer stub. No real model and no real wh
 import base64
 import itertools
 import re
+import wave
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -15,6 +16,7 @@ from tests.tutor_helpers import Clock, Scripted, post
 
 __all__ = [
     "FIXTURE_WEBM",
+    "FakeFfmpeg",
     "Recognizer",
     "boot_chat",
     "chat_reply",
@@ -59,6 +61,24 @@ def say(c, tid, message, mode="chat", **kw):
     return post(c, tid, "chat", message=message, mode=mode, **kw)
 
 
+class FakeFfmpeg:
+    """Stands in for the ffmpeg process: writes a silent mono 16 kHz wav of `seconds` and records
+    the command and the stdin bytes. Only test_ac4 runs the real ffmpeg."""
+
+    def __init__(self, seconds=2.0):
+        self.seconds, self.cmds, self.inputs = seconds, [], []
+
+    def __call__(self, cmd, timeout, data=None):
+        self.cmds.append(list(cmd))
+        self.inputs.append(data)
+        with wave.open(cmd[-1], "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\0\0" * int(16000 * self.seconds))
+        return 0, ""
+
+
 class Recognizer:
     """Stands in for whisper.cpp: gets the path of the converted wav, returns text."""
 
@@ -82,7 +102,7 @@ def boot_chat(tmp_path, model=None, recognizer=None, voice=None, notice=True):
     audio = tmp_path / "audio-work"
     audio.mkdir(parents=True, exist_ok=True)
     if voice is None:
-        voice = VoiceService(recognizer or Recognizer(), workdir=audio)
+        voice = VoiceService(recognizer or Recognizer(), workdir=audio, runner=FakeFfmpeg())
     clock = Clock()
     app = build_app(tmp_path, model, clock=clock, notice=notice, voice=voice)
     c = TestClient(app)

@@ -2,7 +2,6 @@
 
 import base64
 import shutil
-import subprocess
 import threading
 import wave
 
@@ -10,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.voice.service import MAX_BYTES, VoiceService
 from tests.bank_helpers import CHILD, build_app
-from tests.chat_helpers import FIXTURE_WEBM, Recognizer, boot_chat, voice_post
+from tests.chat_helpers import FIXTURE_WEBM, FakeFfmpeg, Recognizer, boot_chat, voice_post
 from tests.tutor_helpers import Scripted, events, seed
 
 
@@ -30,7 +29,10 @@ def test_ac4(tmp_path):
         return "привет клетка"
 
     rec = Recognizer(fn=recognize)
-    c, _model, _voice, audio = boot_chat(tmp_path, recognizer=rec)
+    audio_dir = tmp_path / "audio-real"
+    real = VoiceService(rec, workdir=audio_dir)  # the real ffmpeg: the one test that needs it
+    c, _model, _voice, audio = boot_chat(tmp_path, voice=real)
+    audio = audio_dir
     with c:
         tid = seed(tmp_path, key="Б")
         # the Chrome-style WebM/Opus recording (no duration in the header) is decoded by ffmpeg
@@ -61,20 +63,11 @@ def test_ac4(tmp_path):
         assert list(audio.iterdir()) == []
 
 
-def _tone(seconds: int, path) -> bytes:
-    subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
-         f"sine=frequency=330:duration={seconds}", "-ar", "48000", "-ac", "1",
-         "-c:a", "libopus", "-b:a", "16k", "-f", "webm", str(path)],
-        check=True,
-    )  # fmt: skip
-    return path.read_bytes()
-
-
 def test_ac5(tmp_path):
     # the recognizer is stubbed; the limits are the server's
     rec = Recognizer("слово")
-    c, _model, _voice, audio = boot_chat(tmp_path / "a", recognizer=rec)
+    c, _model, voice, audio = boot_chat(tmp_path / "a", recognizer=rec)
+    voice.runner = voice._runner
     with c:
         tid = seed(tmp_path / "a", key="Б")
         # more than 2 MB is refused before anything is converted or recognized
@@ -82,11 +75,13 @@ def test_ac5(tmp_path):
         assert big.status_code == 413 and big.json()["code"] == "too_big"
         assert rec.paths == [] and list(audio.iterdir()) == []
         # longer than 30 s: a clear message, no recognition
-        long = voice_post(c, tid, data=_tone(40, tmp_path / "long.webm"))
+        voice.runner.seconds = 40
+        long = voice_post(c, tid)
         assert long.status_code == 422 and long.json()["code"] == "too_long"
         assert "30 с" in long.json()["message"] and rec.paths == []
         assert list(audio.iterdir()) == []
         # a recording within the limits goes through
+        voice.runner.seconds = 2
         assert voice_post(c, tid).status_code == 200 and len(rec.paths) == 1
 
     # recognition that takes longer than the timeout (60 s in production): a clear error
@@ -111,7 +106,7 @@ def test_ac5(tmp_path):
     script.write_text("#!/bin/sh\nsleep 20\n")
     script.chmod(0o755)
     fast = VoiceService.whisper(
-        str(script), "/nonexistent-model", workdir=tmp_path / "w", timeout_s=2
+        str(script), "/nonexistent-model", workdir=tmp_path / "w", timeout_s=2, runner=FakeFfmpeg()
     )
     app = build_app(tmp_path / "c", Scripted(), voice=fast)
     with TestClient(app) as c:
@@ -175,21 +170,9 @@ def test_voice_goes_through_the_same_gates_as_the_other_child_posts(tmp_path):
         assert r.status_code == 403 and r.json()["detail"]["error"] == "notice_required"
 
 
-SPY = '#!/bin/sh\necho "$@" >> {log}\nexec ffmpeg "$@"\n'
-
-
-def _spied(tmp_path):
-    log = tmp_path / "ffmpeg.log"
-    script = tmp_path / "ffmpeg-spy.sh"
-    script.write_text(SPY.format(log=log))
-    script.chmod(0o755)
-    voice = VoiceService(Recognizer(), workdir=tmp_path / "w", ffmpeg=str(script))
-    return voice, log
-
-
 def test_hostile_payloads_are_refused_before_ffmpeg(tmp_path):
-    voice, log = _spied(tmp_path)
-    c, _model, _voice, _audio = boot_chat(tmp_path / "app", voice=voice)
+    c, _model, voice, _audio = boot_chat(tmp_path / "app")
+    fake = voice._runner
     with c:
         tid = seed(tmp_path / "app", key="Б")
         payloads = [
@@ -201,10 +184,10 @@ def test_hostile_payloads_are_refused_before_ffmpeg(tmp_path):
         for data in payloads:
             r = voice_post(c, tid, data=data)
             assert r.status_code == 422 and r.json()["code"] == "bad_audio", data[:12]
-        assert not log.exists()  # ffmpeg was never started
+        assert fake.cmds == []  # ffmpeg was never started
         # the real recording still converts, with a forced demuxer and the pipe protocol only
         assert voice_post(c, tid).status_code == 200
-        args = log.read_text()
+        args = " ".join(fake.cmds[-1])
         assert "-protocol_whitelist pipe" in args and "-f matroska,webm" in args
         assert "-i pipe:0" in args and "-nostdin" in args and "-t 30.6" in args
 
@@ -225,3 +208,21 @@ def test_the_size_limit_is_computed_before_the_audio_is_decoded(tmp_path, monkey
         # exactly 2 MiB is within the limit: it is decoded, and then refused as not audio
         r = voice_post(c, tid, data=b"\0" * MAX_BYTES)
         assert r.status_code == 422 and calls == [1]
+
+
+def test_a_missing_ffmpeg_is_a_clear_state_and_is_logged_once(tmp_path, caplog):
+    import logging
+
+    from app.voice import service
+
+    service._warned.clear()
+    broken = VoiceService(Recognizer(), workdir=tmp_path / "w", ffmpeg="/nonexistent/ffmpeg")
+    c, _model, _voice, _audio = boot_chat(tmp_path / "app", voice=broken)
+    with c, caplog.at_level(logging.WARNING, logger="app.voice"):
+        tid = seed(tmp_path / "app", key="Б")
+        for _ in range(2):
+            r = voice_post(c, tid)
+            assert r.status_code == 503 and r.json()["code"] == "unavailable"
+            assert "Распознавание сейчас недоступно" in r.json()["message"]
+        assert len([x for x in caplog.records if "ffmpeg is missing" in x.message]) == 1
+        assert not any((tmp_path / "w").iterdir())

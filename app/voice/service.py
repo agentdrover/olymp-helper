@@ -6,6 +6,7 @@
 """
 
 import contextlib
+import logging
 import os
 import shutil
 import signal
@@ -53,6 +54,18 @@ def sniff(data: bytes) -> str | None:
     return None
 
 
+UNAVAILABLE = "Распознавание сейчас недоступно. Напиши вопрос."
+log = logging.getLogger("app.voice")
+_warned: set[str] = set()
+
+
+def _warn_once(text: str) -> None:
+    """Нет ffmpeg или распознавателя - в журнал один раз, не на каждую запись."""
+    if text not in _warned:
+        _warned.add(text)
+        log.warning(text)
+
+
 class VoiceError(Exception):
     """Отказ с кодом и текстом, который читает ребёнок."""
 
@@ -91,11 +104,13 @@ class VoiceService:
         workdir: str | Path | None = None,
         timeout_s: float = TIMEOUT_S,
         ffmpeg: str = "ffmpeg",
+        runner: Callable[..., tuple[int, str]] | None = None,
     ):
         self.transcribe = transcribe
         self.workdir = None if workdir is None else Path(workdir)
         self.timeout_s = timeout_s
         self.ffmpeg = ffmpeg
+        self._runner = runner or _run  # тесты подставляют поддельный запуск ffmpeg
         self._slot = threading.Lock()  # очередь на 1 задачу
 
     @classmethod
@@ -106,6 +121,7 @@ class VoiceService:
                     [binary, "-m", model, "-f", str(wav), "-l", "ru", "-nt", "-np"], timeout
                 )
             except FileNotFoundError as exc:
+                _warn_once("whisper is missing: voice input is unavailable")
                 raise RuntimeError("recognizer is missing") from exc
             if code != 0:
                 raise RuntimeError("recognizer failed")
@@ -168,11 +184,10 @@ class VoiceService:
             "-c:a", "pcm_s16le", "-f", "wav", str(wav),
         ]  # fmt: skip
         try:
-            code, _ = _run(cmd, deadline - time.monotonic(), data)
+            code, _ = self._runner(cmd, deadline - time.monotonic(), data)
         except FileNotFoundError:
-            raise VoiceError(
-                "unavailable", 503, "Голос сейчас не работает. Напиши вопрос."
-            ) from None
+            _warn_once("ffmpeg is missing: voice input is unavailable")
+            raise VoiceError("unavailable", 503, UNAVAILABLE) from None
         if code != 0 or not wav.exists():
             raise VoiceError("bad_audio", 422, "Не получилось разобрать запись. Запиши ещё раз.")
         try:
@@ -199,9 +214,7 @@ class VoiceService:
         except RecognizerTimeout:
             raise
         except Exception:  # noqa: BLE001 - любой сбой распознавателя: ребёнку одно сообщение
-            raise VoiceError(
-                "unavailable", 503, "Голос сейчас не работает. Напиши вопрос."
-            ) from None
+            raise VoiceError("unavailable", 503, UNAVAILABLE) from None
         text = " ".join((raw or "").split())
         if not text:
             raise VoiceError(

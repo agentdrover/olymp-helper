@@ -165,9 +165,9 @@
         } else if (data && data.code === "too_long") {
           voiceState("too_long");
         } else {
-          voiceState(null, (data && data.message) || (data && data.detail && data.detail.message) || "Голос сейчас не работает. Напиши вопрос.");
+          voiceState(null, (data && data.message) || (data && data.detail && data.detail.message) || "Распознавание сейчас недоступно. Напиши вопрос.");
         }
-      }).catch(function () { voiceState(null, "Голос сейчас не работает. Напиши вопрос."); });
+      }).catch(function () { voiceState(null, "Распознавание сейчас недоступно. Напиши вопрос."); });
     };
     reader.readAsDataURL(blob);
   }
