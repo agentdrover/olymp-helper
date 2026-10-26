@@ -4,6 +4,7 @@
 import sqlite3
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -60,6 +61,32 @@ def _needs_notice(request: Request, conn) -> bool:
     return current_role(request) != PARENT and not notice_seen(conn)
 
 
+def child_same_origin(request: Request) -> None:
+    """Изменяющий запрос ребёнка идёт со своей страницы и несёт JSON.
+
+    У ребёнка нет сессии и токена, поэтому защита - источник запроса: (а) Sec-Fetch-Site, если он
+    есть, только same-origin или none; (б) Origin, если он есть, совпадает с адресом, по которому
+    открыт сайт, по host:port (схему не сравниваем: за TLS-прокси uvicorn видит http, а браузер -
+    https); (в) Content-Type только application/json: обычная HTML-форма его отправить не может,
+    а запрос с чужой страницы с таким типом требует предварительного запроса CORS, который мы не
+    разрешаем. Клиенты без Origin и Sec-Fetch-Site (тесты, старые браузеры) проходят по (в).
+    """
+    site = request.headers.get("sec-fetch-site")
+    origin = request.headers.get("origin")
+    foreign = site is not None and site not in ("same-origin", "none")
+    if not foreign and origin is not None:
+        foreign = urlsplit(origin).netloc != request.url.netloc
+    if foreign:
+        raise HTTPException(
+            403, detail={"error": "cross_origin", "message": "Чужой источник запроса."}
+        )
+    kind = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if kind != "application/json":
+        raise HTTPException(
+            415, detail={"error": "json_required", "message": "Запрос должен быть JSON."}
+        )
+
+
 def _is_fragment(request: Request) -> bool:
     return request.headers.get("hx-request") == "true"
 
@@ -97,7 +124,10 @@ def _flow(request: Request, conn) -> Flow:
 
 def _act(name: str):
     def decorate(fn):
-        @router.post("/tasks/{task_id}/" + name, dependencies=[Depends(child_notice_gate)])
+        @router.post(
+            "/tasks/{task_id}/" + name,
+            dependencies=[Depends(child_same_origin), Depends(child_notice_gate)],
+        )
         def route(task_id: int, request: Request, conn: Db, body: Body | None = None):
             _published(conn, task_id)
             flow = _flow(request, conn)
