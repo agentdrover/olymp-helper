@@ -44,6 +44,28 @@ class ModelService:
         self._fallback_event(session_id, primary, spare, first.error_kind)
         return self._attempt(spare, models[spare], system, messages, schema, fallback=True)
 
+    def complete_on(
+        self,
+        channel: str,
+        system: str,
+        messages: list[dict],
+        schema: dict | None = None,
+        session_id: int | None = None,
+    ) -> ModelResult:
+        """Запрос к ОДНОМУ названному каналу, без запасного: так работает независимый судья.
+        Запуск учитывается в общем дневном лимите, как любой другой."""
+        models = self._models()
+        return self._attempt(channel, models[channel], system, messages, schema, fallback=False)
+
+    def _models(self) -> dict:
+        claude_model, cursor_model = self.conn.execute(
+            "SELECT claude_model, cursor_model FROM settings WHERE id = 1"
+        ).fetchone()
+        return {
+            "claude": claude_model or DEFAULT_MODELS["claude"],
+            "cursor": cursor_model or DEFAULT_MODELS["cursor"],
+        }
+
     def _attempt(self, name, model, system, messages, schema, fallback) -> ModelResult:
         run_id = self.ledger.reserve(name, model, fallback)
         if run_id is None:
