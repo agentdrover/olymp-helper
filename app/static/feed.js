@@ -88,8 +88,11 @@
 
   document.addEventListener("keydown", (e) => {
     const t = e.target;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+    // В поле ввода все клавиши принадлежат полю.
+    if (t && t.closest && t.closest("input, textarea, select, [contenteditable]")) return;
     if (e.key === "Enter") {
+      // Enter на кнопке или ссылке (например, «Выйти») нажимает её, а не подтверждает задание.
+      if (t && t.closest && t.closest("button, a")) return;
       const b = feed.querySelector('button[data-action="confirm"], button[data-action="resolve"][data-choice="key"]');
       if (b) { e.preventDefault(); b.click(); }
     } else if (e.key === "ArrowRight") {

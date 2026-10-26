@@ -1,10 +1,10 @@
-{% extends "base.html" %}
+{% extends "base_parent.html" %}
 {% block title %}Новая пачка вопросов{% endblock %}
 {% block content %}
 <h1>Новая пачка вопросов</h1>
 <p class="hint">Модель составит вопросы по теме. Они попадут в ленту проверки черновиками: ребёнок увидит вопрос только после вашего подтверждения.</p>
 {% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
-<form id="generate" method="post" action="/parent/generate">
+<form id="generate" class="card" method="post" action="/parent/generate">
   <p><label for="topic">Тема</label><br>
     <select id="topic" name="topic" required>
       {% for t in topics %}<option value="{{ t.code }}">{% if t.parent_code %}— {% endif %}{{ t.title }}</option>{% endfor %}

@@ -1,24 +1,25 @@
-{% extends "base.html" %}
+{% extends "base_parent.html" %}
 {% block title %}Материалы{% endblock %}
 {% block content %}
-<h1>Материалы</h1>
-<form id="upload" method="post" action="/parent/materials" enctype="multipart/form-data">
-  <p><input type="file" name="file" accept="application/pdf" required></p>
+<h1>Материалы и модель</h1>
+<h2>Материалы</h2>
+<form id="upload" class="card" method="post" action="/parent/materials" enctype="multipart/form-data">
+  <p><input type="file" name="file" aria-label="PDF-файл" accept="application/pdf" required></p>
   <p>
-    <select name="kind">
+    <select name="kind" aria-label="Что это за файл">
       <option value="tasks">Сборник заданий</option>
       <option value="key">Ключ ответов</option>
       <option value="textbook">Учебник</option>
     </select>
-    <input name="year" placeholder="Год" size="6">
-    <input name="stage" placeholder="Этап" size="12">
-    <input name="variant" placeholder="Вариант" size="8">
+    <input name="year" aria-label="Год" placeholder="Год" size="6">
+    <input name="stage" aria-label="Этап" placeholder="Этап" size="12">
+    <input name="variant" aria-label="Вариант" placeholder="Вариант" size="8">
   </p>
   <button class="primary">Загрузить</button>
   <span class="hint">До 50 МБ и 400 страниц. Импорт идёт в фоне, статус виден ниже.</span>
 </form>
-<table>
-  <tr><th>№</th><th>Тип</th><th>Год</th><th>Вариант</th><th>Статус</th><th>Заданий</th></tr>
+<div class="panel"><table>
+  <thead><tr><th scope="col">№</th><th scope="col">Тип</th><th scope="col">Год</th><th scope="col">Вариант</th><th scope="col">Статус</th><th scope="col">Заданий</th></tr></thead>
   {% for m in materials %}
   <tr>
     <td>{{ m.id }}</td><td>{{ m.kind }}</td><td>{{ m.year or "" }}</td><td>{{ m.variant or "" }}</td>
@@ -26,6 +27,6 @@
     <td>{{ m.tasks }}</td>
   </tr>
   {% endfor %}
-</table>
+</table></div>
 <p><a href="/parent/review">Лента проверки</a> · <a href="/parent/generate">Составить пачку вопросов</a></p>
 {% endblock %}

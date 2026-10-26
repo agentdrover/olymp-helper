@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block body_class %}role-parent{% endblock %}
+{% block shell %}
+{% set path = request.url.path %}
+<div class="shell">
+  <nav class="rail rail-parent" aria-label="Разделы родителя">
+    <div class="brand">Помощник</div>
+    <div class="mode">режим родителя</div>
+    <a href="/parent/review"{% if path.startswith("/parent/review") or path.startswith("/parent/tasks") %} aria-current="page"{% endif %}>Проверка заданий</a>
+    <a href="/parent/materials"{% if path.startswith("/parent/materials") %} aria-current="page"{% endif %}>Материалы и модель</a>
+    <div class="spacer"></div>
+    <form method="post" action="/parent/logout"><button class="navlink" type="submit">Выйти</button></form>
+  </nav>
+  <main class="content">{% block content %}{% endblock %}</main>
+</div>
+{% endblock %}
