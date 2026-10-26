@@ -19,7 +19,7 @@ from tests.bank_helpers import (
     upload,
 )
 
-IN_CATALOG = "cyt.cell"
+IN_CATALOG = "b10.cell"
 OUT_OF_CATALOG = "astro.stars"
 
 
@@ -60,16 +60,16 @@ def test_a_proposed_topic_comes_from_the_catalog_and_waits_for_the_parent(tmp_pa
         assert c.get(f"/api/tasks/{tid}", headers=CHILD).status_code == 404
 
         # the parent edits the topic, then confirms the task
-        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"topic": "gen.heredity"})
+        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"topic": "b14.heredity"})
         assert r.status_code == 200, r.text
-        assert row(tmp_path, tid)["topic"] == "gen.heredity"
+        assert row(tmp_path, tid)["topic"] == "b14.heredity"
         assert c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={}).status_code == 200
 
         # published now; the child's views never carry the topic
         pages = child_json(c)
         assert len(json.loads(pages[0])["tasks"]) == 1
         for text in pages:
-            assert "topic" not in text and "gen.heredity" not in text and IN_CATALOG not in text
+            assert "topic" not in text and "b14.heredity" not in text and IN_CATALOG not in text
 
 
 def test_a_topic_outside_the_catalog_is_rejected(tmp_path):
@@ -83,7 +83,7 @@ def test_a_topic_outside_the_catalog_is_rejected(tmp_path):
         assert r.status_code == 422
         assert row(tmp_path, tid)["topic"] is None
         # an empty value clears the topic
-        c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"topic": "bot.root"})
+        c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"topic": "b05.morph"})
         c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"topic": ""})
         assert row(tmp_path, tid)["topic"] is None
 
@@ -94,16 +94,39 @@ def test_a_missing_topic_stays_unmarked(tmp_path):
         assert row(tmp_path, tid)["topic"] is None
 
 
+OFFICIAL_BLOCKS = [
+    ("Биология как наука. Методы научного познания", "5, 6", "7"),
+    ("Признаки живых организмов", "5, 6", "7"),
+    ("Царство бактерий", "6", "7"),
+    ("Царство грибов", "6", "7"),
+    ("Царство растений", "7", "7"),
+    ("Царство животных", "8", "8"),
+    ("Система органического мира", "9", "9"),
+    ("Человек", "9", "9"),
+    ("Организм и окружающая среда. Экология", "10", "10"),
+    ("Цитология", "10", "10"),
+    ("Микробиология и биотехнология", "10", "10"),
+    ("Многообразие и эволюция живой природы", "11", "11"),
+    ("Биология клетки. Биохимия", "11", "11"),
+    ("Молекулярная биология. Генетика", "11", "11"),
+]
+
+
 def test_the_catalog_migration(tmp_path):
     conn = connect(tmp_path / "olymp.db")
     migrate(conn)
     rows = conn.execute("SELECT code, title, parent_code FROM topic").fetchall()
     codes = {r[0] for r in rows}
     sections = {r[0] for r in rows if r[2] is None}
-    assert {"bot", "zoo", "hum", "cyt", "gen", "eco", "evo"} <= sections
-    assert IN_CATALOG in codes and "gen.heredity" in codes
+    assert IN_CATALOG in codes and "b14.heredity" in codes
     assert all(r[1].strip() for r in rows)
     assert all(r[2] is None or r[2] in sections for r in rows)
+    # exactly the 14 official content blocks, in order, with both grade columns
+    blocks = conn.execute(
+        "SELECT title, school_grade, municipal_grade FROM topic "
+        "WHERE parent_code IS NULL ORDER BY position"
+    ).fetchall()
+    assert [tuple(b) for b in blocks] == OFFICIAL_BLOCKS
     import sqlite3
 
     import pytest
@@ -122,11 +145,11 @@ def test_a_topic_change_with_the_unchanged_text_makes_no_revision(tmp_path):
         assert len(json.loads(c.get("/api/tasks", headers=CHILD).text)["tasks"]) == 1
 
         # the payload the review card sends: the text as it is, a new topic
-        payload = {"text": before["text"], "manual_condition": False, "topic": "gen.heredity"}
+        payload = {"text": before["text"], "manual_condition": False, "topic": "b14.heredity"}
         r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json=payload)
         assert r.status_code == 200, r.text
         after = row(tmp_path, tid)
-        assert after["topic"] == "gen.heredity"
+        assert after["topic"] == "b14.heredity"
         assert after["revision"] == before["revision"]
         assert after["import_status"] == "checked"
         assert after["model_answer"] == before["model_answer"]
@@ -138,7 +161,7 @@ def test_a_real_text_change_still_makes_a_revision(tmp_path):
     with c:
         c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={})
         before = row(tmp_path, tid)
-        payload = {"text": "Совсем другое условие", "topic": "gen.heredity"}
+        payload = {"text": "Совсем другое условие", "topic": "b14.heredity"}
         assert c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json=payload).status_code == 200
         after = row(tmp_path, tid)
         assert after["revision"] == before["revision"] + 1
