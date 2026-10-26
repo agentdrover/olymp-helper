@@ -6,6 +6,7 @@ teacher_note сюда не попадают; ответ ключа есть то
 import json
 from datetime import datetime
 
+from app.chat import store as chat_store
 from app.ingest.publish import assist_mode, child_view, has_key
 from app.tutor import state
 from app.tutor.panel import Inflight, live_state, panel
@@ -64,9 +65,12 @@ def build_view(
             correction = (
                 "Задание или ключ к нему исправили после твоей прошлой попытки: разбираем заново."
             )
+    chat = chat_store.screen_items(conn, chat_store.open_session(conn, now), task["id"])
     return {
         "ok": True,
         "correction": correction,
+        "chat": chat,
+        "compose": chat_store.compose_of(chat),
         "state": current,
         "terminal": terminal,
         "repeat": bool(run["is_repeat"]) if run else False,

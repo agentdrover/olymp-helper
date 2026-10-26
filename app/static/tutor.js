@@ -1,12 +1,15 @@
-/* Экран задания: ответы, подсказки, «объясни иначе». Сервер хранит состояние и строит HTML;
-   здесь только отправка действий и замена фрагмента. */
+/* Экран задания: ответы, подсказки, «объясни иначе», вопрос помощнику и голос. Сервер хранит
+   состояние и строит HTML; здесь только отправка действий, запись голоса и замена фрагмента. */
 (function () {
   "use strict";
   var root = document.getElementById("tutor");
   if (!root) return;
   var base = root.getAttribute("data-url");
   var THINKING = "Думаю… обычно 5–15 с";
-  var MODEL_ACTS = { attempt: 1, hint: 1, explain: 1, repeat: 0 };
+  var MODEL_ACTS = { attempt: 1, hint: 1, explain: 1, repeat: 0, chat: 1 };
+  var MAX_RECORD_MS = 30000;
+  var MAX_BYTES = 2 * 1024 * 1024;
+  var draft = "";
   var timer = null;
 
   function zoomDialog() { return root.querySelector("dialog.zoom"); }
@@ -29,9 +32,13 @@
     else if (wait) timer = setTimeout(refresh, (parseInt(wait.getAttribute("data-wait"), 10) + 1) * 1000);
   }
 
+  function field() { return document.getElementById("chat-input"); }
+
   function swap(html) {
     var wasOpen = zoomDialog() && zoomDialog().open;
+    if (field()) draft = field().value;  // недописанный вопрос не пропадает при обновлении панели
     root.innerHTML = html;
+    if (field()) field().value = draft;
     if (wasOpen) openZoom({ preventDefault: function () {} });
     schedule();
   }
@@ -80,6 +87,120 @@
     return { answer: answer, confidence: conf ? conf.value : null };
   }
 
+  // ---------------------------------------------------------------- вопрос помощнику
+
+  function sendQuestion(mode) {
+    var box = field();
+    var text = box ? box.value.trim() : "";
+    if (!text) { if (box) box.focus(); return; }
+    setThinking();
+    fetch(base + "/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "HX-Request": "true" },
+      body: JSON.stringify({ message: text, mode: mode }),
+    }).then(function (r) { return r.text(); }).then(function (html) {
+      // вопрос ушёл и получил ответ, если панель не занята и не сообщает об отказе
+      var sent = html.indexOf('data-panel="idle"') !== -1;
+      if (sent && mode === "chat") draft = "";
+      else if (field()) draft = field().value;
+      swap(html);
+      if (sent && mode === "chat" && field()) field().value = "";
+    }).catch(function () {
+      var s = root.querySelector(".helper-status");
+      if (s) s.textContent = "Помощник сейчас не отвечает — проверка по ключу работает.";
+    });
+  }
+
+  // ------------------------------------------------------------------------ голос
+
+  var rec = { recorder: null, stream: null, chunks: [], timer: null, tooLong: false };
+
+  function voiceState(name, text) {
+    root.querySelectorAll("[data-voice-state], [data-voice-error]").forEach(function (p) { p.hidden = true; });
+    var shown = name ? root.querySelector('[data-voice-state="' + name + '"]') : null;
+    if (!shown && text) {
+      shown = root.querySelector("[data-voice-error]");
+      if (shown) shown.textContent = text;
+    }
+    if (shown) shown.hidden = false;
+  }
+
+  function recordButton() { return document.getElementById("voice-record"); }
+
+  function setRecording(on) {
+    var b = recordButton();
+    if (!b) return;
+    b.classList.toggle("recording", on);
+    b.textContent = on ? "Остановить запись" : "Записать голосом";
+  }
+
+  function pickMime() {
+    var list = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
+    for (var i = 0; i < list.length; i++) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(list[i])) return list[i];
+    }
+    return "";  // браузер выберет сам
+  }
+
+  function releaseStream() {
+    if (rec.stream) rec.stream.getTracks().forEach(function (t) { t.stop(); });
+    rec.stream = null;
+  }
+
+  function sendAudio(blob) {
+    if (blob.size > MAX_BYTES) return voiceState("too_long");
+    voiceState("recognizing");
+    var reader = new FileReader();
+    reader.onload = function () {
+      var b64 = String(reader.result).split(",")[1] || "";
+      fetch(base + "/voice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio: b64, mime: blob.type || "audio/webm" }),
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        if (data && data.ok) {
+          var box = field();
+          if (box) { box.value = (box.value ? box.value + " " : "") + data.text; box.focus(); }
+          voiceState(null);
+        } else if (data && data.code === "too_long") {
+          voiceState("too_long");
+        } else {
+          voiceState(null, (data && data.message) || (data && data.detail && data.detail.message) || "Голос сейчас не работает. Напиши вопрос.");
+        }
+      }).catch(function () { voiceState(null, "Голос сейчас не работает. Напиши вопрос."); });
+    };
+    reader.readAsDataURL(blob);
+  }
+
+  function stopRecording() {
+    clearTimeout(rec.timer);
+    if (rec.recorder && rec.recorder.state !== "inactive") rec.recorder.stop();
+  }
+
+  function startRecording() {
+    if (!window.isSecureContext || !navigator.mediaDevices || !window.MediaRecorder) {
+      return voiceState("insecure");
+    }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      var mime = pickMime();
+      rec.stream = stream;
+      rec.chunks = [];
+      rec.tooLong = false;
+      rec.recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      rec.recorder.ondataavailable = function (e) { if (e.data && e.data.size) rec.chunks.push(e.data); };
+      rec.recorder.onstop = function () {
+        setRecording(false);
+        releaseStream();
+        if (rec.tooLong) return voiceState("too_long");  // длиннее 30 с не отправляем
+        sendAudio(new Blob(rec.chunks, { type: rec.recorder.mimeType || mime || "audio/webm" }));
+      };
+      rec.recorder.start();
+      voiceState(null);
+      setRecording(true);
+      rec.timer = setTimeout(function () { rec.tooLong = true; stopRecording(); }, MAX_RECORD_MS);
+    }).catch(function () { voiceState("no_mic"); });
+  }
+
   root.addEventListener("submit", function (ev) {
     var form = ev.target;
     if (form.getAttribute("data-act") !== "attempt") return;
@@ -90,6 +211,15 @@
   root.addEventListener("click", function (ev) {
     var t = ev.target.closest("button, a");
     if (!t) return;
+    if (t.hasAttribute("data-insert")) {  // готовая формулировка: в поле для правки, не в отправку
+      var box = field();
+      if (box) { box.value = t.getAttribute("data-insert"); box.focus(); }
+      return;
+    }
+    if (t.hasAttribute("data-chat-mode")) return sendQuestion(t.getAttribute("data-chat-mode"));
+    if (t.hasAttribute("data-voice")) {
+      return rec.recorder && rec.recorder.state === "recording" ? stopRecording() : startRecording();
+    }
     if (t.hasAttribute("data-zoom")) return openZoom(ev);
     if (t.hasAttribute("data-close-zoom")) return closeZoom();
     var open = t.getAttribute("data-open");

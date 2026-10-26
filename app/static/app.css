@@ -175,3 +175,17 @@ dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max
 .stat .num { font-family: var(--font-head); font-size: 26px; font-weight: 600; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 [hidden] { display: none !important; }
+
+/* вопрос помощнику (OH-T07): чат, «помоги задать вопрос», голос; общие токены панели */
+.chat { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; }
+.msg-child { background: #E4EAF6; }
+.cite { margin: 8px 0 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: #fff; border-radius: 8px; font-size: 14px; color: var(--ink-2); }
+.cite footer { font: 12px var(--font-mono); color: var(--ink-3); margin-top: 4px; }
+.compose { display: flex; flex-direction: column; gap: 6px; }
+.compose .insert { text-align: left; white-space: normal; }
+.chat-form { display: flex; flex-direction: column; gap: 8px; }
+.chat-form label { font-weight: 600; }
+.chat-form textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; resize: vertical; }
+.voice-state { margin: 0; padding: 8px 12px; border-radius: 10px; background: #FCEFD8; color: #6E3F00; }
+.voice-state[data-voice-state="recognizing"] { background: #E4EAF6; color: var(--ink-2); font-weight: 600; }
+#voice-record.recording { background: var(--warn); color: #fff; }
