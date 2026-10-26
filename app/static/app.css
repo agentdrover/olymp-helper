@@ -95,3 +95,9 @@ fieldset { border: 1px solid var(--line); border-radius: 12px; }
   .bare { padding: 24px 16px; }
   h1 { font-size: 22px; }
 }
+
+/* Вход родителя (экран 11 холста): узкая карточка по центру на тоне рейки родителя. */
+.login { min-height: 70vh; display: flex; align-items: center; justify-content: center; }
+.login-card { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 14px; padding: 32px; border-radius: 20px; }
+.login-card h1 { margin: 0; font-size: 22px; }
+.login-card input { font-size: 18px; padding: 10px 12px; }
