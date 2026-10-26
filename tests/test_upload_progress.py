@@ -2,6 +2,7 @@
 
 import re
 import threading
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -109,7 +110,12 @@ def test_progress_is_reported_per_chunk(tmp_path):
             assert model.entered[n].wait(30)
             status = c.get("/parent/materials/1", headers=API).json()
             assert status["import_status"] == "running"
-            assert status["progress"] == {"chunk": n + 1, "chunks": 3, "accepted": n}
+            assert status["progress"] == {
+                "phase": "chunks",
+                "chunk": n + 1,
+                "chunks": 3,
+                "accepted": n,
+            }
             page = c.get("/parent/materials", headers=HTML).text
             assert f"Разбирается: порция {n + 1} из 3, принято заданий {n}" in page
             assert 'data-live="1"' in page
@@ -138,6 +144,9 @@ def test_accept_is_parsed_with_q_values(tmp_path):
                 ("application/json,text/html;q=0", False),
                 ("*/*", False),
                 ("text/html;q=0.5,application/json", False),
+                ("text/html,application/json;q=NaN", True),  # a broken q reads as 0
+                ("text/html;q=inf,application/json", False),
+                ("text/html;q=7,application/json", False),
                 ("text/html,application/json", True),  # tie, a multipart form: the page
             ]
         ):
@@ -150,7 +159,7 @@ def test_accept_is_parsed_with_q_values(tmp_path):
 def test_a_late_entry_of_an_expired_run_is_not_shown(tmp_path):
     model = ChunkGate(4)
     pdf = text_pdf([["1. " + LONG], ["2. " + LONG]])
-    app = build_app(tmp_path, model, sync_imports=False, import_timeout=0.5)
+    app = build_app(tmp_path, model, sync_imports=False, import_stall=0.5)
     with TestClient(app) as c:
         assert upload(c, pdf).status_code == 202
         assert model.entered[0].wait(30)
@@ -167,10 +176,10 @@ def test_a_late_entry_of_an_expired_run_is_not_shown(tmp_path):
         assert model.entered[1].wait(30)
         status = c.get("/parent/materials/1", headers=API).json()
         assert status["import_status"] == "running"
-        assert status["progress"] == {"chunk": 1, "chunks": 2, "accepted": 0}
+        assert status["progress"] == {"phase": "chunks", "chunk": 1, "chunks": 2, "accepted": 0}
         app.state.ctx.progress.update(1, run_a, 2, 2, 7)  # run A writes late
         status = c.get("/parent/materials/1", headers=API).json()
-        assert status["progress"] is None
+        assert status["progress"]["chunk"] == 1 and status["progress"]["accepted"] == 0
         assert "принято заданий 7" not in c.get("/parent/materials", headers=HTML).text
         for gate in model.go:
             gate.set()
@@ -184,3 +193,124 @@ def test_the_polling_script_chains_timeouts_and_reloads_once():
     assert "setTimeout(tick" in src and src.count("setTimeout(") == 1
     assert "if (!reloading) {" in src and src.count("location.reload()") == 1
     assert src.index("reloading = true") < src.index("location.reload()")
+
+
+# ---------------------------------------------------------------- stall deadline (heartbeat)
+
+
+class SlowChunks:
+    """Every model call takes `delay` seconds; counts calls and can be cut off by the test."""
+
+    def __init__(self, delay):
+        self.delay = delay
+        self.calls = 0
+
+    def complete(self, system, messages, schema=None, session_id=None):
+        self.calls += 1
+        time.sleep(self.delay)
+        n = self.calls
+        return ModelResult(None, reply(make_task(n, pages=[n])), "claude", "s", 1, None)
+
+
+def six_pages():
+    return text_pdf([[f"{n}. " + LONG] for n in range(1, 7)])
+
+
+def two_pages():
+    return text_pdf([[f"{n}. " + LONG] for n in range(1, 3)])
+
+
+def wait_status(client, want, seconds=30):
+    for _ in range(int(seconds * 20)):
+        st = client.get("/parent/materials/1", headers=API).json()
+        if st["import_status"] == want:
+            return st
+        time.sleep(0.05)
+    raise AssertionError(f"never {want}: {st}")
+
+
+def test_a_long_import_that_keeps_reporting_is_not_cut_off(tmp_path):
+    # 6 chunks x 0.3 s = 1.8 s in all: past a 1 s global deadline, but a call is under the stall
+    model = SlowChunks(0.3)
+    app = build_app(tmp_path, model, sync_imports=False, import_stall=1.0)
+    with TestClient(app) as c:
+        upload(c, six_pages())
+        done = wait_status(c, "done")
+        assert done["tasks"] == 6 and model.calls == 6
+
+
+def test_a_silent_import_expires_after_the_stall_limit_and_is_logged(tmp_path, caplog):
+    model = ChunkGate(3)
+    app = build_app(tmp_path, model, sync_imports=False, import_stall=0.8)
+    caplog.set_level("WARNING", logger="app.ingest")
+    with TestClient(app) as c:
+        upload(c, two_pages())
+        assert model.entered[0].wait(30)
+        failed = wait_status(c, "failed")
+        assert "превышено время ожидания" in failed["import_error"]
+        lines = [r.getMessage() for r in caplog.records if "import expired" in r.getMessage()]
+        assert len(lines) == 1
+        assert "material=1" in lines[0] and "phase=chunks" in lines[0] and "chunk=1/2" in lines[0]
+        assert re.search(r"silent_s=\d+\.\d", lines[0])
+        for gate in model.go:
+            gate.set()
+
+
+def test_the_absolute_cap_ends_an_import_that_never_stops_reporting(tmp_path):
+    model = SlowChunks(0.25)  # reports all the time, never stalls
+    app = build_app(
+        tmp_path,
+        model,
+        sync_imports=False,
+        import_stall=5,
+        import_max_base=0.2,
+        import_max_per_chunk=0.1,
+    )
+    with TestClient(app) as c:
+        upload(c, six_pages())  # cap = 0.2 + 6 * 0.1 = 0.8 s < 1.5 s of work
+        assert "превышено время ожидания" in wait_status(c, "failed")["import_error"]
+
+
+def test_a_late_report_of_an_expired_run_does_not_resurrect_it(tmp_path):
+    model = ChunkGate(3)
+    app = build_app(tmp_path, model, sync_imports=False, import_stall=0.8)
+    with TestClient(app) as c:
+        upload(c, two_pages())
+        assert model.entered[0].wait(30)
+        conn = db(tmp_path)
+        run_a = conn.execute("SELECT run_id FROM material WHERE id = 1").fetchone()[0]
+        conn.close()
+        wait_status(c, "failed")
+        progress = app.state.ctx.progress
+        progress.update(1, run_a, 2, 2, 1)  # run A reports late
+        assert len(progress) == 0 and progress.snapshot(1, run_a) is None
+        for gate in model.go:
+            gate.set()
+
+
+def test_cancel_stops_further_model_calls(tmp_path):
+    class Hangs(SlowChunks):
+        def complete(self, *args, **kw):
+            self.delay = 2.0 if self.calls == 1 else 0.01  # the second call hangs past the stall
+            return super().complete(*args, **kw)
+
+    model = Hangs(0)
+    app = build_app(tmp_path, model, sync_imports=False, import_stall=1.2)
+    with TestClient(app) as c:
+        upload(c, six_pages())
+        wait_status(c, "failed")
+        assert model.calls == 2
+        time.sleep(2.5)  # the hung call returns; the expired run must not ask again
+        assert model.calls == 2
+        assert c.get("/parent/materials/1", headers=API).json()["tasks"] == 0
+
+
+def test_the_writing_phase_is_shown_with_its_own_text(tmp_path):
+    from app.ingest.progress import progress_text
+
+    assert progress_text({"phase": "writing", "chunk": 3, "chunks": 9, "accepted": 0}) == (
+        "Сохраняем задания и рисунки: 3 из 9"
+    )
+    assert progress_text({"phase": "reading", "chunk": 0, "chunks": 0, "accepted": 0}) == (
+        "Читаем страницы"
+    )

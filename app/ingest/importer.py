@@ -1,5 +1,6 @@
 """Импорт материала: текст по страницам, разбиение на задания моделью, запись (SPEC-1.0 1.7)."""
 
+import functools
 import json
 import logging
 import re
@@ -161,8 +162,10 @@ def _span(numbers: list[int]) -> str:
     return f"стр. {first}" if first == last else f"стр. {first}–{last}"
 
 
-def _ask(ctx, system: str, message: str, cancel: threading.Event):
+def _ask(ctx, system: str, message: str, cancel: threading.Event, pulse=None):
     _check(cancel)
+    if pulse is not None:
+        pulse()  # каждый запрос к модели - начало нового срока молчания
     result = ctx.model.complete(system, [{"role": "user", "content": message}], TASKS_SCHEMA)
     _check(cancel)
     if not getattr(result, "ok", False):
@@ -217,17 +220,17 @@ def _salvage(payload, numbers: set[int], catalog, skipped: list[str]):
     return good, _section_at_end(payload)
 
 
-def _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped):
+def _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped, pulse=None):
     """(задания порции, section_at_end). Неверная структура: одна повторная просьба с текстом
     ошибки, затем поштучный разбор; порция не валит импорт."""
     numbers = {n for n, _ in chunk}
     message = build_chunk_message(chunk, state)
-    payload = _ask(ctx, system, message, cancel)
+    payload = _ask(ctx, system, message, cancel, pulse)
     try:
         return _validate_chunk(payload, numbers, catalog)
     except InvalidStructure as exc:
         note = RETRY_NOTE.format(error=exc.safe)
-    payload = _ask(ctx, system, f"{message}\n\n{note}", cancel)
+    payload = _ask(ctx, system, f"{message}\n\n{note}", cancel, pulse)
     try:
         return _validate_chunk(payload, numbers, catalog)
     except InvalidStructure:
@@ -260,7 +263,8 @@ def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None =
     for index, chunk in enumerate(chunks, start=1):
         if report is not None:
             report(index, len(chunks), len(seen))
-        parsed, at_end = _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped)
+        pulse = None if report is None else functools.partial(report, index, len(chunks), len(seen))
+        parsed, at_end = _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped, pulse)
         for task in parsed:
             state = merge_labels(state, task)
             if task.get("labels_only"):
@@ -381,12 +385,16 @@ def _foreign(task: dict) -> list[str]:
     return answer_units(task.get("answer_text"))
 
 
-def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
+def _write_tasks(conn, material, tasks, pdf: bytes, cancel=None, report=None) -> int:
     doc = pymupdf.open("pdf", pdf)
     try:
         located = _positions(PageIndex(doc), tasks)
         stops = _stops(located)
         for index, task in enumerate(tasks):
+            if cancel is not None:
+                _check(cancel)  # прерванный запуск не пишет дальше; транзакция откатится
+            if report is not None:
+                report(index + 1, len(tasks))
             reason, wants_figure = _classify(task)
             figure = None
             if wants_figure:
@@ -497,6 +505,7 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
             or material["run_id"] != run_id
         ):
             return
+        ctx.progress.begin(material_id, run_id)
         try:
             pdf = ctx.material_path(material["file"]).read_bytes()
             pages = extract_pages(pdf)
@@ -555,7 +564,16 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                     material_id,
                     run_id,
                     len(pages),
-                    lambda: _write_tasks(conn, material, tasks, pdf),
+                    lambda: _write_tasks(
+                        conn,
+                        material,
+                        tasks,
+                        pdf,
+                        cancel,
+                        lambda done, total: ctx.progress.update(
+                            material_id, run_id, done, total, phase="writing"
+                        ),
+                    ),
                     note=note,
                 )
         except ImportAborted:

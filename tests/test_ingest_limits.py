@@ -46,10 +46,10 @@ def test_ac6(tmp_path):
     assert limits.MAX_PDF_BYTES == 50 * MB
     assert limits.MAX_PAGES == 400
     assert limits.MAX_UNPACKED_BYTES == 200 * MB
-    assert limits.IMPORT_TIMEOUT_S == 600
+    assert limits.IMPORT_STALL_S == 300
 
     blocker = BlockingModel()
-    app = build_app(tmp_path, blocker, sync_imports=False, import_timeout=0.4)
+    app = build_app(tmp_path, blocker, sync_imports=False, import_stall=0.4)
     with TestClient(app) as c:
         # Over 50 MB: refused before anything is parsed.
         r = upload(c, b"%PDF-1.4\n" + b"0" * (50 * MB + 1))

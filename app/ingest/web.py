@@ -3,6 +3,7 @@
 import functools
 import hashlib
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Annotated
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 from app.ingest import packs, review
 from app.ingest.figure_service import confirm_figure
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
+from app.ingest.progress import progress_text
 from app.ingest.publish import child_view, is_published
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
@@ -105,6 +107,8 @@ def _accept_q(header: str) -> dict[str, float]:
                     q = float(param[2:])
                 except ValueError:
                     q = 0.0
+                if not math.isfinite(q) or not 0.0 <= q <= 1.0:
+                    q = 0.0
         out[kind] = q
     return out
 
@@ -133,7 +137,12 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
         "parent/materials.html",
         {
             "materials": rows,
-            "progress": {m["id"]: progress.get(m["id"], m["run_id"]) for m in rows},
+            "progress": {
+                m["id"]: progress_text(
+                    progress.get(m["id"], m["run_id"]), m["import_status"] == "running"
+                )
+                for m in rows
+            },
             "flash": flash,
             "error": error,
         },
@@ -260,7 +269,11 @@ def material_status(material_id: int, request: Request, conn: Db):
     out = dict(row)
     out.pop("run_id")
     running = row["import_status"] in ("queued", "running")
-    out["progress"] = ctx_of(request).progress.get(material_id, row["run_id"]) if running else None
+    item = ctx_of(request).progress.get(material_id, row["run_id"]) if running else None
+    out["progress"] = item
+    out["progress_text"] = (
+        progress_text(item, row["import_status"] == "running") if running else None
+    )
     return out
 
 

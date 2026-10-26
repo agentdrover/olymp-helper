@@ -6,11 +6,6 @@
   var PERIOD_MS = 6000;
   var reloading = false; // перезагрузка страницы - один раз на всю страницу
 
-  function text(p) {
-    if (!p) return "Разбирается: готовим порции";
-    return "Разбирается: порция " + p.chunk + " из " + p.chunks + ", принято заданий " + p.accepted;
-  }
-
   function watch(row) {
     var id = row.getAttribute("data-material-id");
 
@@ -26,7 +21,7 @@
           if (d.import_status === "queued" || d.import_status === "running") {
             row.querySelector(".js-status").textContent = d.import_status;
             var note = row.querySelector(".js-progress");
-            if (note) note.textContent = d.progress || d.import_status === "running" ? text(d.progress) : "В очереди";
+            if (note) note.textContent = d.progress_text;
             row.querySelector(".js-tasks").textContent = d.tasks;
             return next();
           }

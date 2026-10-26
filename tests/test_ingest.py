@@ -344,8 +344,8 @@ def test_a_stale_worker_cannot_overwrite_a_newer_run(tmp_path):
     pdf = text_pdf([["1. задание"]])
     blocker_a = BlockingModel("Условие запуска A")  # run A hangs, then answers
     blocker_b = BlockingModel("Условие запуска B")  # run B is still running when A finishes
-    app_a = build_app(tmp_path, blocker_a, sync_imports=False, import_timeout=600)
-    app_b = build_app(tmp_path, blocker_b, sync_imports=False, import_timeout=600)
+    app_a = build_app(tmp_path, blocker_a, sync_imports=False, import_stall=600)
+    app_b = build_app(tmp_path, blocker_b, sync_imports=False, import_stall=600)
     with TestClient(app_a) as client_a:
         mid = upload(client_a, pdf).json()["material_id"]
         assert blocker_a.entered.wait(5)  # run A is running

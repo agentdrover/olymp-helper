@@ -13,7 +13,7 @@ from app.account_web import public as account_public
 from app.db import connect, migrate, schema_version
 from app.ingest.context import AppContext, ExecutorModel
 from app.ingest.jobs import ImportJobs
-from app.ingest.limits import IMPORT_TIMEOUT_S
+from app.ingest.limits import IMPORT_MAX_BASE_S, IMPORT_MAX_PER_CHUNK_S, IMPORT_STALL_S
 from app.ingest.packs import fail_stale
 from app.ingest.render import PageCache
 from app.ingest.web import parent as parent_router
@@ -53,7 +53,9 @@ def create_app(
     model=None,
     data_dir: str | Path | None = None,
     sync_imports: bool = False,
-    import_timeout: float = IMPORT_TIMEOUT_S,
+    import_stall: float = IMPORT_STALL_S,
+    import_max_base: float = IMPORT_MAX_BASE_S,
+    import_max_per_chunk: float = IMPORT_MAX_PER_CHUNK_S,
     clock=None,
 ) -> FastAPI:
     """model - объект с complete(system, messages, schema); тесты подменяют только его.
@@ -104,7 +106,13 @@ def create_app(
     ctx = AppContext(path, data, app.state, PageCache(data / "cache" / "pages"))
     app.state.ctx = ctx
     app.state.page_cache = ctx.page_cache
-    app.state.imports = ImportJobs(ctx, sync=sync_imports, timeout=import_timeout)
+    app.state.imports = ImportJobs(
+        ctx,
+        sync=sync_imports,
+        stall=import_stall,
+        max_base=import_max_base,
+        max_per_chunk=import_max_per_chunk,
+    )
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(account_parent)
     app.include_router(account_public)
