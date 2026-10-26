@@ -78,7 +78,8 @@
 
   document.addEventListener("keydown", (e) => {
     const t = e.target;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+    // Фокус на поле, кнопке или ссылке: Enter принадлежит им (например, «Выйти»), не ленте.
+    if (t && t.closest && t.closest("input, textarea, select, button, a, [contenteditable]")) return;
     if (e.key === "Enter") {
       const b = feed.querySelector('button[data-action="confirm"], button[data-action="resolve"][data-choice="key"]');
       if (b) { e.preventDefault(); b.click(); }
