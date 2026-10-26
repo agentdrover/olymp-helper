@@ -1,12 +1,27 @@
-{% extends "base.html" %}
+{% extends "base_child.html" %}
 {% block title %}Задания{% endblock %}
 {% block content %}
-<h1>Задания</h1>
+<header>
+  <div class="kicker">Сеченовская олимпиада · отборочный этап · биология 5–7</div>
+  <h1>Задания</h1>
+</header>
 {% if tasks %}
-<ul>
-  {% for t in tasks %}<li><a href="/tasks/{{ t.id }}">Задание {{ t.number }}</a> — {{ t.source }}</li>{% endfor %}
-</ul>
+<div class="panel">
+  <table>
+    <thead><tr><th scope="col">№</th><th scope="col">Задание</th><th scope="col">Тема</th><th scope="col">Тип</th></tr></thead>
+    <tbody>
+    {% for t in tasks %}
+      <tr>
+        <td class="mono">{{ t.number }}</td>
+        <td><a href="/tasks/{{ t.id }}">Задание {{ t.number }}</a> <span class="hint">— {{ t.source }}</span></td>
+        <td>{{ topics.get(t.id) or "—" }}</td>
+        <td><span class="pill">{{ type_labels.get(t.type, t.type) }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
-<p>Пока нет проверенных заданий.</p>
+<p class="card">Пока нет проверенных заданий.</p>
 {% endif %}
 {% endblock %}

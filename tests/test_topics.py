@@ -65,7 +65,8 @@ def test_a_proposed_topic_comes_from_the_catalog_and_waits_for_the_parent(tmp_pa
         assert row(tmp_path, tid)["topic"] == "b14.heredity"
         assert c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={}).status_code == 200
 
-        # published now; the child's views never carry the topic
+        # published now; the child's JSON never carries the topic code (the list page shows
+        # only the catalog title — owner decision 26.10, canvas screen 3)
         pages = child_json(c)
         assert len(json.loads(pages[0])["tasks"]) == 1
         for text in pages:

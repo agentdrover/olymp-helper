@@ -45,4 +45,8 @@ def require_parent(request: Request) -> None:
         log.warning("OLYMP_PARENT_KEY не задан: родительский доступ закрыт")
         raise HTTPException(status_code=403, detail="Только для родителя")
     if current_role(request) != PARENT:
+        # Браузер, открывший страницу родителя без входа, попадает на форму входа;
+        # запросы скриптов и API по-прежнему получают 403.
+        if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+            raise HTTPException(status_code=303, headers={"Location": "/parent/login"})
         raise HTTPException(status_code=403, detail="Только для родителя")

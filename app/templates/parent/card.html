@@ -16,7 +16,7 @@
     <div class="body">
       <p><strong>Задание {{ card.number }}</strong> ({{ card.type }})</p>
       <p class="text">{{ card.text }}</p>
-      <p class="hint">Тема: <b>{{ card.topic_title or "не размечено" }}</b> (ребёнку не показывается, подтверждается вместе с заданием)</p>
+      <p class="hint">Тема: <b>{{ card.topic_title or "не размечено" }}</b> (подтверждается вместе с заданием; после этого ребёнок видит название темы в списке заданий)</p>
       {% if card.options %}
       <ul>
         {% if card.options is mapping %}
