@@ -5,6 +5,7 @@
 <p class="hint">Модель составит вопросы по теме. Они попадут в ленту проверки черновиками: ребёнок увидит вопрос только после вашего подтверждения.</p>
 {% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
 <form id="generate" class="card" method="post" action="/parent/generate">
+  <input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
   <p><label for="topic">Тема</label><br>
     <select id="topic" name="topic" required>
       {% for t in topics %}<option value="{{ t.code }}">{% if t.parent_code %}— {% endif %}{{ t.title }}</option>{% endfor %}

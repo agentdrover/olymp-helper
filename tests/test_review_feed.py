@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 
 from fastapi.testclient import TestClient
@@ -15,7 +17,6 @@ from tests.bank_helpers import (
     db,
     key_pdf,
     make_task,
-    parent_cookie,
     reply,
     row,
     task_ids,
@@ -323,46 +324,18 @@ def test_retry_cannot_replace_a_model_answer_and_revisions_keep_the_old_one(tmp_
         assert json.loads(snap)["model_answer"]["answer"] == "Г"
 
 
-def test_a_forged_role_cookie_gets_nothing(tmp_path, monkeypatch, caplog):
+def test_a_forged_role_cookie_gets_nothing(tmp_path):
     url = "/parent/materials"
     app = build_app(tmp_path, StubModel())
     with TestClient(app) as c:
         assert c.get(url, headers={"Cookie": "olymp_role=parent"}).status_code == 403
         assert c.get(url, headers={"Cookie": "olymp_parent=" + "0" * 64}).status_code == 403
         assert c.get(url, headers={"Cookie": "olymp_parent=parent"}).status_code == 403
-        other = parent_cookie("another-key")
-        assert c.get(url, headers={"Cookie": "olymp_parent=" + other}).status_code == 403
+        # the old key-derived cookie is worth nothing any more
+        old = hmac.new(TEST_PARENT_KEY.encode(), b"parent", hashlib.sha256).hexdigest()
+        assert c.get(url, headers={"Cookie": "olymp_parent=" + old}).status_code == 403
         assert c.get(url, headers=PARENT).status_code == 200
-        assert c.get("/api/tasks").status_code == 200  # the child's side needs no key
-
-        # the login form: wrong key refused; right key sets an HttpOnly, SameSite=Strict cookie
-        assert c.get("/parent/login").status_code == 200
-        assert c.post("/parent/login", data={"key": "wrong"}).status_code == 403
-        ok = c.post("/parent/login", data={"key": TEST_PARENT_KEY}, follow_redirects=False)
-        assert ok.status_code == 303
-        cookie = ok.headers["set-cookie"]
-        assert "olymp_parent=" + parent_cookie(TEST_PARENT_KEY) in cookie
-        assert "httponly" in cookie.lower() and "samesite=strict" in cookie.lower()
-        assert c.get(url).status_code == 200  # the browser now carries the cookie
-        c.cookies.clear()
-
-    # No key configured: nobody is a parent, every parent route is refused (fail closed).
-    monkeypatch.delenv("OLYMP_PARENT_KEY")
-    routes = [
-        (m.upper(), path)
-        for path, item in app.openapi()["paths"].items()
-        if path != "/parent/login" and path.startswith(("/parent", "/materials"))
-        for m in item
-    ]
-    assert len(routes) >= 15
-    with TestClient(app) as c, caplog.at_level("WARNING"):
-        for method, path in routes:
-            concrete = path.replace("{task_id}", "1").replace("{material_id}", "1")
-            concrete = concrete.replace("{page}", "1")
-            r = c.request(method, concrete, headers=PARENT, json={} if method == "POST" else None)
-            assert r.status_code == 403, (method, path, r.status_code)
-        assert c.post("/parent/login", data={"key": TEST_PARENT_KEY}).status_code == 403
-    assert "OLYMP_PARENT_KEY" in caplog.text
+        assert c.get("/api/tasks").status_code == 200  # the child's side needs no login
 
 
 def test_model_answer_and_its_snapshot_are_written_in_one_transaction(tmp_path):

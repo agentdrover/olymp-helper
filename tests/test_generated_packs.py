@@ -337,7 +337,7 @@ def test_the_migration_upgrades_a_v9_database_keeping_the_data(tmp_path):
     conn.execute("INSERT INTO task_revision VALUES (1, 1, 1, '{}', 't')")
     before = conn.execute("SELECT * FROM task_item").fetchall()
 
-    assert migrate(conn) == SCHEMA_VERSION == 10
+    assert migrate(conn) == SCHEMA_VERSION >= 10  # later migrations (0011_auth, ...) stack on top
     after = conn.execute("SELECT * FROM task_item").fetchall()
     assert [tuple(r) for r in after] == [(*before[0], None)]  # every old column kept, pack_id empty
     assert conn.execute("SELECT COUNT(*) FROM task_revision").fetchone()[0] == 1
@@ -368,7 +368,7 @@ def test_the_migration_upgrades_a_v9_database_keeping_the_data(tmp_path):
         )
     assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    assert migrate(conn) == 10
+    assert migrate(conn) == SCHEMA_VERSION  # a second run changes nothing
 
 
 def test_more_questions_than_requested_are_not_all_accepted(tmp_path):

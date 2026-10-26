@@ -128,7 +128,10 @@ def confirm_figure(
     material = conn.execute(
         "SELECT file FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
-    doc = pymupdf.open(str(ctx.material_path(material["file"])))
+    source = ctx.material_path(material["file"])
+    if not source.exists():
+        raise Refusal("Файл материала удалён: рамку рисунка уже не поправить.", 409)
+    doc = pymupdf.open(str(source))
     try:
         page_no = figure["page"]
         regions = figures.regions_of(figure)
@@ -222,8 +225,17 @@ def prepare_crop_lines(ctx, conn, material_id: int | None) -> dict:
     tasks = [(t, regions) for t, regions in tasks if regions]
     if not tasks:
         return {}
+    if material_file_gone(ctx, conn, material_id):
+        return {}  # строк вырезок для сверки нет
     with contextlib.closing(_open_material(ctx, conn, material_id)) as doc:
         return {t["id"]: (regions, figures.region_lines(doc, regions)) for t, regions in tasks}
+
+
+def material_file_gone(ctx, conn, material_id: int) -> bool:
+    """Файл материала удалён родителем: вырезки подтверждённых рисунков остаются как есть, а сверять
+    их с PDF не с чем."""
+    material = conn.execute("SELECT file FROM material WHERE id = ?", (material_id,)).fetchone()
+    return material is None or not ctx.material_path(material["file"]).exists()
 
 
 def _open_material(ctx, conn, material_id: int):
@@ -281,6 +293,8 @@ class _Shared:
     def __init__(self, ctx, conn, material_id: int, prepared: dict | None = None):
         self.ctx, self.conn, self.material_id = ctx, conn, material_id
         self.prepared = prepared or {}
+        # файл удалён родителем: текст рамок читать неоткуда, проверка alt идёт без него
+        self.gone = material_file_gone(ctx, conn, material_id)
         self.tasks = {
             t["id"]: t
             for t in conn.execute("SELECT * FROM task_item WHERE material_id = ?", (material_id,))
@@ -337,7 +351,9 @@ def recheck_figure(
     try:
         regions = figures.regions_of(figure)
         found = []
-        if regions:
+        if regions and shared.gone:
+            found = list(figure.get("leak") or [])  # вырезку не перечитать: прежнее найденное
+        elif regions:
             found = shared.leaks(task, regions)
         alt_bad = figures.alt_problem(
             figure.get("alt", ""), options_of(task), shared.labels[task_id]

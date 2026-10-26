@@ -13,9 +13,14 @@
   let frame = null; // {x0,y0,x1,y1} в пикселях рендера страницы
   const PAGE_SCALE = 1.5;
 
+  // Токен защиты от подделки запросов: сервер отдаёт его в <meta> страницы родителя.
+  const csrf = () => { const m = document.querySelector('meta[name="csrf-token"]'); return m ? m.content : ""; };
+
   async function post(path, body) {
     const r = await fetch(`/parent/tasks/${taskId()}/${path}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf() },
+      body: JSON.stringify(body || {}),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Не получилось");
@@ -29,6 +34,7 @@
       return;
     }
     const r = await fetch(`/parent/review/${id}?fragment=1`);
+    if (r.redirected || r.status === 403) { location.href = "/parent/login"; return; } // сессия кончилась
     feed.innerHTML = await r.text();
     counter.textContent = count || "";
     frame = null;

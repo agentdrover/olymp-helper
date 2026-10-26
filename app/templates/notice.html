@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Прежде чем начать{% endblock %}
+{% block content %}
+<div class="brand">{% include "_logo.html" %} Помощник</div>
+<h1>Прежде чем начать</h1>
+{% include "_privacy_notice.html" %}
+<form method="post" action="/notice/ack">
+  <input type="hidden" name="next" value="{{ next }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <button class="primary">Понятно, начать</button>
+</form>
+{% endblock %}
