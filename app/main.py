@@ -9,6 +9,7 @@ from app.db import connect, migrate, schema_version
 from app.ingest.context import AppContext, ExecutorModel
 from app.ingest.jobs import ImportJobs
 from app.ingest.limits import IMPORT_TIMEOUT_S
+from app.ingest.packs import fail_stale
 from app.ingest.render import PageCache
 from app.ingest.web import parent as parent_router
 from app.ingest.web import public as public_router
@@ -45,6 +46,7 @@ def create_app(
             "WHERE import_status IN ('queued', 'running')",
             (INTERRUPTED,),
         )
+        fail_stale(conn, INTERRUPTED)  # запрос к модели за пачкой не переживает перезапуск
         conn.close()
         app.state.db_path = path
         yield
