@@ -7,6 +7,7 @@ from tests.bank_helpers import (
     StubModel,
     build_app,
     db,
+    key_pdf,
     make_task,
     reply,
     task_ids,
@@ -209,4 +210,19 @@ def test_an_empty_done_import_is_retried_on_re_upload(tmp_path):
         assert len(task_ids(tmp_path)) == 1 and not material(tmp_path)["import_error"]
         calls = len(model.calls)
         assert upload(c, pdf).json()["requeued"] is False  # has tasks now: not re-run
+        assert len(model.calls) == calls
+
+
+def test_a_successful_key_or_textbook_is_not_re_run_on_re_upload(tmp_path):
+    """Keys and textbooks never have task rows: their done is a success, not an empty import
+    (machine review of #2084 gen 2)."""
+    model = StubModel()
+    with TestClient(build_app(tmp_path, model)) as c:
+        key = key_pdf({"1": "Б"})
+        book = text_pdf([["Глава 1. Клетка"]])
+        upload(c, key, kind="key", name="k.pdf")
+        upload(c, book, kind="textbook", name="t.pdf")
+        calls = len(model.calls)
+        assert upload(c, key, kind="key", name="k.pdf").json()["requeued"] is False
+        assert upload(c, book, kind="textbook", name="t.pdf").json()["requeued"] is False
         assert len(model.calls) == calls

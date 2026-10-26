@@ -134,12 +134,15 @@ def upload_material(
     conn = open_db(ctx.db_path)
     try:
         existing = conn.execute(
-            "SELECT id, import_status FROM material WHERE sha256 = ?", (sha,)
+            "SELECT id, kind, import_status, import_error FROM material WHERE sha256 = ?", (sha,)
         ).fetchone()
         if existing is not None:
-            # повтор: упавший импорт или пустой - всё отклонено при разборе, заданий нет
+            # повтор: упавший импорт или пустой сборник - модель отклонена целиком (есть отчёт о
+            # пропусках, заданий нет). Ключ и учебник заданий не дают: их done - это успех.
             empty = (
                 existing["import_status"] == "done"
+                and existing["kind"] == "tasks"
+                and bool(existing["import_error"])
                 and not conn.execute(
                     "SELECT 1 FROM task_item WHERE material_id = ? LIMIT 1", (existing["id"],)
                 ).fetchone()
