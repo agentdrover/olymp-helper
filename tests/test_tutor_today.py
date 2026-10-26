@@ -31,7 +31,7 @@ def test_the_exam_countdown_number_has_the_same_style_as_the_other_numbers(tmp_p
 
     from tests.bank_helpers import db
 
-    c, clock, _model = boot(tmp_path)
+    c, _clock, _model = boot(tmp_path)
     with c:
         tid = seed(tmp_path, key="Б")
         attempt(c, tid, "Б")
