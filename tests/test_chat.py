@@ -14,7 +14,7 @@ from tests.chat_helpers import (
     textbook,
     voice_post,
 )
-from tests.tutor_helpers import Scripted, attempt, events, out, seed
+from tests.tutor_helpers import Scripted, attempt, events, out, post, seed
 
 MITO = "Митохондрии — органоиды клетки: в них идёт клеточное дыхание и образуется энергия."
 CHLORO = "Хлоропласты есть в клетках растений и осуществляют фотосинтез на свету."
@@ -292,3 +292,29 @@ def test_a_new_run_starts_with_an_empty_chat(tmp_path):
         say(c, tid, "новый вопрос")
         assert "СТАРЫЙ-ВОПРОС" not in model.calls[-1]["content"]
         assert "ВОТ-РЕШЕНИЕ" not in model.calls[-1]["content"]
+
+
+def test_the_judge_remembers_a_disclosure_made_more_than_twenty_exchanges_ago(tmp_path):
+    def reply(kind, content):
+        if kind == "hint1":
+            return out("Б", "Исключи Г.")
+        if kind == "mistake":
+            return out("Б", "Подумай ещё.")
+        return chat_reply(
+            "Исключи А и В." if "Сообщение ученика: СТАРТ" in content else "Хороший вопрос."
+        )
+
+    def judge(content):  # A, V and G together leave one option: that is a disclosure
+        old = "Исключи А и В" in block_of(content, "shown_data")
+        return {"reveals": old and "Исключи Г" in Scripted.candidate(None, content), "reason": "x"}
+
+    c, _model, _v, _a = boot_chat(tmp_path, Scripted(reply=reply, judge=judge))
+    with c:
+        tid = seed(tmp_path, key="Б")
+        attempt(c, tid, "А")
+        say(c, tid, "СТАРТ")
+        for i in range(22):
+            say(c, tid, f"нейтральный вопрос {i}")
+        r = post(c, tid, "hint", level=1)
+        assert "Исключи Г" not in shown(r)
+        assert "Перечитай условие" in r.json()["hints_list"][0]["html"]  # the generic hint

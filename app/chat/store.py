@@ -13,6 +13,10 @@ from app.tutor.state import iso
 
 HISTORY_FOR_MODEL = 4  # последних обменов этого занятия и задания - модели
 HISTORY_ON_SCREEN = 20
+# Улики для судьи - все обмены занятия и прогона, не экранное окно. Потолок нужен только размеру
+# запроса и взят с большим запасом (занятие длится не дольше простоя в 30 минут); при превышении
+# остаются САМЫЕ РАННИЕ обмены: они первыми называли варианты, которые потом складываются.
+EVIDENCE_CAP = 500
 
 
 def open_session(conn, now: datetime) -> int | None:
@@ -38,6 +42,17 @@ def exchanges(conn, session_id: int | None, task_id: int, run_id: int | None, li
     return [json.loads(r[0]) for r in reversed(rows) if r[0]]
 
 
+def _all_exchanges(conn, session_id, task_id, run_id) -> list[dict]:
+    if session_id is None or run_id is None:
+        return []
+    rows = conn.execute(
+        "SELECT data FROM event WHERE type = 'chat' AND session_id = ? AND task_item_id = ? "
+        "AND json_extract(data, '$.run_id') = ? ORDER BY id ASC LIMIT ?",
+        (session_id, task_id, run_id, EVIDENCE_CAP),
+    ).fetchall()
+    return [json.loads(r[0]) for r in rows if r[0]]
+
+
 def history_for_model(conn, session_id: int | None, task_id: int, run_id: int | None):
     return [
         {"question": x["question"], "reply": x["reply"]}
@@ -49,7 +64,7 @@ def visible_texts(conn, session_id: int | None, task_id: int, run_id: int | None
     """Всё, что ребёнок прочёл в чате этого занятия и прогона: это видит судья."""
     return [
         f"Уже показано в чате: {x['visible']}"
-        for x in exchanges(conn, session_id, task_id, run_id, HISTORY_ON_SCREEN)
+        for x in _all_exchanges(conn, session_id, task_id, run_id)
         if x.get("visible") and not x.get("withheld")
     ]
 
