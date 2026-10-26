@@ -5,6 +5,7 @@
 <div class="shell">
   <nav class="rail rail-child" aria-label="Разделы">
     <a class="brand" href="/">{% include "_logo.html" %} Помощник</a>
+    <a href="/today"{% if path == "/today" %} aria-current="page"{% endif %}>Сегодня</a>
     <a href="/tasks"{% if path.startswith("/tasks") %} aria-current="page"{% endif %}>Задания</a>
     <div class="spacer"></div>
     <a class="minor" href="/parent/login">Вход для родителя</a>

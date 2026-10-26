@@ -2,29 +2,10 @@
 {% block title %}Задание {{ task.number }}{% endblock %}
 {% block content %}
 <a href="/tasks">← Все задания</a>
-<div class="split">
-  <section aria-label="Задание">
-    <div class="kicker">{{ task.source }}</div>
-    <h1>Задание {{ task.number }}</h1>
-    {% if task.figure %}
-    <figure class="figure">
-      <a href="{{ task.figure.url }}"><img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}"></a>
-      <figcaption class="hint"><a href="{{ task.figure.url }}">Открыть рисунок крупно</a></figcaption>
-    </figure>
-    {% endif %}
-    <p>{{ task.text }}</p>
-    {% if task.options %}
-    <ul class="options">
-      {% if task.options is mapping %}
-        {% for side in task.options.values() %}{% for o in side %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}{% endfor %}
-      {% else %}
-        {% for o in task.options %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}
-      {% endif %}
-    </ul>
-    {% endif %}
-  </section>
-  <aside class="helper-soon" aria-label="Помощник">
-    <p>Разбор задания появится скоро.</p>
-  </aside>
-</div>
+<header>
+  <div class="kicker">{{ task.source }}</div>
+  <h1>Задание {{ task.number }}</h1>
+</header>
+<div id="tutor" data-url="/tasks/{{ task.id }}">{% include "child/_tutor.html" %}</div>
+<script src="/static/tutor.js" defer></script>
 {% endblock %}

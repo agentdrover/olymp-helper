@@ -1,0 +1,88 @@
+{# Рабочая область задания: условие, ответ, решение и панель помощника. Приходит целиком и как фрагмент. #}
+<div class="split">
+  <section aria-label="Задание">
+    {% if task.figure %}
+    <figure class="figure">
+      <a href="{{ task.figure.url }}" data-zoom><img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}"></a>
+      <figcaption class="hint">Рисунок: {{ task.source }} · вырезан и проверен родителем
+        <button type="button" data-zoom>Открыть крупно</button></figcaption>
+    </figure>
+    <dialog class="zoom" id="zoom" aria-label="Рисунок крупно">
+      <button type="button" data-close-zoom>Закрыть · Esc</button>
+      <img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}">
+      <p class="hint">{{ task.source }} · рисунок к заданию {{ task.number }}</p>
+    </dialog>
+    {% endif %}
+    {% if v.correction %}<p class="notice-line" role="status">{{ v.correction }}</p>{% endif %}
+    <p>{{ task.text }}</p>
+    <div class="hint">
+      {% if v.has_key %}есть ключ ответов{% else %}ключа нет: я сверяю с ответом модели, он не проверен{% endif %}
+      {% if v.repeat %}· <span class="pill">повтор</span>{% endif %}
+    </div>
+
+    {% if not v.terminal %}
+    <form class="answer-form" data-act="attempt" data-type="{{ task.type }}">
+      <fieldset>
+        <legend>Варианты ответа</legend>
+        {% if task.type == "numeric" %}
+        <label>Число <input name="answer" type="text" inputmode="decimal" autocomplete="off" required></label>
+        {% elif task.type == "match" %}
+        <ul class="options">
+          {% for l in task.options.left %}
+          <li><label>{{ l.label }}) {{ l.text }} →
+            <select name="pair-{{ l.label }}"><option value="">выбери</option>
+              {% for r in task.options.right %}<option value="{{ r.label }}">{{ r.label }}) {{ r.text }}</option>{% endfor %}
+            </select></label></li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <ul class="options">
+          {% for o in task.options %}
+          <li><label><input type="{{ 'checkbox' if task.type == 'multiple' else 'radio' }}" name="answer" value="{{ o.label }}">
+            {{ o.label }}) {{ o.text }}</label>
+            {% if v.last and task.type == "single" and v.last.answer == o.label %}<span class="mark">{{ v.last.mark }}</span>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </fieldset>
+      {% if v.last and task.type != "single" %}<p class="mark-line">Последняя проверка: {{ v.last.answer }} — <span class="mark">{{ v.last.mark }}</span></p>{% endif %}
+      <fieldset class="confidence">
+        <legend>Насколько уверен?</legend>
+        <label><input type="radio" name="confidence" value="sure"> уверен</label>
+        <label><input type="radio" name="confidence" value="doubt"> сомневаюсь</label>
+      </fieldset>
+      <button class="primary" type="submit" {% if v.checks_left == 0 %}disabled{% endif %}>Проверить ответ</button>
+      <span class="hint" data-checks="{{ v.checks_left }}">
+        {% if v.checks_left == 0 %}{% if v.assist == "key_only" %}Проверки закончились.{% else %}Следующая проверка — после подсказки.{% endif %}
+        {% else %}Проверок осталось: {{ v.checks_left }}{% endif %}
+        {% if v.hints %}· подсказок взято: {{ v.hints }}{% endif %}
+      </span>
+    </form>
+    {% else %}
+    {% if task.options %}
+    <ul class="options">
+      {% if task.options is mapping %}
+        {% for side in task.options.values() %}{% for o in side %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}{% endfor %}
+      {% else %}
+        {% for o in task.options %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}
+      {% endif %}
+    </ul>
+    {% endif %}
+    {% if v.solution %}
+    <section class="card solution" aria-label="Решение">
+      <h2>Решение</h2>
+      <p class="answer-line">Ответ: <strong>{{ v.solution.answer }}</strong></p>
+      {% if v.solution.note %}<p class="note-pill"><span class="pill">{{ v.solution.note }}</span></p>{% endif %}
+      {% if v.solution.explanation %}{{ v.solution.explanation|safe }}{% endif %}
+      <p class="outcome">Итог: {{ v.outcome }}{% if v.solution.unverified %} · {{ v.solution.note }}{% endif %}</p>
+      <div class="actions">
+        <button type="button" data-act="repeat">Разобрать ещё раз</button>
+        <a class="btn" href="/tasks">Следующее задание →</a>
+      </div>
+    </section>
+    {% endif %}
+    {% endif %}
+  </section>
+  {% include "child/_helper_panel.html" %}
+</div>

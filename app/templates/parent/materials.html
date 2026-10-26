@@ -5,19 +5,26 @@
 <h2>Материалы</h2>
 <form id="upload" class="card" method="post" action="/parent/materials" enctype="multipart/form-data">
   <input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
-  <p><input type="file" name="file" aria-label="PDF-файл" accept="application/pdf" required></p>
-  <p>
-    <select name="kind" aria-label="Что это за файл">
-      <option value="tasks">Сборник заданий</option>
-      <option value="key">Ключ ответов</option>
-      <option value="textbook">Учебник</option>
-    </select>
-    <input name="year" aria-label="Год" placeholder="Год" size="6">
-    <input name="stage" aria-label="Этап" placeholder="Этап" size="12">
-    <input name="variant" aria-label="Вариант" placeholder="Вариант" size="8">
-  </p>
-  <button class="primary">Загрузить</button>
-  <span class="hint">До 50 МБ и 400 страниц. Импорт идёт в фоне, статус виден ниже.</span>
+  <label class="dropzone" for="upload-file">
+    <span class="dz-title">Перетащите PDF сюда или выберите файл</span>
+    <span class="dz-name" id="upload-name" aria-live="polite">Файл не выбран</span>
+    <input id="upload-file" type="file" name="file" accept="application/pdf" required>
+  </label>
+  <div class="fields upload-row">
+    <div class="field"><label for="upload-kind">Тип</label>
+      <select id="upload-kind" name="kind">
+        <option value="tasks">Сборник заданий</option>
+        <option value="key">Ключ ответов</option>
+        <option value="textbook">Учебник</option>
+      </select></div>
+    <div class="field"><label for="upload-year">Год</label><input id="upload-year" name="year" placeholder="2026"></div>
+    <div class="field"><label for="upload-stage">Этап</label><input id="upload-stage" name="stage" placeholder="Школьный"></div>
+    <div class="field"><label for="upload-variant">Вариант</label><input id="upload-variant" name="variant" placeholder="1"></div>
+  </div>
+  <div class="form-actions">
+    <button class="primary">Загрузить</button>
+    <span class="hint">До 50 МБ и 400 страниц. Импорт идёт в фоне, статус виден ниже.</span>
+  </div>
 </form>
 <div class="panel"><table>
   <thead><tr><th scope="col">№</th><th scope="col">Тип</th><th scope="col">Год</th><th scope="col">Вариант</th><th scope="col">Статус</th><th scope="col">Заданий</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
@@ -31,4 +38,5 @@
   {% endfor %}
 </table></div>
 <p><a href="/parent/review">Лента проверки</a> · <a href="/parent/generate">Составить пачку вопросов</a></p>
+<script src="/static/upload.js" defer></script>
 {% endblock %}
