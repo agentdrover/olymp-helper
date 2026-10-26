@@ -223,11 +223,17 @@ def prepare_crop_lines(ctx, conn, material_id: int) -> dict:
     tasks = [(t, regions) for t, regions in tasks if regions]
     if not tasks:
         return {}
-    material = conn.execute("SELECT file FROM material WHERE id = ?", (material_id,)).fetchone()
-    if not ctx.material_path(material["file"]).exists():
-        return {}  # файл удалён родителем: строк вырезок для сверки нет
+    if material_file_gone(ctx, conn, material_id):
+        return {}  # строк вырезок для сверки нет
     with contextlib.closing(_open_material(ctx, conn, material_id)) as doc:
         return {t["id"]: (regions, figures.region_lines(doc, regions)) for t, regions in tasks}
+
+
+def material_file_gone(ctx, conn, material_id: int) -> bool:
+    """Файл материала удалён родителем: вырезки подтверждённых рисунков остаются как есть, а сверять
+    их с PDF не с чем."""
+    material = conn.execute("SELECT file FROM material WHERE id = ?", (material_id,)).fetchone()
+    return material is None or not ctx.material_path(material["file"]).exists()
 
 
 def _open_material(ctx, conn, material_id: int):
@@ -370,7 +376,7 @@ def recheck_material_figures(ctx, conn, task_id: int, prepared: dict | None = No
     другого задания материала, поэтому уже подтверждённые рисунки соседей проходят проверку заново.
     prepared - prepare_crop_lines, выполненный до транзакции."""
     task = get_task(conn, task_id)
-    if task is None:
+    if task is None or material_file_gone(ctx, conn, task["material_id"]):
         return
     shared = _Shared(ctx, conn, task["material_id"], prepared)
     try:
@@ -387,6 +393,8 @@ def recheck_materials_figures(ctx, conn, material_ids) -> None:
     утечки включает ответы остальных заданий материала. Решение родителя об ответе в вырезке
     остаётся, если найденное не изменилось."""
     for material_id in sorted(material_ids):
+        if material_file_gone(ctx, conn, material_id):
+            continue
         shared = _Shared(ctx, conn, material_id)
         try:
             for task_id in shared.confirmed():

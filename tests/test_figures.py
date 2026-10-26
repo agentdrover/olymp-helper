@@ -850,3 +850,29 @@ def test_alt_rejects_short_option_texts_as_whole_words():
         )
         is None
     )
+
+
+def test_key_and_options_edit_work_after_the_material_file_is_deleted(tmp_path):
+    with figure_client(tmp_path, "raster") as c:
+        tid = task_ids(tmp_path)[0]
+        assert confirm_figure(c, tid).status_code == 200
+        assert (
+            c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={"answer": "Б"}).status_code
+            == 200
+        )  # checked: the deletion keeps the task and its figure
+        r = c.post(
+            f"/parent/materials/{c.material_id}/delete",
+            headers=PARENT,
+            data={"confirm": "1"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert detail(c, tid)["figure"]["confirmed"] is True
+        r = c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": "В"})
+        assert r.status_code == 200, r.text
+        assert "В" in row(tmp_path, tid)["answer_key"]
+        new_opts = [dict(o) for o in DIGIT_OPTS]
+        new_opts[0] = {"label": "А", "text": "2, 3"}
+        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"options": new_opts})
+        assert r.status_code == 200, r.text
+        assert detail(c, tid)["figure"]["confirmed"] is True

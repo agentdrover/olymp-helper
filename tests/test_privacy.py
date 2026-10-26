@@ -118,8 +118,8 @@ def test_ac4(tmp_path):
             (mid,),
         )
         draft = conn.execute("SELECT MAX(id) FROM task_item").fetchone()[0]
-        # a task that was confirmed once, then edited (back to draft, revision 2), and one the
-        # child has already attempted: neither goes away with the file
+        # a draft edited before anyone checked it (revision 2) goes away with the file; one the
+        # child has already attempted stays
         for text in ("был подтверждён", "есть попытка"):
             conn.execute(
                 "INSERT INTO task_item (material_id, type, text, import_status, revision) "
@@ -152,7 +152,7 @@ def test_ac4(tmp_path):
 
         page = c.get(f"/parent/materials/{mid}/delete", headers=PARENT)
         assert page.status_code == 200
-        assert "1 неподтверждённое" in page.text and "3 подтверждённых задания" in page.text
+        assert "2 неподтверждённых" in page.text and "2 подтверждённых задания" in page.text
         assert pdf.exists()  # looking deletes nothing
         r = c.post(f"/parent/materials/{mid}/delete", headers=PARENT, data={})
         assert r.status_code == 200 and pdf.exists()
@@ -182,7 +182,14 @@ def test_ac4(tmp_path):
             < pages_before + 1
         )
         assert (
-            conn.execute("SELECT COUNT(*) FROM task_item WHERE id = ?", (draft,)).fetchone()[0] == 0
+            conn.execute(
+                "SELECT COUNT(*) FROM task_item WHERE id IN (?, ?)", (draft, edited)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM task_item WHERE id = ?", (attempted,)).fetchone()[0]
+            == 1
         )
         # the confirmed task, which the child may have worked on, stays; the file is gone for good
         assert (
@@ -216,6 +223,36 @@ def test_deleting_a_material_without_confirmed_tasks_removes_its_row(tmp_path):
         assert db(tmp_path).execute("SELECT COUNT(*) FROM task_item").fetchone()[0] == 0
         # the same file can be uploaded again afterwards
         again = upload(c, text_pdf([["1. вопрос"]]))
+        assert again.status_code == 202 and again.json()["duplicate"] is False
+
+
+def test_deleting_a_material_drops_a_draft_edited_before_checking(tmp_path):
+    model = StubModel(split=reply(make_task(1, "Вопрос")), answer=answer_by_number({1: "А"}))
+    pdf = text_pdf([["1. вопрос"]])
+    with TestClient(build_app(tmp_path, model)) as c:
+        upload(c, pdf)
+        tid = task_ids(tmp_path)[0]
+        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"text": "Новый текст"})
+        assert r.status_code == 200, r.text
+        got = (
+            db(tmp_path)
+            .execute("SELECT revision, import_status FROM task_item WHERE id = ?", (tid,))
+            .fetchone()
+        )
+        assert got["revision"] > 1 and got["import_status"] != "checked"
+        mid = db(tmp_path).execute("SELECT id FROM material").fetchone()[0]
+        page = c.get(f"/parent/materials/{mid}/delete", headers=PARENT)
+        assert "1 неподтверждённое" in page.text and "останется" not in page.text
+        r = c.post(
+            f"/parent/materials/{mid}/delete",
+            headers=PARENT,
+            data={"confirm": "1"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert db(tmp_path).execute("SELECT COUNT(*) FROM task_item").fetchone()[0] == 0
+        assert db(tmp_path).execute("SELECT COUNT(*) FROM material").fetchone()[0] == 0
+        again = upload(c, pdf)
         assert again.status_code == 202 and again.json()["duplicate"] is False
 
 
