@@ -3,6 +3,7 @@
 import re
 
 from app.ingest.leaks import is_drawing, split_elements
+from app.ingest.topics import accept
 
 TYPES = ("single", "multiple", "match", "open", "numeric")
 NO_OPTIONS = ("open", "numeric")
@@ -84,8 +85,9 @@ def check_options(kind: str, value):
     return _options(kind, value, "варианты")
 
 
-def validate_tasks(payload, pages: set[int]) -> list[dict]:
-    """Список заданий из ответа модели; pages - номера страниц порции."""
+def validate_tasks(payload, pages: set[int], catalog=()) -> list[dict]:
+    """Список заданий из ответа модели; pages - номера страниц порции; catalog - коды тем:
+    тема вне каталога отбрасывается (задание остаётся не размеченным)."""
     if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
         _fail("корень", "ожидался объект с полем tasks")
     out = []
@@ -139,7 +141,7 @@ def validate_tasks(payload, pages: set[int]) -> list[dict]:
                 "pages": sorted(set(task_pages)),
                 "refers_to_figure": bool(raw.get("refers_to_figure", False)),
                 "points": points,
-                "topic": raw.get("topic") if isinstance(raw.get("topic"), str) else None,
+                "topic": accept(raw.get("topic"), catalog),
                 "section": _label(raw.get("section"), where, "раздел", 120),
                 "variant": _label(raw.get("variant"), where, "вариант", 20),
                 "stage": _label(raw.get("stage"), where, "этап", 60),

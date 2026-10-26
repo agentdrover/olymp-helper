@@ -16,6 +16,7 @@
     <div class="body">
       <p><strong>Задание {{ card.number }}</strong> ({{ card.type }})</p>
       <p class="text">{{ card.text }}</p>
+      <p class="hint">Тема: <b>{{ card.topic_title or "не размечено" }}</b> (ребёнку не показывается, подтверждается вместе с заданием)</p>
       {% if card.options %}
       <ul>
         {% if card.options is mapping %}
@@ -69,6 +70,10 @@
       </p>
       <div id="edit-panel" hidden>
         <p><textarea id="edit-text" rows="5" cols="50">{{ card.text }}</textarea></p>
+        <p><label>Тема <select id="edit-topic">
+          <option value="">не размечено</option>
+          {% for t in card.topics %}<option value="{{ t.code }}"{% if t.code == card.topic %} selected{% endif %}>{{ t.title }}</option>{% endfor %}
+        </select></label></p>
         <label><input type="checkbox" id="manual"> самодостаточное условие (без рисунка)</label>
         <button data-action="save-edit">Сохранить правку</button>
       </div>

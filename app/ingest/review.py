@@ -16,6 +16,7 @@ from app.ingest.store import (
     save_snapshot,
     update_task,
 )
+from app.ingest.topics import load_catalog
 
 LABELS = {
     "no_key": "ключа нет",
@@ -120,7 +121,15 @@ def set_parent_key(ctx, conn, task_id: int, raw) -> dict:
 
 
 def edit_task(
-    ctx, conn, task_id: int, *, text=None, options=None, teacher_note=None, manual_condition=False
+    ctx,
+    conn,
+    task_id: int,
+    *,
+    text=None,
+    options=None,
+    teacher_note=None,
+    manual_condition=False,
+    topic=None,
 ) -> dict:
     prepared = None
     if options is not None:  # чтение PDF для проверки рисунков - до блокировки записи
@@ -153,6 +162,14 @@ def edit_task(
             cols.update(figure=None, unsupported_reason=None)
             if task["import_status"] == "unsupported":
                 cols["import_status"] = "draft"
+        if topic is not None:
+            code = str(topic).strip()
+            if code and code not in load_catalog(conn):
+                raise Refusal("Такой темы нет в каталоге.")
+            if not cols:  # тема - метка для родителя: условие не менялось, ревизия остаётся
+                update_task(conn, task_id, topic=code or None)
+                return {"revision": task["revision"]}
+            cols["topic"] = code or None
         if not cols:
             raise Refusal("Нечего менять.")
         new_revision(conn, task_id, **cols)
@@ -317,6 +334,8 @@ def build_card(ctx, conn, task) -> dict | None:
     shown = figure_page if kind == "needs_figure" and figure_page else text_page
     material = task["material_id"]
     agrees = None if key is None or model is None else key == model
+    catalog = load_catalog(conn)
+    topic = task["topic"] if task["topic"] in catalog else None
     button = None
     if kind == "confirm":
         button = (
@@ -338,6 +357,9 @@ def build_card(ctx, conn, task) -> dict | None:
         "number": task["source_number"],
         "type": task["type"],
         "text": task["text"],
+        "topic": topic,
+        "topic_title": catalog[topic]["title"] if topic else None,
+        "topics": [{"code": t["code"], "title": t["title"]} for t in catalog.values()],
         "options": options_of(task),
         "material_id": task["material_id"],
         "page": text_page,
@@ -374,6 +396,7 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         "revision": task["revision"],
         "key_version": task["key_version"],
         "text": task["text"],
+        "topic": task["topic"],
         "options": options_of(task),
         "key": None if not task["answer_key"] else display(key_value(task["answer_key"])),
         "key_source": task["key_source"],

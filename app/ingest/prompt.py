@@ -61,7 +61,7 @@ TASKS_SCHEMA = {
                     "pages": {"type": "array", "items": {"type": "integer"}},
                     "refers_to_figure": {"type": "boolean"},
                     "points": {"type": "number"},
-                    "topic": {"type": "string"},
+                    "topic": {"type": "string", "description": "код темы из каталога"},
                     "section": {"type": "string"},
                     "variant": {"type": "string"},
                     "stage": {"type": "string"},

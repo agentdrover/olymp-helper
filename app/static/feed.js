@@ -53,7 +53,7 @@
       no_answer_ack: checked("no_answer_ack"), teacher_note_ack: checked("teacher_note_ack"),
       leak_ack: checked("leak_ack"),
     }).then((d) => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter, reason: d.reason })),
-    "save-edit": () => post("edit", { text: val("edit-text"), manual_condition: checked("manual") })
+    "save-edit": () => post("edit", { text: val("edit-text"), manual_condition: checked("manual"), topic: val("edit-topic") })
       .then(() => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter })),
   };
 
