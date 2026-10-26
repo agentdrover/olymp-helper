@@ -320,23 +320,92 @@ def test_the_judge_remembers_a_disclosure_made_more_than_twenty_exchanges_ago(tm
         assert "Перечитай условие" in r.json()["hints_list"][0]["html"]  # the generic hint
 
 
-def test_the_judge_payload_stays_under_the_executor_limit_and_keeps_the_first_disclosure(tmp_path):
-    filler = ("Хороший вопрос про клетку. " * 400)[:8000]
+LONGISH = ("Хороший вопрос про клетку. " * 60)[:1400]
 
+
+def _cumulative(extra_pad=""):
     def reply(kind, content):
+        if kind == "hint1":
+            return out("Б", "Исключи Г.")
+        if kind == "mistake":
+            return out("Б", "Подумай ещё.")
         if "Сообщение ученика: СТАРТ" in content:
-            return chat_reply(("Исключи А и В. " + filler)[:8000])
-        return chat_reply(filler[: 7990 - len(content) % 7] + f" #{content.count('Помощник:')}")
+            return chat_reply("Исключи А и В. " + LONGISH)
+        return chat_reply(extra_pad or LONGISH)
+
+    def judge(content):
+        old = "Исключи А и В" in block_of(content, "shown_data")
+        return {"reveals": old and "Исключи Г" in Scripted.candidate(None, content), "reason": "x"}
+
+    return Scripted(reply=reply, judge=judge)
+
+
+def test_a_disclosure_in_the_middle_of_a_long_talk_is_never_dropped(tmp_path):
+    c, model, _v, _a = boot_chat(tmp_path, _cumulative())
+    with c:
+        tid = seed(tmp_path, key="Б")
+        attempt(c, tid, "А")
+        for i in range(9):
+            say(c, tid, f"вопрос {i}")
+        say(c, tid, "СТАРТ")  # the tenth exchange
+        for i in range(13):
+            say(c, tid, f"ещё вопрос {i}")
+        r = post(c, tid, "hint", level=1)
+        assert "Исключи Г" not in shown(r)
+        assert "Перечитай условие" in r.json()["hints_list"][0]["html"]
+        assert "Исключи А и В" in block_of(model.judge_calls[-1]["content"], "shown_data")
+
+
+def test_a_reply_over_the_limit_is_regenerated_once_then_generic(tmp_path):
+    def reply(kind, content):
+        return chat_reply("Длинно. " * 400 if "слишком длинным" not in content else "Коротко.")
 
     c, model, _v, _a = boot_chat(tmp_path, Scripted(reply=reply))
     with c:
         tid = seed(tmp_path, key="Б")
-        say(c, tid, "СТАРТ")
-        for i in range(22):
-            assert say(c, tid, f"вопрос {i}").status_code == 200
-        last = model.judge_calls[-1]
-        size = len((last["system"] + last["content"]).encode("utf-8"))
-        assert size < 300_000, size  # the executor refuses a request over 1,000,000 bytes
-        shown_block = block_of(last["content"], "shown_data")
-        assert "Исключи А и В" in shown_block  # the earliest disclosure is kept
-        assert events(tmp_path, "chat")[-1]["data"]["withheld"] is None  # the judge still works
+        r = say(c, tid, "расскажи")
+        assert (
+            model.kinds() == ["chat", "chat"] and r.json()["chat"][-1]["reply"] == "<p>Коротко.</p>"
+        )
+    c, model, _v, _a = boot_chat(tmp_path / "b", Scripted(default=chat_reply("Длинно. " * 400)))
+    with c:
+        tid = seed(tmp_path / "b", key="Б")
+        r = say(c, tid, "расскажи")
+        assert (
+            model.kinds() == ["chat", "chat"]
+            and events(tmp_path / "b", "chat")[-1]["data"]["withheld"] == "too_long"
+        )
+        assert "Длинно" not in shown(r) and r.json()["panel"]["state"] == "idle"
+
+
+def test_a_talk_too_long_for_the_executor_is_withheld_without_calling_the_judge(tmp_path):
+    # control characters: 1 character is 6 bytes in the JSON the executor gets, 1 in the raw text
+    ctrl = "\x01" * 1500
+    c, model, _v, _a = boot_chat(tmp_path, Scripted(default=chat_reply(ctrl)))
+    with c:
+        tid = seed(tmp_path, key="Б")
+        for i in range(100):
+            say(c, tid, f"вопрос {i}")
+        before = len(model.judge_calls)
+        r = say(c, tid, "последний")
+        item = r.json()["chat"][-1]
+        assert before > 90 and len(model.judge_calls) == before  # the judge was not asked
+        assert events(tmp_path, "chat")[-1]["data"]["withheld"] == "judge_unavailable"
+        assert item["withheld"] and ctrl not in shown(r)
+        assert "Слишком длинный разговор" in r.json()["notice"]
+        # the raw text of the whole talk is far under the limit: only the serialized size says no
+        assert sum(len(x["data"]["visible"]) for x in events(tmp_path, "chat")) < 400_000
+
+
+def test_a_huge_task_text_never_reaches_the_model(tmp_path):
+    c, model, _v, _a = boot_chat(tmp_path, Scripted(default=chat_reply("Ответ.")))
+    with c:
+        tid = seed(tmp_path, key="Б", text="слово " * 30000)
+        r = say(c, tid, "расскажи")
+        assert model.calls == [] and model.judge_calls == []
+        item = r.json()["chat"][-1]
+        assert events(tmp_path, "chat")[-1]["data"]["withheld"] == "overflow"
+        assert item["withheld"] and "Слишком длинный разговор" in r.json()["notice"]
+        r = post(c, tid, "attempt", answer="А")
+        hint = post(c, tid, "hint", level=1)
+        assert model.calls == [] and hint.status_code == 200 and not hint.json()["hints_list"]

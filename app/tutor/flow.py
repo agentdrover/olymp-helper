@@ -18,6 +18,7 @@ from app.chat import store as chat_store
 from app.ingest.answers import display
 from app.ingest.publish import assist_mode
 from app.ingest.store import figure_of, get_task
+from app.model.client import MAX_REQUEST_BYTES, request_size
 from app.tutor import state
 from app.tutor.guard import GENERIC, finish, render_markdown
 from app.tutor.panel import Inflight, failure_state, panel
@@ -32,6 +33,8 @@ from app.tutor.prompts import (
     parse_verdict,
 )
 from app.tutor.state import DISPUTED, Refused
+
+LONG_TALK = "Слишком длинный разговор по этому заданию. Начни новое занятие или открой решение."
 
 
 class Flow:
@@ -76,6 +79,9 @@ class Flow:
         )
         with state.atomic(self.conn):
             self.session = state.session_id_for(self.conn, self.now)
+        if request_size(system, messages, OUTPUT_SCHEMA) > MAX_REQUEST_BYTES:
+            self.notice = LONG_TALK  # не помещается в лимит исполнителя: модель не зовём
+            return None
         try:
             result = self.model.complete(system, messages, OUTPUT_SCHEMA, session_id=self.session)
         except Exception:  # noqa: BLE001 - модель любого вида: ребёнку «не отвечает»
@@ -126,6 +132,9 @@ class Flow:
             + chat_store.visible_texts(self.conn, self.session, task["id"], run["id"]),
             attempts=json.loads(fresh["attempts_json"]),
         )
+        if request_size(system, messages, JUDGE_SCHEMA) > MAX_REQUEST_BYTES:
+            self.notice = LONG_TALK  # улики не режутся: судью не зовём, текст не показываем
+            return None
         try:
             result = call(other, system, messages, JUDGE_SCHEMA, session_id=self.session)
         except Exception:  # noqa: BLE001

@@ -14,6 +14,7 @@ from app.tutor.prompts import RULES, ModelOutputError, neutralize
 
 MODES = ("chat", "formulate")
 MAX_MESSAGE = 1000
+MAX_REPLY = 1500  # ответ ребёнку короткий по замыслу; длиннее - ошибка модели, не ответ
 MAX_CITATIONS = 3
 MAX_SUGGESTIONS = 3
 
@@ -40,7 +41,7 @@ CHAT_SCHEMA = {
 
 INSTRUCTION = {
     "chat": (
-        "Ответь на вопрос ученика по существу и коротко (2-5 предложений). Опирайся на фрагменты "
+        "Ответь на вопрос ученика по существу и коротко (2-5 предложений, не длиннее 800 знаков). Опирайся на фрагменты "
         "учебника из pdf_data, если они подходят. Если вопрос не по школьной биологии, вежливо "
         "откажись и верни ученика к заданию. Поле suggestions оставь пустым."
     ),
@@ -61,6 +62,10 @@ GENERIC = {
 }
 
 
+class ReplyTooLong(ModelOutputError):
+    """Ответ длиннее MAX_REPLY: просим короче один раз, потом общий текст."""
+
+
 @dataclass(frozen=True)
 class ChatOutput:
     reply: str
@@ -77,8 +82,10 @@ def parse_chat(payload) -> ChatOutput:
     if not isinstance(payload, dict):
         raise ModelOutputError("not an object")
     reply = payload.get("reply")
-    if not isinstance(reply, str) or not reply.strip() or len(reply) > 8000:
+    if not isinstance(reply, str) or not reply.strip():
         raise ModelOutputError("reply")
+    if len(reply) > MAX_REPLY:
+        raise ReplyTooLong("reply")
     ids = []
     for raw in payload.get("citations") or []:
         if isinstance(raw, int) and not isinstance(raw, bool):
@@ -110,6 +117,7 @@ def build_chat_request(
     use_note: bool,
     opened_answer: str | None = None,
     feedback: str | None = None,
+    shorter: bool = False,
 ) -> tuple[str, list[dict]]:
     """(system, messages). history - [{question, reply}] этого занятия по этому заданию."""
     options = json.loads(task["options"]) if task["options"] else None
@@ -129,6 +137,8 @@ def build_chat_request(
         instruction += (
             f" Решение открыто. Верный ответ (уже открыт ученику): {neutralize(opened_answer)}."
         )
+    if shorter:
+        instruction += " Твой прошлый ответ был слишком длинным: уложись в 800 знаков."
     if feedback:
         instruction += (
             " Твой прошлый текст раскрывал ответ: " + neutralize(feedback)[:300] + ". "

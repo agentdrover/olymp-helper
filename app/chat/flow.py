@@ -19,18 +19,23 @@ from app.chat.prompts import (
     MAX_MESSAGE,
     MODES,
     ChatOutput,
+    ReplyTooLong,
     build_chat_request,
     parse_chat,
 )
 from app.ingest.publish import assist_mode
 from app.ingest.store import atomic, get_task
+from app.model.client import MAX_REQUEST_BYTES, request_size
 from app.search.textbook import search_textbooks
 from app.tutor import state
-from app.tutor.flow import Flow
+from app.tutor.flow import LONG_TALK, Flow
 from app.tutor.guard import plain, prefilter_reason, strip_claims, strip_markup
 from app.tutor.panel import failure_state
 from app.tutor.prompts import ModelOutputError
 from app.tutor.state import Refused
+
+TOO_LONG = object()  # ответ модели длиннее MAX_REPLY
+OVERFLOW = object()  # запрос не помещается в лимит исполнителя
 
 
 class ChatFlow(Flow):
@@ -56,12 +61,19 @@ class ChatFlow(Flow):
 
     # ------------------------------------------------------------------ обмен
 
-    def _generate(self, task, run, mode, message, history, fragments, opened, feedback=None):
+    def _generate(
+        self, task, run, mode, message, history, fragments, opened, feedback=None, shorter=False
+    ):
+        """ChatOutput, None (panel_state назван), TOO_LONG (ответ длиннее лимита) или OVERFLOW
+        (запрос не помещается в лимит исполнителя: модель не зовётся)."""
         system, messages = build_chat_request(
             task, mode, message,
             history=history, fragments=fragments, use_note=True,
-            opened_answer=opened, feedback=feedback,
+            opened_answer=opened, feedback=feedback, shorter=shorter,
         )  # fmt: skip
+        if request_size(system, messages, CHAT_SCHEMA) > MAX_REQUEST_BYTES:
+            self.notice = LONG_TALK
+            return OVERFLOW
         try:
             result = self.model.complete(system, messages, CHAT_SCHEMA, session_id=self.session)
         except Exception:  # noqa: BLE001 - модель любого вида: ребёнку «не отвечает»
@@ -74,6 +86,8 @@ class ChatFlow(Flow):
         payload = result.json if getattr(result, "json", None) is not None else result.text
         try:
             return parse_chat(payload)
+        except ReplyTooLong:
+            return TOO_LONG
         except ModelOutputError:
             self.panel_state = "down"
             return None
@@ -88,7 +102,21 @@ class ChatFlow(Flow):
         opened = self._opened_answer(run)
         args = (task, run, mode, message, history, fragments, opened)
         out = self._generate(*args)
+        if out is TOO_LONG:  # один раз просим короче, потом общий текст
+            out = self._generate(*args, shorter=True)
         if out is None:
+            return
+        if not isinstance(out, ChatOutput):
+            self._store(
+                task,
+                run,
+                mode,
+                message,
+                GENERIC[mode],
+                [],
+                [],
+                "overflow" if out is OVERFLOW else "too_long",
+            )
             return
         reply, suggestions, citations, reason = out.reply, out.suggestions, [], None
         if opened is None:
@@ -103,7 +131,7 @@ class ChatFlow(Flow):
                 if reason is None or attempt == 1 or reason == "judge_unavailable":
                     break
                 again = self._generate(*args, feedback=feedback)
-                if again is None:
+                if not isinstance(again, ChatOutput):
                     break
                 out = again
             reply, suggestions = out.reply, out.suggestions
