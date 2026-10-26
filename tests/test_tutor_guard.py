@@ -173,3 +173,24 @@ def test_innocent_text_passes_and_note_pairs_are_cut():
         assert reason(text, "5", "single", nums, note=NOTE) in ("note", "note_pair"), text
     assert reason("Цифрой 3 обозначен лепесток", "5", "single", nums, note=NOTE) == "note_pair"
     assert reason("Посмотри на пестик на рисунке", "5", "single", nums, note=NOTE) is None
+
+
+def test_function_words_are_not_labels_but_label_contexts_are():
+    """«в клетке», «а также», «в ядре» проходят, когда верный вариант В или А (иначе лестница
+    подсказок бесполезна); обозначение в контексте обозначения отклоняется."""
+    passing = [
+        ("Посмотри, что происходит в клетке, когда она делится.", "В"),
+        ("Подумай про ядро, а также про оболочку клетки.", "А"),
+        ("Что находится в ядре и чем оно окружено?", "В"),
+        ("Сравни, а потом вспомни, что ты знаешь о строении клетки.", "А"),
+        ("Это бывает у многих организмов, а у некоторых нет.", "А"),
+    ]
+    for text, ref in passing:
+        assert reason(text, ref) is None, text
+    rejected = [
+        ("(в) подходит", "В"), ("Выбери вариант в", "В"), ("Ответ — В", "В"),
+        ("В — верно", "В"), ("Нужны а, б и в", "В"), ("Это пункт а", "А"),
+        ("А: вот оно", "А"), ("в) это он", "В"), ("Думаю, что б.", "Б"),
+    ]  # fmt: skip
+    for text, ref in rejected:
+        assert reason(text, ref) is not None, text

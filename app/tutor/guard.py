@@ -222,6 +222,63 @@ def leaks_note(text: str, note: str | None) -> bool:
     return note_reason(text, note) is not None
 
 
+_TOKEN_SPAN = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
+# Слова, которые в речи чаще всего предлоги и союзы: строчными вне контекста они не обозначения.
+_FUNCTION_LETTERS = frozenset("авиоксуяэ")
+_KEYWORDS = ("вариант", "ответ", "пункт", "букв", "номер")
+_LABEL_LIST = re.compile(
+    r"(?<![\w])([A-Za-zА-Яа-яЁё])(?=(?:\s*,\s*|\s+и\s+|\s+или\s+)([A-Za-zА-Яа-яЁё])(?![\w]))"
+)
+
+
+def _sentence_start(text: str, pos: int) -> bool:
+    i = pos - 1
+    while i >= 0 and text[i] in ' \t«"“(':
+        i -= 1
+    return i < 0 or text[i] in ".!?…\n"
+
+
+def label_positions(text: str, all_labels: set[str]) -> list[tuple[int, str]]:
+    """(номер слова, обозначение) для слов, употреблённых КАК обозначение варианта.
+
+    Цифры - всегда обозначения. Одиночная буква - только в контексте обозначения: заглавная не в
+    начале предложения; в скобках или кавычках; перед тире или двоеточием; после слов «вариант»,
+    «ответ», «пункт», «буква», «номер» (не дальше двух слов); в перечне «а, б и в». Строчные
+    «в», «а», «и», «с» в обычной речи - предлоги и союзы, их это не задевает."""
+    spans = [(m.start(), m.end(), m.group(0)) for m in _TOKEN_SPAN.finditer(text)]
+    low = [raw.lower().replace("ё", "е") for _, _, raw in spans]
+    found: dict[int, str] = {}
+    for i, (start, end, raw) in enumerate(spans):
+        if len(raw) > 2:
+            continue
+        lab = _label(raw)
+        if not lab or lab not in all_labels:
+            continue
+        if raw.isdigit():
+            found[i] = lab
+            continue
+        if len(raw) != 1:
+            continue
+        before, after = text[max(0, start - 1) : start], text[end : end + 3]
+        if (
+            (raw.isupper() and not _sentence_start(text, start))
+            or (raw.islower() and raw.replace("ё", "е") not in _FUNCTION_LETTERS)
+            or before in '([«"“'
+            and before
+            or re.match(r"[)\]»\"”]", after)
+            or re.match(r"\s*[—–:]|\s+-\s|\.\s*[-—–:]", after)
+            or any(low[k].startswith(_KEYWORDS) for k in range(max(0, i - 2), i))
+        ):
+            found[i] = lab
+    # перечень «а, б и в»: одиночные буквы-обозначения через запятую, «и», «или»
+    index = {start: i for i, (start, _, _) in enumerate(spans)}
+    for m in _LABEL_LIST.finditer(text):
+        pair = [(index.get(m.start(g)), _label(m.group(g))) for g in (1, 2)]
+        if all(i is not None and lab in all_labels for i, lab in pair):
+            found.update({i: lab for i, lab in pair})
+    return sorted(found.items())
+
+
 def answer_reason(
     text: str, task_type: str, options, reference, condition: str = "", own=()
 ) -> str | None:
@@ -233,8 +290,9 @@ def answer_reason(
     all_labels = {x for o in items if (x := _label(o["label"]))}
     own = set(own)
     correct = {x for v in _flat(reference) if (x := _label(v))} if task_type != "numeric" else set()
-    # 1. обозначение верного варианта как отдельное слово, в любом регистре
-    if any(lab in correct for lab in (_label_of_token(t) for t in toks) if lab):
+    # 1. обозначение верного варианта, употреблённое как обозначение
+    marks = label_positions(text, all_labels)
+    if any(lab in correct for _, lab in marks):
         return "label"
     # 2. значимые слова текста верного варианта: их нет в условии и не у всех вариантов
     cond = {_stem(t) for t in tokens_of(condition) if _is_word(t)}
@@ -268,8 +326,8 @@ def answer_reason(
         for j in range(max(0, i - CUE_RANGE), min(len(toks), i + CUE_RANGE + 1)):
             if j == i:
                 continue
-            lab = _label_of_token(toks[j])
-            if lab and lab in all_labels and lab not in own:
+            lab = dict(marks).get(j)
+            if lab and lab not in own:
                 return "cue"
             if _is_word(toks[j]) and _stem(toks[j]) in option_words:
                 return "cue"
