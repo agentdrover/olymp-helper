@@ -88,9 +88,11 @@
 
   document.addEventListener("keydown", (e) => {
     const t = e.target;
-    // Фокус на поле, кнопке или ссылке: Enter принадлежит им (например, «Выйти»), не ленте.
-    if (t && t.closest && t.closest("input, textarea, select, button, a, [contenteditable]")) return;
+    // В поле ввода все клавиши принадлежат полю.
+    if (t && t.closest && t.closest("input, textarea, select, [contenteditable]")) return;
     if (e.key === "Enter") {
+      // Enter на кнопке или ссылке (например, «Выйти») нажимает её, а не подтверждает задание.
+      if (t && t.closest && t.closest("button, a")) return;
       const b = feed.querySelector('button[data-action="confirm"], button[data-action="resolve"][data-choice="key"]');
       if (b) { e.preventDefault(); b.click(); }
     } else if (e.key === "ArrowRight") {
