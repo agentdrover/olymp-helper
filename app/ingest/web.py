@@ -137,7 +137,14 @@ def upload_material(
             "SELECT id, import_status FROM material WHERE sha256 = ?", (sha,)
         ).fetchone()
         if existing is not None:
-            requeued = existing["import_status"] == "failed"
+            # повтор: упавший импорт или пустой - всё отклонено при разборе, заданий нет
+            empty = (
+                existing["import_status"] == "done"
+                and not conn.execute(
+                    "SELECT 1 FROM task_item WHERE material_id = ? LIMIT 1", (existing["id"],)
+                ).fetchone()
+            )
+            requeued = existing["import_status"] == "failed" or empty
             if requeued:
                 conn.execute(
                     "UPDATE material SET import_status = 'queued', import_error = NULL WHERE id = ?",

@@ -191,3 +191,22 @@ def test_a_model_answer_with_no_tasks_and_nothing_skipped_still_fails(tmp_path):
         upload(c, text_pdf([["1. вопрос"]]))
         got = material(tmp_path)
         assert got["import_status"] == "failed" and "ни одного задания" in got["import_error"]
+
+
+def test_an_empty_done_import_is_retried_on_re_upload(tmp_path):
+    """Everything rejected → done with 0 tasks; re-uploading the same PDF must run the import again,
+    or the parent is stuck with an empty material (Codex, #2084). A done import that has tasks is
+    not re-run."""
+    model = StubModel(split=reply(bad_match(1, 1)))
+    pdf = text_pdf([["1. вопрос"]])
+    with TestClient(build_app(tmp_path, model)) as c:
+        upload(c, pdf)
+        assert material(tmp_path)["import_status"] == "done" and task_ids(tmp_path) == []
+        model.split = reply(make_task(1, "Вопрос номер 1"))
+        r = upload(c, pdf)
+        assert r.json()["requeued"] is True
+        assert material(tmp_path)["import_status"] == "done"
+        assert len(task_ids(tmp_path)) == 1 and not material(tmp_path)["import_error"]
+        calls = len(model.calls)
+        assert upload(c, pdf).json()["requeued"] is False  # has tasks now: not re-run
+        assert len(model.calls) == calls
