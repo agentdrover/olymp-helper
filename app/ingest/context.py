@@ -18,6 +18,13 @@ class ExecutorModel:
         self.db_path = db_path
 
     def complete(self, system, messages, schema=None, session_id=None) -> ModelResult:
+        return self._run(lambda svc: svc.complete(system, messages, schema, session_id))
+
+    def complete_on(self, channel, system, messages, schema=None, session_id=None) -> ModelResult:
+        """Один названный канал без запасного (независимый судья текста, OH-T06)."""
+        return self._run(lambda svc: svc.complete_on(channel, system, messages, schema, session_id))
+
+    def _run(self, call) -> ModelResult:
         conn = connect(self.db_path)
         try:
             channels = {
@@ -28,7 +35,7 @@ class ExecutorModel:
                     "cursor", os.environ.get("EXECUTOR_CURSOR_URL", "http://executor-cursor:8099")
                 ),
             }
-            return ModelService(conn, channels).complete(system, messages, schema, session_id)
+            return call(ModelService(conn, channels))
         finally:
             conn.close()
 

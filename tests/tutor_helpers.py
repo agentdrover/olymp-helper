@@ -72,9 +72,32 @@ class Scripted:
 
 
 MODES = (
-    "hint1", "hint2", "mistake", "solution",
+    "hint1", "hint2", "mistake", "solution", "judge",
     "explain_simpler", "explain_table", "explain_example", "explain_olympiad", "explain_check",
 )  # fmt: skip
+
+
+class Judged(Scripted):
+    """A model with an independent judge: complete_on(channel, ...) answers judge requests.
+    judge(content) -> dict | None | ModelResult; a real judge sees a data block with the text."""
+
+    def __init__(self, judge=None, **kw):
+        super().__init__(**kw)
+        self.judge = judge
+        self.judge_calls = []
+
+    def complete_on(self, channel, system, messages, schema=None, session_id=None):
+        content = messages[-1]["content"]
+        self.judge_calls.append({"channel": channel, "content": content, "system": system})
+        payload = self.judge(content) if callable(self.judge) else {"reveals": False, "reason": ""}
+        if isinstance(payload, ModelResult):
+            return payload
+        if payload is None:
+            return ModelResult.failure(channel, "stub", "error")
+        return ModelResult(None, payload, channel, "stub", 1, None)
+
+    def candidate(self, content):
+        return content.split("<candidate_data>\n", 1)[1].rsplit("\n</candidate_data>", 1)[0]
 
 
 class Blocking(Scripted):

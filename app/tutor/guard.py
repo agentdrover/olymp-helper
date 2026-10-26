@@ -15,6 +15,7 @@
 import html
 import json
 import re
+import unicodedata
 
 from app.ingest.answers import normalize_answer
 
@@ -125,8 +126,23 @@ def number_words(n: int) -> list[str]:
     return out
 
 
+_DINGBAT_DIGITS = {
+    **{chr(0x2776 + i): str(i + 1) for i in range(10)},  # ❶-❿
+    **{chr(0x2780 + i): str(i + 1) for i in range(10)},  # ➀-➉
+    **{chr(0x278A + i): str(i + 1) for i in range(10)},  # ➊-➓
+}
+_KEYCAP = re.compile("([0-9])[\ufe0f]?\u20e3")
+
+
+def fold_numerals(text: str) -> str:
+    """①, ⑤, ❷, 5️⃣ и цифры полной ширины -> обычные цифры (ребёнок видит те же обозначения)."""
+    text = _KEYCAP.sub(r" \1 ", text or "")
+    text = "".join(f" {_DINGBAT_DIGITS[c]} " if c in _DINGBAT_DIGITS else c for c in text)
+    return unicodedata.normalize("NFKC", text)
+
+
 def tokens_of(text: str) -> list[str]:
-    return _TOKENS.findall((text or "").lower().replace("ё", "е"))
+    return _TOKENS.findall(fold_numerals(text).lower().replace("ё", "е"))
 
 
 def _stem(word: str) -> str:
@@ -238,24 +254,39 @@ def _sentence_start(text: str, pos: int) -> bool:
     return i < 0 or text[i] in ".!?…\n"
 
 
-def label_positions(text: str, all_labels: set[str]) -> list[tuple[int, str]]:
-    """(номер слова, обозначение) для слов, употреблённых КАК обозначение варианта.
+_TRANSLIT = {"a": "А", "b": "Б", "v": "В", "g": "Г", "d": "Д", "e": "Е"}
 
-    Цифры - всегда обозначения. Одиночная буква - только в контексте обозначения: заглавная не в
-    начале предложения; в скобках или кавычках; перед тире или двоеточием; после слов «вариант»,
-    «ответ», «пункт», «буква», «номер» (не дальше двух слов); в перечне «а, б и в». Строчные
-    «в», «а», «и», «с» в обычной речи - предлоги и союзы, их это не задевает."""
+
+def _candidates(raw: str, all_labels: set[str]) -> set[str]:
+    """Какие обозначения может значить слово: для латинской буквы - и похожая кириллическая
+    (B -> В), и звуковая транслитерация (b -> Б)."""
+    cands = {_label(raw)}
+    if raw.isascii() and raw.isalpha():
+        cands.add(_TRANSLIT.get(raw.lower()))
+    return {c for c in cands if c and c in all_labels}
+
+
+def label_positions(text: str, all_labels: set[str]) -> list[tuple[int, frozenset]]:
+    """(номер слова, возможные обозначения) для слов, употреблённых КАК обозначение варианта.
+
+    Цифры - всегда обозначения; латинская буква - тоже (кириллических вариантов она не бывает
+    в обычной речи). Кириллическая одиночная буква - только в контексте обозначения: заглавная не
+    в начале предложения; в скобках или кавычках; перед тире или двоеточием; после слов
+    «вариант», «ответ», «пункт», «буква», «номер» (не дальше двух слов); в перечне «а, б и в»;
+    строчная, не бывающая предлогом или союзом (б, г, д). Строчные «в», «а», «и», «с» в обычной
+    речи - предлоги и союзы, их это не задевает."""
+    text = fold_numerals(text)
     spans = [(m.start(), m.end(), m.group(0)) for m in _TOKEN_SPAN.finditer(text)]
     low = [raw.lower().replace("ё", "е") for _, _, raw in spans]
-    found: dict[int, str] = {}
+    found: dict[int, set[str]] = {}
     for i, (start, end, raw) in enumerate(spans):
         if len(raw) > 2:
             continue
-        lab = _label(raw)
-        if not lab or lab not in all_labels:
+        cands = _candidates(raw, all_labels)
+        if not cands:
             continue
-        if raw.isdigit():
-            found[i] = lab
+        if raw.isdigit() or raw.isascii():
+            found.setdefault(i, set()).update(cands)
             continue
         if len(raw) != 1:
             continue
@@ -269,14 +300,15 @@ def label_positions(text: str, all_labels: set[str]) -> list[tuple[int, str]]:
             or re.match(r"\s*[—–:]|\s+-\s|\.\s*[-—–:]", after)
             or any(low[k].startswith(_KEYWORDS) for k in range(max(0, i - 2), i))
         ):
-            found[i] = lab
+            found.setdefault(i, set()).update(cands)
     # перечень «а, б и в»: одиночные буквы-обозначения через запятую, «и», «или»
     index = {start: i for i, (start, _, _) in enumerate(spans)}
     for m in _LABEL_LIST.finditer(text):
-        pair = [(index.get(m.start(g)), _label(m.group(g))) for g in (1, 2)]
-        if all(i is not None and lab in all_labels for i, lab in pair):
-            found.update({i: lab for i, lab in pair})
-    return sorted(found.items())
+        pair = [(index.get(m.start(g)), _candidates(m.group(g), all_labels)) for g in (1, 2)]
+        if all(i is not None and cands for i, cands in pair):
+            for i, cands in pair:
+                found.setdefault(i, set()).update(cands)
+    return sorted((i, frozenset(c)) for i, c in found.items())
 
 
 def answer_reason(
@@ -291,8 +323,9 @@ def answer_reason(
     own = set(own)
     correct = {x for v in _flat(reference) if (x := _label(v))} if task_type != "numeric" else set()
     # 1. обозначение верного варианта, употреблённое как обозначение
+    text = fold_numerals(text)
     marks = label_positions(text, all_labels)
-    if any(lab in correct for _, lab in marks):
+    if any(labs & correct for _, labs in marks):
         return "label"
     # 2. значимые слова текста верного варианта: их нет в условии и не у всех вариантов
     cond = {_stem(t) for t in tokens_of(condition) if _is_word(t)}
@@ -326,11 +359,48 @@ def answer_reason(
         for j in range(max(0, i - CUE_RANGE), min(len(toks), i + CUE_RANGE + 1)):
             if j == i:
                 continue
-            lab = dict(marks).get(j)
-            if lab and lab not in own:
+            labs = dict(marks).get(j)
+            if labs and labs - own:
                 return "cue"
             if _is_word(toks[j]) and _stem(toks[j]) in option_words:
                 return "cue"
+    return None
+
+
+def prefilter_reason(
+    text: str, task_type: str, options, reference, condition: str = "", own=()
+) -> str | None:
+    """Дешёвая проверка только очевидного: обозначение верного варианта в контексте обозначения
+    (с цифрами, ②, 5️⃣ и транслитом), число эталона, точный текст верного варианта (все его
+    значимые слова вместе). Всё остальное - синонимы, порядок, исключение - ловит судья."""
+    text = fold_numerals(text)
+    toks = tokens_of(text)
+    if not toks:
+        return None
+    items = _options_flat(options)
+    all_labels = {x for o in items if (x := _label(o["label"]))}
+    correct = {x for v in _flat(reference) if (x := _label(v))} if task_type != "numeric" else set()
+    if any(labs & correct for _, labs in label_positions(text, all_labels)):
+        return "label"
+    if task_type == "numeric" and reference is not None:
+        want = normalize_answer(reference, "numeric")
+        if any(normalize_answer(n, "numeric") == want for n in _NUMBER.findall(text)):
+            return "number"
+        spelled = want and re.fullmatch(r"\d+", want) and int(want) <= 1000
+        if spelled and _number_words_in(toks, number_words(int(want))):
+            return "number"
+    cond = {_stem(t) for t in tokens_of(condition) if _is_word(t)}
+    have = {_stem(t) for t in toks if _is_word(t)}
+    joined = " ".join(toks)
+    for o in items:
+        if _label(o["label"]) not in correct:
+            continue
+        words = {_stem(t) for t in tokens_of(o["text"]) if _is_word(t)}
+        if words:
+            if not words <= cond and words <= have:
+                return "option_text"
+        elif len(" ".join(tokens_of(o["text"]))) >= 3 and " ".join(tokens_of(o["text"])) in joined:
+            return "option_text"
     return None
 
 
@@ -359,13 +429,15 @@ def finish(
     keyed: bool = True,
     condition: str = "",
     own=(),
+    level: str = "strict",
 ) -> tuple[str, str | None]:
     """(безопасный HTML, причина отклонения или None). reveal=True - решение уже открыто:
     ответ называть можно, пояснение к рисунку - нет; без ключа утверждения о верности вырезаются."""
     body = plain(text)
     reason = note_reason(body, note)
     if reason is None and not reveal:
-        reason = answer_reason(body, task_type, options, reference, condition, own)
+        check = prefilter_reason if level == "prefilter" else answer_reason
+        reason = check(body, task_type, options, reference, condition, own)
     if reason is None and reveal and not keyed:
         text = strip_claims(text)
         if not text.strip():
