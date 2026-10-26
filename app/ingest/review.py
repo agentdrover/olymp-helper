@@ -162,7 +162,8 @@ def edit_task(
         if manual_condition:
             if task["type"] == "open":
                 raise Refusal("Открытое задание вне v1: его можно только исключить.")
-            cols.update(figure=None, unsupported_reason=None)
+            if task["figure"] is not None or task["unsupported_reason"] is not None:
+                cols.update(figure=None, unsupported_reason=None)  # иначе условие не менялось
             if task["import_status"] == "unsupported":
                 cols["import_status"] = "draft"
         if topic is not None:

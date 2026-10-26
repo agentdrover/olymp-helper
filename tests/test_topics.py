@@ -167,3 +167,57 @@ def test_a_real_text_change_still_makes_a_revision(tmp_path):
         assert after["revision"] == before["revision"] + 1
         assert after["import_status"] == "draft" and after["model_answer"] is None
         assert c.get("/api/tasks", headers=CHILD).json()["tasks"] == []
+
+
+def test_the_ui_payload_with_manual_condition_and_a_new_topic_makes_no_revision(tmp_path):
+    c, _model, (tid,) = run(tmp_path, [IN_CATALOG])
+    with c:
+        c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={})
+        before = row(tmp_path, tid)
+        assert before["figure"] is None and before["unsupported_reason"] is None
+        payload = {"text": before["text"], "manual_condition": True, "topic": "b14.heredity"}
+        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json=payload)
+        assert r.status_code == 200, r.text
+        after = row(tmp_path, tid)
+        assert after["topic"] == "b14.heredity"
+        assert after["revision"] == before["revision"]
+        assert after["import_status"] == "checked" and after["model_answer"] is not None
+        assert len(json.loads(c.get("/api/tasks", headers=CHILD).text)["tasks"]) == 1
+
+
+def test_an_old_free_text_topic_is_cleared_by_the_migration(tmp_path):
+    """v8 databases hold the model's free text in task_item.topic; after 0009 it is NULL."""
+    from app.db import _migration_files, _statements
+
+    conn = connect(tmp_path / "olymp.db")
+    conn.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
+        "applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    for version, path in _migration_files()[:8]:
+        for stmt in _statements(path.read_text(encoding="utf-8")):
+            conn.execute(stmt)
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
+    conn.execute(
+        "INSERT INTO material(file, sha256, kind, import_status) "
+        "VALUES ('a.pdf', 'h1', 'tasks', 'done')"
+    )
+    conn.execute("PRAGMA user_version = 8")
+    for n, topic in ((1, "cyt.cell"), (2, "клетка и ткани"), (3, None)):
+        conn.execute(
+            "INSERT INTO task_item(material_id, page_from, page_to, source_number, type, text, "
+            "options, points, topic, import_status) VALUES "
+            "(1, 1, 1, ?, 'single', 'Вопрос', '[\"а\",\"б\"]', 1, ?, 'draft')",
+            (str(n), topic),
+        )
+    conn.close()
+
+    c = TestClient(build_app(tmp_path, StubModel()))
+    with c:
+        ids = task_ids(tmp_path)
+        assert [row(tmp_path, i)["topic"] for i in ids] == [None, None, None]
+        # the card edit with the topic as shown (unmarked) is accepted
+        r = c.post(
+            f"/parent/tasks/{ids[0]}/edit", headers=PARENT, json={"text": "Вопрос", "topic": ""}
+        )
+        assert r.status_code == 200, r.text

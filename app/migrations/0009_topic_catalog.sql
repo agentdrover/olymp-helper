@@ -42,3 +42,7 @@ INSERT INTO topic (code, title, parent_code, position, school_grade, municipal_g
     ('b14', 'Молекулярная биология. Генетика', NULL, 28, '11', '11'),
     ('b14.heredity', 'Наследственность и изменчивость', 'b14', 29, NULL, NULL),
     ('b14.tasks', 'Закономерности наследования, генетические задачи', 'b14', 30, NULL, NULL);
+-- До каталога importer писал в task_item.topic свободный текст модели: что не является кодом
+-- каталога, становится «не размечено», чтобы каждое оставшееся значение было допустимым.
+UPDATE task_item SET topic = NULL
+WHERE topic IS NOT NULL AND topic NOT IN (SELECT code FROM topic);
