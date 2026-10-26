@@ -237,6 +237,8 @@ def test_feed_page_binds_the_review_keys(tmp_path):
         js = c.get("/static/feed.js").text
         for needle in ('"Enter"', '"ArrowRight"', '"KeyE"'):
             assert needle in js
+        # Enter на сфокусированной кнопке или ссылке (например, «Выйти») не подтверждает задание.
+        assert "button, a" in js
         assert c.get("/parent/review", headers=CHILD).status_code == 403
 
 
