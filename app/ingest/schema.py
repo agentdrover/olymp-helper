@@ -13,11 +13,20 @@ NUMBER = re.compile(r"^\d{1,4}(\.\d{1,3})?[A-Za-zА-Яа-я]?$")
 
 
 class InvalidStructure(Exception):
-    """Ответ модели не соответствует схеме; текст читает родитель."""
+    """Ответ модели не соответствует схеме; текст читает родитель. safe - то же без единого
+    значения из ответа модели: только он годится для повторной просьбы модели."""
+
+    def __init__(self, message: str, safe: str | None = None):
+        super().__init__(message)
+        self.safe = safe or message
 
 
-def _fail(where: str, what: str):
-    raise InvalidStructure(f"Модель вернула неверную структуру ({where}): {what}.")
+def _fail(where: str, what: str, safe: str | None = None):
+    """safe - фиксированная формулировка категории, если what содержит значение из ответа."""
+    raise InvalidStructure(
+        f"Модель вернула неверную структуру ({where}): {what}.",
+        f"Модель вернула неверную структуру ({where}): {safe or what}.",
+    )
 
 
 def _option_list(value, where: str, minimum: int) -> list[dict]:
@@ -31,9 +40,9 @@ def _option_list(value, where: str, minimum: int) -> list[dict]:
         if not isinstance(label, str) or not label.strip():
             _fail(where, "у варианта нет обозначения")
         if not isinstance(text, str) or not text.strip():
-            _fail(where, f"у варианта {label} нет текста")
+            _fail(where, f"у варианта {label} нет текста", "у варианта нет текста")
         if label in labels:
-            _fail(where, f"обозначение {label} повторяется")
+            _fail(where, f"обозначение {label} повторяется", "обозначение варианта повторяется")
         labels.add(label)
         out.append({"label": label.strip(), "text": text.strip()})
     return out
@@ -85,66 +94,66 @@ def check_options(kind: str, value):
     return _options(kind, value, "варианты")
 
 
+def validate_task(raw, i: int, pages: set[int], catalog=()) -> dict:
+    """Одно задание из ответа модели; i - его номер в списке (с нуля)."""
+    where = f"задание {i + 1}"
+    if not isinstance(raw, dict):
+        _fail(where, "ожидался объект")
+    kind = raw.get("type")
+    if kind not in TYPES:
+        _fail(where, f"неизвестный тип {kind!r}", "неизвестный тип задания")
+    number = raw.get("number")
+    if isinstance(number, int) and not isinstance(number, bool):
+        number = str(number)
+    if not isinstance(number, str) or not NUMBER.fullmatch(number.strip()):
+        _fail(where, "номер задания должен быть числом, например 12, 5.2 или 3а")
+    # condition - условие БЕЗ ответов; text - прежнее имя того же поля.
+    text = raw.get("condition", raw.get("text"))
+    if not isinstance(text, str) or not text.strip():
+        _fail(where, "пустое условие")
+    answer_text = raw.get("answer_text")
+    if answer_text is not None and not isinstance(answer_text, str):
+        _fail(where, "answer_text должен быть строкой")
+    if answer_text and len(answer_text) > MAX_ANSWER_TEXT:
+        _fail(where, f"answer_text длиннее {MAX_ANSWER_TEXT} знаков")
+    text, elements = split_elements(text.strip())
+    if not text:
+        _fail(where, "пустое условие")
+    if elements:  # «Элементы ответа» остались в условии: это часть ответа
+        answer_text = f"{answer_text}\n{elements}" if answer_text else elements
+    if is_drawing(text):  # ответ рисуется: проверить его нельзя, тип - открытое
+        kind = "open"
+    task_pages = raw.get("pages")
+    if (
+        not isinstance(task_pages, list)
+        or not task_pages
+        or not all(isinstance(p, int) and not isinstance(p, bool) for p in task_pages)
+    ):
+        _fail(where, "нужен непустой список номеров страниц")
+    if not set(task_pages) <= pages:
+        _fail(where, "указана страница вне переданного текста")
+    points = raw.get("points")
+    if points is not None and (isinstance(points, bool) or not isinstance(points, int | float)):
+        _fail(where, "points должен быть числом")
+    return {
+        "number": number.strip(),
+        "type": kind,
+        "text": text,
+        "answer_text": (answer_text or "").strip() or None,
+        "options": _options(kind, raw.get("options"), where),
+        "pages": sorted(set(task_pages)),
+        "refers_to_figure": bool(raw.get("refers_to_figure", False)),
+        "points": points,
+        "topic": accept(raw.get("topic"), catalog),
+        "section": _label(raw.get("section"), where, "раздел", 120),
+        "variant": _label(raw.get("variant"), where, "вариант", 20),
+        "stage": _label(raw.get("stage"), where, "этап", 60),
+    }
+
+
 def validate_tasks(payload, pages: set[int], catalog=()) -> list[dict]:
     """Список заданий из ответа модели; pages - номера страниц порции; catalog - коды тем:
     тема вне каталога отбрасывается (задание остаётся не размеченным)."""
     if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
         _fail("корень", "ожидался объект с полем tasks")
-    out = []
-    for i, raw in enumerate(payload["tasks"]):
-        where = f"задание {i + 1}"
-        if not isinstance(raw, dict):
-            _fail(where, "ожидался объект")
-        kind = raw.get("type")
-        if kind not in TYPES:
-            _fail(where, f"неизвестный тип {kind!r}")
-        number = raw.get("number")
-        if isinstance(number, int) and not isinstance(number, bool):
-            number = str(number)
-        if not isinstance(number, str) or not NUMBER.fullmatch(number.strip()):
-            _fail(where, "номер задания должен быть числом, например 12, 5.2 или 3а")
-        # condition - условие БЕЗ ответов; text - прежнее имя того же поля.
-        text = raw.get("condition", raw.get("text"))
-        if not isinstance(text, str) or not text.strip():
-            _fail(where, "пустое условие")
-        answer_text = raw.get("answer_text")
-        if answer_text is not None and not isinstance(answer_text, str):
-            _fail(where, "answer_text должен быть строкой")
-        if answer_text and len(answer_text) > MAX_ANSWER_TEXT:
-            _fail(where, f"answer_text длиннее {MAX_ANSWER_TEXT} знаков")
-        text, elements = split_elements(text.strip())
-        if not text:
-            _fail(where, "пустое условие")
-        if elements:  # «Элементы ответа» остались в условии: это часть ответа
-            answer_text = f"{answer_text}\n{elements}" if answer_text else elements
-        if is_drawing(text):  # ответ рисуется: проверить его нельзя, тип - открытое
-            kind = "open"
-        task_pages = raw.get("pages")
-        if (
-            not isinstance(task_pages, list)
-            or not task_pages
-            or not all(isinstance(p, int) and not isinstance(p, bool) for p in task_pages)
-        ):
-            _fail(where, "нужен непустой список номеров страниц")
-        if not set(task_pages) <= pages:
-            _fail(where, "указана страница вне переданного текста")
-        points = raw.get("points")
-        if points is not None and (isinstance(points, bool) or not isinstance(points, int | float)):
-            _fail(where, "points должен быть числом")
-        out.append(
-            {
-                "number": number.strip(),
-                "type": kind,
-                "text": text,
-                "answer_text": (answer_text or "").strip() or None,
-                "options": _options(kind, raw.get("options"), where),
-                "pages": sorted(set(task_pages)),
-                "refers_to_figure": bool(raw.get("refers_to_figure", False)),
-                "points": points,
-                "topic": accept(raw.get("topic"), catalog),
-                "section": _label(raw.get("section"), where, "раздел", 120),
-                "variant": _label(raw.get("variant"), where, "вариант", 20),
-                "stage": _label(raw.get("stage"), where, "этап", 60),
-            }
-        )
-    return out
+    return [validate_task(raw, i, pages, catalog) for i, raw in enumerate(payload["tasks"])]

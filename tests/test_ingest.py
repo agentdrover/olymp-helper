@@ -74,8 +74,9 @@ def test_ac1(tmp_path):
             r = upload(c, text_pdf([[f"{i}. Текст другого файла номер {i}"]]), name=f"b{i}.pdf")
             assert r.status_code == 202, r.text
             st = c.get(f"/parent/materials/{r.json()['material_id']}", headers=PARENT).json()
-            assert st["import_status"] == "failed", bad
-            assert "структур" in st["import_error"], st["import_error"]
+            # T05c: nothing accepted but something skipped is a done import with a warning.
+            assert st["import_status"] == "done", bad
+            assert "Не разобраны" in st["import_error"], st["import_error"]
             assert st["tasks"] == 0
 
     conn = db(tmp_path)
@@ -273,7 +274,7 @@ def test_ac5_import_error_is_escaped(tmp_path):
     with TestClient(build_app(tmp_path, StubModel(split=bad))) as c:
         r = upload(c, text_pdf([["1. текст"]]))
         st = c.get(f"/parent/materials/{r.json()['material_id']}", headers=PARENT).json()
-        assert st["import_status"] == "failed" and hostile in st["import_error"]
+        assert st["import_status"] == "done" and hostile in st["import_error"]
         page = c.get("/parent/materials", headers=PARENT)
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
         assert "<script>alert(1)" not in page.text
@@ -286,7 +287,8 @@ def test_a_hostile_task_number_is_a_structure_error_and_never_reaches_the_prompt
     with TestClient(build_app(tmp_path, StubModel(split=reply(make_task(hostile))))) as c:
         r = upload(c, text_pdf([["1. текст"]]))
         st = c.get(f"/parent/materials/{r.json()['material_id']}", headers=PARENT).json()
-        assert st["import_status"] == "failed" and "структур" in st["import_error"]
+        assert st["import_status"] == "done" and "Не разобраны" in st["import_error"]
+        assert hostile not in st["import_error"]
         assert st["tasks"] == 0
         # ordinary numbers are fine
         for i, number in enumerate(["12", "3а", "5.2", 7]):
@@ -491,7 +493,9 @@ def test_section_at_end_is_validated_like_the_task_labels(tmp_path):
         ) as c:
             r = upload(c, text_pdf([["1. текст"]]))
             st = c.get(f"/parent/materials/{r.json()['material_id']}", headers=PARENT).json()
-            assert st["import_status"] == "failed" and "структур" in st["import_error"], bad
+            # A broken section_at_end alone is ignored (T05c): the valid task is kept.
+            assert st["import_status"] == "done" and st["tasks"] == 1, bad
+            assert not st["import_error"], bad
 
 
 def test_a_new_section_does_not_inherit_the_old_variant_and_stage(tmp_path):

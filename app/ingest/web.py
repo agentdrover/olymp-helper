@@ -113,7 +113,8 @@ def upload_material(
     conn = open_db(ctx.db_path)
     try:
         existing = conn.execute(
-            "SELECT id, import_status, deleted_at FROM material WHERE sha256 = ?", (sha,)
+            "SELECT id, kind, import_status, import_error, deleted_at FROM material WHERE sha256 = ?",
+            (sha,),
         ).fetchone()
         if existing is not None and existing["deleted_at"] is not None:
             return JSONResponse(
@@ -121,7 +122,17 @@ def upload_material(
                 status_code=409,
             )
         if existing is not None:
-            requeued = existing["import_status"] == "failed"
+            # повтор: упавший импорт или пустой сборник - модель отклонена целиком (есть отчёт о
+            # пропусках, заданий нет). Ключ и учебник заданий не дают: их done - это успех.
+            empty = (
+                existing["import_status"] == "done"
+                and existing["kind"] == "tasks"
+                and bool(existing["import_error"])
+                and not conn.execute(
+                    "SELECT 1 FROM task_item WHERE material_id = ? LIMIT 1", (existing["id"],)
+                ).fetchone()
+            )
+            requeued = existing["import_status"] == "failed" or empty
             if requeued:
                 conn.execute(
                     "UPDATE material SET import_status = 'queued', import_error = NULL WHERE id = ?",
