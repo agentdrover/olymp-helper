@@ -68,6 +68,16 @@ def test_every_screen_uses_the_shared_style_and_its_role_navigation(tmp_path):
         assert c.get(f"/parent/tasks/{tid}", headers=PARENT).status_code == 200
 
 
+def test_the_child_list_shows_the_topic_title_not_its_code(tmp_path):
+    c, tid = started(tmp_path)
+    with c:
+        r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"topic": "b10"})
+        assert r.status_code == 200, r.text
+        html = c.get("/tasks", headers=CHILD).text
+        assert "Цитология" in html
+        assert ">b10<" not in html
+
+
 def test_the_child_shell_never_offers_parent_screens(tmp_path):
     c, tid = started(tmp_path)
     with c:

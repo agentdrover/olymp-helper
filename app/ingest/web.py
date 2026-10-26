@@ -443,9 +443,12 @@ def api_task(task_id: int, conn: Db):
 @public.get("/tasks", response_class=HTMLResponse)
 def tasks_page(request: Request, conn: Db):
     data = api_tasks(conn)
+    # Ребёнку — название темы из справочника, не код; список уже содержит только опубликованные.
     topics = {
-        row["id"]: row["topic"]
-        for row in conn.execute("SELECT id, topic FROM task_item WHERE topic IS NOT NULL")
+        row["id"]: row["title"]
+        for row in conn.execute(
+            "SELECT t.id, c.title FROM task_item t JOIN topic c ON c.code = t.topic"
+        )
     }
     return TEMPLATES.TemplateResponse(
         request, "child/tasks.html", {**data, "topics": topics, "type_labels": TYPE_LABELS}
