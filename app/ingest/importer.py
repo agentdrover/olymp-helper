@@ -243,10 +243,10 @@ def skipped_note(skipped: list[str]) -> str | None:
     return text
 
 
-def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None = None):
+def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None = None, report=None):
     """Задания из всех порций. Номера повторяются по разделам: ключ дедупликации - (раздел,
     номер); состояние раздела (раздел, вариант, этап) переходит между порциями. Не разобранное
-    добавляется в skipped."""
+    добавляется в skipped. report(порция, всего порций, принято заданий) - ход разбора."""
     skipped = [] if skipped is None else skipped
     seen: dict[tuple, dict] = {}
     state = dict.fromkeys(META)  # состояние на конец предыдущей порции
@@ -256,7 +256,10 @@ def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None =
     finally:
         conn.close()
     system = SYSTEM_PROMPT + "\n" + catalog_prompt(catalog)
-    for chunk in chunk_pages(pages):
+    chunks = chunk_pages(pages)
+    for index, chunk in enumerate(chunks, start=1):
+        if report is not None:
+            report(index, len(chunks), len(seen))
         parsed, at_end = _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped)
         for task in parsed:
             state = merge_labels(state, task)
@@ -267,6 +270,8 @@ def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None =
             seen[key] = merge_repeat(seen[key], task) if key in seen else task
         if at_end:  # заголовок после последнего задания важнее состояния последнего задания
             state = merge_labels(state, at_end)
+        if report is not None:
+            report(index, len(chunks), len(seen))
     return list(seen.values())
 
 
@@ -533,7 +538,15 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 _finish(conn, material_id, run_id, len(pages), write_key, recheck)
             else:
                 skipped: list[str] = []
-                tasks = split_tasks(ctx, pages, cancel, skipped)
+                tasks = split_tasks(
+                    ctx,
+                    pages,
+                    cancel,
+                    skipped,
+                    lambda chunk, total, accepted: ctx.progress.update(
+                        material_id, run_id, chunk, total, accepted
+                    ),
+                )
                 note = skipped_note(skipped)
                 if not tasks and not note:
                     raise ImportFailure("Модель не нашла в файле ни одного задания.")
@@ -555,4 +568,5 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 conn, material_id, run_id, "Не удалось обработать PDF. Проверьте файл и повторите."
             )
     finally:
+        ctx.progress.clear(material_id, run_id)
         conn.close()

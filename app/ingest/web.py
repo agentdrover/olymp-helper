@@ -84,25 +84,73 @@ def start_page(request: Request):
 # --------------------------------------------------------------------- материалы
 
 
-@parent.get("/parent/materials", response_class=HTMLResponse)
-def materials_page(request: Request, conn: Db):
+FLASH = {
+    "queued": "Сборник принят, разбор идёт.",
+    "duplicate": "Файл уже загружен.",
+    "requeued": "Файл перезапущен, разбор идёт.",
+}
+
+
+def _wants_html(request: Request) -> bool:
+    """Форму в браузере отличает Accept: text/html; клиенты API получают JSON."""
+    return "text/html" in request.headers.get("accept", "")
+
+
+def _materials_view(request: Request, conn, *, flash=None, error=None, status=200):
     rows = conn.execute(
         "SELECT m.*, (SELECT COUNT(*) FROM task_item t WHERE t.material_id = m.id) AS tasks "
         "FROM material m ORDER BY m.id DESC"
     ).fetchall()
-    return TEMPLATES.TemplateResponse(request, "parent/materials.html", {"materials": rows})
+    progress = ctx_of(request).progress
+    page = TEMPLATES.TemplateResponse(
+        request,
+        "parent/materials.html",
+        {
+            "materials": rows,
+            "progress": {m["id"]: progress.get(m["id"]) for m in rows},
+            "flash": flash,
+            "error": error,
+        },
+    )
+    page.status_code = status
+    return page
+
+
+@parent.get("/parent/materials", response_class=HTMLResponse)
+def materials_page(request: Request, conn: Db, msg: str = ""):
+    return _materials_view(request, conn, flash=FLASH.get(msg))
 
 
 @parent.post("/parent/materials")
 def upload_material(
     request: Request,
     file: Annotated[UploadFile, File()],
+    conn: Db,
     kind: Annotated[str, Form()] = "tasks",
     variant: Annotated[str, Form()] = "",
     year: Annotated[str, Form()] = "",
     stage: Annotated[str, Form()] = "",
     olympiad: Annotated[str, Form()] = "",
 ):
+    answer = _store_upload(request, file, kind, variant, year, stage, olympiad)
+    if not _wants_html(request):
+        return answer
+    body = json.loads(answer.body)
+    if "error" in body:
+        return _materials_view(request, conn, error=body["error"], status=answer.status_code)
+    code = "requeued" if body.get("requeued") else "duplicate" if body["duplicate"] else "queued"
+    return RedirectResponse(f"/parent/materials?msg={code}", status_code=303)
+
+
+def _store_upload(
+    request: Request,
+    file: UploadFile,
+    kind: str,
+    variant: str,
+    year: str,
+    stage: str,
+    olympiad: str,
+) -> JSONResponse:
     ctx = ctx_of(request)
     if kind not in KINDS:
         return JSONResponse({"error": "Тип материала: задания, ключ или учебник."}, status_code=422)
@@ -174,7 +222,7 @@ def upload_material(
 
 
 @parent.get("/parent/materials/{material_id}")
-def material_status(material_id: int, conn: Db):
+def material_status(material_id: int, request: Request, conn: Db):
     row = conn.execute(
         "SELECT id, kind, import_status, import_error, pages_total, "
         "(SELECT COUNT(*) FROM task_item t WHERE t.material_id = material.id) AS tasks "
@@ -183,7 +231,10 @@ def material_status(material_id: int, conn: Db):
     ).fetchone()
     if row is None:
         raise HTTPException(404, "Материал не найден")
-    return dict(row)
+    out = dict(row)
+    running = row["import_status"] in ("queued", "running")
+    out["progress"] = ctx_of(request).progress.get(material_id) if running else None
+    return out
 
 
 def _material_file(request: Request, conn, material_id: int) -> Path:
