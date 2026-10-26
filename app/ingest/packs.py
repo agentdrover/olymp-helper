@@ -194,6 +194,20 @@ def _check_key(task: dict, raw):
     return value
 
 
+def _fold(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _check_labels(options) -> None:
+    """Обозначения, которые проверка ответа считает одним (А латиницей и кириллицей, регистр),
+    - один вариант: такое задание проверяется неверно. Для соответствия - каждая сторона."""
+    sides = [options] if isinstance(options, list) else list((options or {}).values())
+    for side in sides:
+        found = [normalize_answer(o["label"], "single") for o in side]
+        if None in found or len(set(found)) != len(found):
+            _fail("обозначения вариантов совпадают после нормализации")
+
+
 def check_item(raw, kind: str) -> dict:
     """Задание из ответа модели в виде, готовом к записи; иначе InvalidStructure с причиной."""
     if not isinstance(raw, dict):
@@ -228,10 +242,11 @@ def check_item(raw, kind: str) -> dict:
     if FIGURE_WORDS.search(parsed["text"]):
         _fail("условие ссылается на рисунок, схему или таблицу, а их у вопроса нет")
     options = parsed["options"]
+    _check_labels(options)
     if bank_type in ("single", "multiple"):
         size = len(options)
-        if kind == "truefalse" and size != 2:
-            _fail("для «верно / неверно» нужно ровно два варианта")
+        if kind == "truefalse" and {_fold(o["text"]) for o in options} != {"верно", "неверно"}:
+            _fail("для «верно / неверно» нужны ровно варианты «Верно» и «Неверно»")
         if kind != "truefalse" and not 3 <= size <= 8:
             _fail("вариантов должно быть от 3 до 8")
     parsed["value"] = _check_key(parsed, raw.get("answer_key"))
@@ -303,8 +318,12 @@ def _finish_failed(conn, pack_id: int, message: str, channel=None) -> None:
     )
 
 
-def _write(conn, pack_id: int, topic: str, accepted: list[dict], rejected, channel) -> None:
+def _write(conn, pack_id: int, topic: str, payload, kind: str, count: int, channel) -> None:
+    """Проверка повторов и запись - одна транзакция: задание, появившееся за время запроса
+    к модели (другая пачка), видно проверке."""
     with atomic(conn):
+        existing = [r[0] for r in conn.execute("SELECT text FROM task_item WHERE excluded = 0")]
+        accepted, rejected = sort_out(payload, kind, count, existing)
         for number, task in enumerate(accepted, 1):
             cur = conn.execute(
                 "INSERT INTO task_item (material_id, source_number, type, text, options, topic, "
@@ -361,15 +380,12 @@ def generate_pack(ctx, conn, topic: str, kind: str, count: int) -> int:
         if not getattr(result, "ok", False):
             _finish_failed(conn, pack_id, _failure_message(result), channel)
             return pack_id
-        existing = [r[0] for r in conn.execute("SELECT text FROM task_item WHERE excluded = 0")]
         try:
-            accepted, rejected = sort_out(result.json, kind, count, existing)
+            _write(conn, pack_id, topic, result.json, kind, count, channel)
         except InvalidStructure as exc:
             _finish_failed(
                 conn, pack_id, f"Модель вернула неверную структуру: {exc}. Повторите.", channel
             )
-            return pack_id
-        _write(conn, pack_id, topic, accepted, rejected, channel)
     except Exception:
         log.exception("pack %s failed", pack_id)
         _finish_failed(conn, pack_id, "Не удалось составить пачку. Повторите позже.")

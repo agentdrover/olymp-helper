@@ -59,11 +59,14 @@ class PackModel:
         self.stub = StubModel(split=reply(*bank))
         self.pack = pack
         self.pack_calls = []
+        self.during = None  # runs while the "model" is answering: a concurrent writer
 
     def complete(self, system, messages, schema=None, session_id=None):
         if (schema or {}).get("title") != "question_pack":
             return self.stub.complete(system, messages, schema, session_id)
         self.pack_calls.append((system, messages, schema))
+        if self.during:
+            self.during()
         if self.pack is None:
             return ModelResult.failure("claude", "stub", "executor_unreachable")
         return ModelResult(None, self.pack, "claude", "stub", 1, None)
@@ -377,3 +380,82 @@ def test_more_questions_than_requested_are_not_all_accepted(tmp_path):
             db(tmp_path).execute("SELECT rejected FROM question_pack").fetchone()[0]
         )
         assert [x["reason"] for x in rejected] == ["сверх запрошенного числа"]
+
+
+def test_a_duplicate_that_appears_during_the_model_call_is_rejected_at_write(tmp_path):
+    c, model = make_bank(tmp_path, {"questions": [NEW[0], NEW[1]]})
+    with c:
+
+        def other_pack_lands_first():
+            conn = db(tmp_path)
+            conn.execute(
+                "INSERT INTO task_item(material_id, type, text, topic) VALUES (NULL, 'single', ?, ?)",
+                (NEW[0]["text"], TOPIC),
+            )
+            conn.close()
+
+        model.during = other_pack_lands_first
+        request_pack(c, 2)
+        assert [r["text"] for r in generated(tmp_path)] == [NEW[1]["text"]]
+        rejected = json.loads(
+            db(tmp_path).execute("SELECT rejected FROM question_pack").fetchone()[0]
+        )
+        assert [x["reason"] for x in rejected] == ["повтор: уже есть в банке заданий"]
+
+
+def test_option_labels_that_collide_after_normalization_are_rejected(tmp_path):
+    def opts(*labels):
+        return [{"label": lb, "text": f"вариант {i}"} for i, lb in enumerate(labels)]
+
+    colliding = [
+        good("Латинская и кириллическая А в одном вопросе про клетку", options=opts("A", "А", "В")),
+        good("Регистр меток в одном вопросе про клетку эукариот", options=opts("б", "Б", "В")),
+        good("Пробелы в метках одного вопроса про клетку растений", options=opts("В ", "В", "Г")),
+    ]
+    match = {
+        "text": "Соответствие с совпадающими метками правого набора клетки",
+        "type": "match",
+        "options": {
+            "left": [{"label": "1", "text": "ядро"}, {"label": "2", "text": "рибосома"}],
+            "right": [{"label": "A", "text": "x"}, {"label": "А", "text": "y"}],
+        },
+        "answer_key": "1-А; 2-А",
+    }
+    c, _ = make_bank(tmp_path, {"questions": [*colliding, match]})
+    with c:
+        request_pack(c, 4)
+        assert generated(tmp_path) == []
+        rejected = json.loads(
+            db(tmp_path).execute("SELECT rejected FROM question_pack").fetchone()[0]
+        )
+        assert len(rejected) == 4
+        assert all("совпадают" in x["reason"] for x in rejected[:3])
+        request_pack(c, 1, kind="match")
+        assert generated(tmp_path) == []
+
+
+def test_true_false_needs_exactly_the_pair_yes_no(tmp_path):
+    def tf(text, a, b):
+        return good(text, "А", options=[{"label": "А", "text": a}, {"label": "Б", "text": b}])
+
+    c, _ = make_bank(
+        tmp_path,
+        {
+            "questions": [
+                tf("Утверждение: ядро есть у всех клеток без исключения всегда", "Да", "Нет"),
+                tf(
+                    "Утверждение: рибосомы синтезируют белки в клетке любого организма",
+                    " верно",
+                    "НЕВЕРНО ",
+                ),
+                tf(
+                    "Утверждение: вакуоль встречается в растительных клетках чаще всего",
+                    "Верно",
+                    "Верно",
+                ),
+            ]
+        },
+    )
+    with c:
+        request_pack(c, 3, kind="truefalse")
+        assert [r["text"][:21] for r in generated(tmp_path)] == ["Утверждение: рибосомы"]
