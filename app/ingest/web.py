@@ -33,6 +33,12 @@ from app.search.tasks import search_published_tasks
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 KINDS = ("tasks", "key", "textbook")
 PAGE_SCALE = 1.5
+TYPE_LABELS = {
+    "single": "один ответ",
+    "multiple": "несколько ответов",
+    "match": "соответствие",
+    "numeric": "число",
+}
 
 parent = APIRouter(dependencies=[Depends(require_parent)])
 public = APIRouter()
@@ -83,6 +89,14 @@ def login(request: Request, key: Annotated[str, Form()] = ""):
     response.set_cookie(
         COOKIE, parent_token(parent_key()), httponly=True, samesite="strict", path="/"
     )
+    return response
+
+
+@parent.post("/parent/logout")
+def logout():
+    """Выход родителя: cookie стирается, дальше - стартовая страница."""
+    response = RedirectResponse("/", status_code=303)
+    response.delete_cookie(COOKIE, path="/", httponly=True, samesite="strict")
     return response
 
 
@@ -426,7 +440,14 @@ def api_task(task_id: int, conn: Db):
 
 @public.get("/tasks", response_class=HTMLResponse)
 def tasks_page(request: Request, conn: Db):
-    return TEMPLATES.TemplateResponse(request, "child/tasks.html", api_tasks(conn))
+    data = api_tasks(conn)
+    topics = {
+        row["id"]: row["topic"]
+        for row in conn.execute("SELECT id, topic FROM task_item WHERE topic IS NOT NULL")
+    }
+    return TEMPLATES.TemplateResponse(
+        request, "child/tasks.html", {**data, "topics": topics, "type_labels": TYPE_LABELS}
+    )
 
 
 @public.get("/tasks/{task_id}", response_class=HTMLResponse)

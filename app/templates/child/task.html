@@ -1,19 +1,30 @@
-{% extends "base.html" %}
+{% extends "base_child.html" %}
 {% block title %}Задание {{ task.number }}{% endblock %}
 {% block content %}
-<h1>Задание {{ task.number }}</h1>
-<p class="hint">{{ task.source }}</p>
-{% if task.figure %}
-<p><a href="{{ task.figure.url }}"><img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}" style="max-width:100%;min-width:560px"></a></p>
-{% endif %}
-<p>{{ task.text }}</p>
-{% if task.options %}
-<ul>
-  {% if task.options is mapping %}
-    {% for side in task.options.values() %}{% for o in side %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}{% endfor %}
-  {% else %}
-    {% for o in task.options %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}
-  {% endif %}
-</ul>
-{% endif %}
+<a href="/tasks">← Все задания</a>
+<div class="split">
+  <section aria-label="Задание">
+    <div class="kicker">{{ task.source }}</div>
+    <h1>Задание {{ task.number }}</h1>
+    {% if task.figure %}
+    <figure class="figure">
+      <a href="{{ task.figure.url }}"><img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}"></a>
+      <figcaption class="hint"><a href="{{ task.figure.url }}">Открыть рисунок крупно</a></figcaption>
+    </figure>
+    {% endif %}
+    <p>{{ task.text }}</p>
+    {% if task.options %}
+    <ul class="options">
+      {% if task.options is mapping %}
+        {% for side in task.options.values() %}{% for o in side %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}{% endfor %}
+      {% else %}
+        {% for o in task.options %}<li>{{ o.label }}) {{ o.text }}</li>{% endfor %}
+      {% endif %}
+    </ul>
+    {% endif %}
+  </section>
+  <aside class="helper-soon" aria-label="Помощник">
+    <p>Разбор задания появится скоро.</p>
+  </aside>
+</div>
 {% endblock %}

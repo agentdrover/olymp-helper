@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block body_class %}role-child{% endblock %}
+{% block shell %}
+{% set path = request.url.path %}
+<div class="shell">
+  <nav class="rail rail-child" aria-label="Разделы">
+    <a class="brand" href="/">{% include "_logo.html" %} Помощник</a>
+    <a href="/tasks"{% if path.startswith("/tasks") %} aria-current="page"{% endif %}>Задания</a>
+    <div class="spacer"></div>
+    <a class="minor" href="/parent/login">Вход для родителя</a>
+  </nav>
+  <main class="content">{% block content %}{% endblock %}</main>
+</div>
+{% endblock %}

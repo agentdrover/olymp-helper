@@ -1,9 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Вход родителя{% endblock %}
 {% block content %}
-<h1>Вход родителя</h1>
-<form method="post" action="/parent/login">
-  <p><label>Ключ <input type="password" name="key" autocomplete="current-password" required></label></p>
+<a href="/">← Назад к помощнику</a>
+<h1>Вход для родителя</h1>
+<form method="post" action="/parent/login" class="card">
+  <p><label for="key">Ключ</label><br>
+     <input id="key" type="password" name="key" autocomplete="current-password" required></p>
   {% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
   <button class="primary">Войти</button>
 </form>
