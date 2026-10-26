@@ -12,7 +12,21 @@ from app.ingest.answers import key_json
 from app.model.types import ModelResult
 from tests.bank_helpers import CHILD, OPTS4, PARENT, build_app, db, quad_png
 
-__all__ = ["attempt", "post", "view", "events", "CHILD", "PARENT", "Clock", "Scripted", "Blocking", "boot", "seed", "OPTS4", "out"]
+__all__ = [
+    "CHILD",
+    "OPTS4",
+    "PARENT",
+    "Blocking",
+    "Clock",
+    "Scripted",
+    "attempt",
+    "boot",
+    "events",
+    "out",
+    "post",
+    "seed",
+    "view",
+]
 
 _counter = itertools.count(1)
 START = datetime(2026, 10, 22, 10, 0, 0, tzinfo=UTC)
@@ -44,9 +58,7 @@ class Scripted:
 
     def complete(self, system, messages, schema=None, session_id=None):
         content = messages[-1]["content"]
-        kind = next(
-            (k for k in MODES if f"Режим: {k}\n" in content), "?"
-        )
+        kind = next((k for k in MODES if f"Режим: {k}\n" in content), "?")
         self.calls.append({"kind": kind, "system": system, "content": content, "schema": schema})
         payload = self.reply(kind, content) if callable(self.reply) else self.default
         if isinstance(payload, ModelResult):
@@ -103,9 +115,7 @@ def seed(
     conn = db(tmp_path)
     n = next(_counter)
     try:
-        material = conn.execute(
-            "SELECT id FROM material WHERE sha256 = 'seed'"
-        ).fetchone()
+        material = conn.execute("SELECT id FROM material WHERE sha256 = 'seed'").fetchone()
         if material is None:
             conn.execute(
                 "INSERT INTO material (file, sha256, kind, year, import_status) "
@@ -117,7 +127,10 @@ def seed(
         if options is None and type == "match":
             options = {
                 "left": [{"label": "1", "text": "корень"}, {"label": "2", "text": "лист"}],
-                "right": [{"label": "А", "text": "всасывание"}, {"label": "Б", "text": "фотосинтез"}],
+                "right": [
+                    {"label": "А", "text": "всасывание"},
+                    {"label": "Б", "text": "фотосинтез"},
+                ],
             }
         value = key if key is not None else None
         cols = {
@@ -161,8 +174,13 @@ def seed(
                 {
                     "file": name,
                     "confirmed": figure.get("confirmed", True),
-                    "alt": figure.get("alt", "Продольный разрез цветка, цифрами 1-6 обозначены части"),
-                    "teacher_note": figure.get("teacher_note", "1 - тычинка, 2 - пестик, 3 - лепесток, 4 - чашелистик, 5 - завязь, 6 - рыльце"),
+                    "alt": figure.get(
+                        "alt", "Продольный разрез цветка, цифрами 1-6 обозначены части"
+                    ),
+                    "teacher_note": figure.get(
+                        "teacher_note",
+                        "1 - тычинка, 2 - пестик, 3 - лепесток, 4 - чашелистик, 5 - завязь, 6 - рыльце",
+                    ),
                     "teacher_note_ack": figure.get("ack", True),
                     "page": 3,
                 },
@@ -197,8 +215,6 @@ def events(tmp_path, type=None):
     try:
         sql = "SELECT * FROM event" + (" WHERE type = ?" if type else "") + " ORDER BY id"
         rows = conn.execute(sql, (type,) if type else ()).fetchall()
-        return [
-            {**dict(r), "data": json.loads(r["data"]) if r["data"] else None} for r in rows
-        ]
+        return [{**dict(r), "data": json.loads(r["data"]) if r["data"] else None} for r in rows]
     finally:
         conn.close()

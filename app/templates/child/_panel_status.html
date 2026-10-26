@@ -1,0 +1,3 @@
+{# Общий компонент состояния запроса к модели (SPEC-1.0 1.3а). Его же берёт T07 для чата и голоса.
+   Вход: p = {state, text, busy}. #}
+<div class="helper-status helper-{{ p.state }}" role="status" aria-live="polite" data-panel="{{ p.state }}">{{ p.text }}</div>

@@ -1,0 +1,55 @@
+{% extends "base_child.html" %}
+{% block title %}Сегодня{% endblock %}
+{% block content %}
+<header>
+  <div class="kicker">Сеченовская олимпиада · отборочный этап · биология 5–7</div>
+  <h1>Привет! Продолжим?</h1>
+</header>
+{% if t.resume %}
+<section class="card" aria-label="Продолжить">
+  <div class="kicker">Ты остановился здесь</div>
+  <p>Задание {{ t.resume.number }} · {{ t.resume.text }}</p>
+  <a class="btn primary" href="/tasks/{{ t.resume.id }}">Продолжить разбор →</a>
+</section>
+{% else %}
+<section class="card" aria-label="Начать">
+  <p>Выбери задание из списка.</p>
+  <a class="btn primary" href="/tasks">К заданиям →</a>
+</section>
+{% endif %}
+<div class="today-grid">
+  <section class="card" aria-label="Сегодня">
+    <div class="kicker">Сегодня</div>
+    <div class="today-num">{{ t.solved_today }}</div>
+    <p>разобрано заданий · подсказок взято: {{ t.hints_today }}</p>
+  </section>
+  {% if t.countdown is not none %}
+  <section class="card" aria-label="До этапа">
+    <div class="kicker">До этапа</div>
+    <div class="today-num">{{ t.countdown }}</div>
+    <p>дней</p>
+  </section>
+  {% endif %}
+</div>
+<section aria-label="Сборники">
+  <h2>Сборники отборочного этапа</h2>
+  {% for b in t.books %}
+  <div class="card"><strong>{{ b.label }} · группа 5–7</strong><br>
+    {{ b.done }} из {{ b.total }} разобрано · {% if b.keyed %}ключ есть{% else %}ключа нет{% endif %}</div>
+  {% else %}
+  <p class="hint">Пока нет проверенных заданий.</p>
+  {% endfor %}
+</section>
+<section aria-label="Стоит вернуться">
+  <h2>Стоит вернуться</h2>
+  {% if t.revisit %}
+  <ul class="revisit">
+    {% for r in t.revisit %}
+    <li><a href="/tasks/{{ r.id }}">№ {{ r.number }}</a> · {{ r.text }} <span class="pill">{{ r.reason }}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="hint">Пока возвращаться не к чему.</p>
+  {% endif %}
+</section>
+{% endblock %}

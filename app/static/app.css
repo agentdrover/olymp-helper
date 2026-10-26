@@ -101,3 +101,33 @@ fieldset { border: 1px solid var(--line); border-radius: 12px; }
 .login-card { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 14px; padding: 32px; border-radius: 20px; }
 .login-card h1 { margin: 0; font-size: 22px; }
 .login-card input { font-size: 18px; padding: 10px 12px; }
+
+/* разбор задания (OH-T06): панель помощника, отметки, решение, рисунок крупно */
+.helper { border: 1px solid var(--line); border-radius: 14px; padding: 16px; background: var(--card); display: flex; flex-direction: column; gap: 12px; }
+.helper-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.helper-head h2 { margin: 0; }
+.helper-status { min-height: 24px; color: var(--ink-2); }
+.helper-status[data-panel="thinking"], .helper-status[data-panel="second_channel"] { font-weight: 600; }
+.helper-status[data-panel="down"], .helper-status[data-panel="limit"] { color: var(--warn); }
+.msg { background: var(--pill); border-radius: 12px; padding: 10px 14px; }
+.msg p { margin: 4px 0; }
+.msg-label { font: 12px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+.actions { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.confirm { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: #fff; }
+.small-head { font-size: 14px; margin: 8px 0 0; color: var(--ink-3); }
+.notice-line { margin: 0; padding: 8px 12px; border-radius: 10px; background: #E4EAF6; }
+.mark, .mark-line .mark { display: inline-block; margin-left: 8px; padding: 1px 10px; border-radius: 999px; background: #F6E3E3; color: var(--warn); font-size: 13px; font-weight: 600; }
+.answer-form fieldset { border: 0; padding: 0; margin: 0 0 8px; }
+.answer-form legend { font-weight: 600; margin-bottom: 4px; }
+.options label { display: flex; gap: 10px; align-items: center; cursor: pointer; }
+.confidence label { margin-right: 14px; }
+.solution { border-color: var(--accent); }
+.solution .answer-line { font-size: 18px; margin: 0 0 8px; }
+.outcome { color: var(--ink-2); font-weight: 600; }
+dialog.zoom { border: 1px solid var(--line); border-radius: 16px; padding: 16px; max-width: 96vw; }
+dialog.zoom::backdrop { background: rgba(22, 36, 30, .55); }
+dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max-width: none; height: auto; margin-top: 8px; }
+@media (max-width: 640px) { dialog.zoom img { min-width: 0; width: 100%; } }
+.today-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.today-num { font: 600 28px var(--font-head); }
+.revisit li { margin: 6px 0; }

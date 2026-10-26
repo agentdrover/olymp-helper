@@ -1,6 +1,7 @@
 """Задания с рисунком (OH-T06, AC-9..AC-12)."""
 
 import json
+from pathlib import Path
 
 from app.tutor.guard import GENERIC
 from tests.tutor_helpers import CHILD, Scripted, attempt, boot, out, post, seed, view
@@ -12,7 +13,7 @@ FIGURE = {"alt": "Продольный разрез цветка, цифрами
 
 
 def test_ac9(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, _model = boot(tmp_path)
     with c:
         shown = seed(tmp_path, key="5", options=NUM, figure=FIGURE)
         hidden = seed(tmp_path, key="5", options=NUM, figure={**FIGURE, "confirmed": False})
@@ -22,9 +23,9 @@ def test_ac9(tmp_path):
         assert "сборник 2022/23" in html and "стр. 3" in html
         assert html.index("<figure") < html.index('class="options')
         # крупно: окно не меньше 560 px, закрывается Esc и кнопкой
-        assert "min-width: 560px" in open("app/static/app.css").read()
+        assert "min-width: 560px" in Path("app/static/app.css").read_text()
         assert "<dialog" in html and "Закрыть" in html
-        assert "Escape" in open("app/static/tutor.js").read()
+        assert "Escape" in Path("app/static/tutor.js").read_text()
         assert c.get(f"/tasks/{hidden}", headers=CHILD).status_code == 404
         assert hidden not in [t["id"] for t in c.get("/api/tasks").json()["tasks"]]
         assert c.get(f"/tasks/{hidden}/figure.png").status_code == 404
@@ -47,7 +48,7 @@ def test_ac10(tmp_path):
     def reply(kind, content):
         return out("5", "Смотри: 5 — завязь, это ответ.")
 
-    c, clock, model = boot(tmp_path, Scripted(reply=reply))
+    c, _clock, model = boot(tmp_path, Scripted(reply=reply))
     with c:
         tid = seed(tmp_path, key="5", options=NUM, figure=FIGURE)
         bodies = sweep(c, tid)
@@ -63,18 +64,18 @@ def test_ac10(tmp_path):
         assert GENERIC["hint1"] in html and GENERIC["hint2"] in html
         # заметка уходит модели (только как данные запроса), но не ребёнку
         assert any("5 - завязь" in call["content"] for call in model.calls)
-        assert "завязь" not in c.get("/tasks/%d" % tid).text
+        assert "завязь" not in c.get(f"/tasks/{tid}").text
 
 
 def test_ac11(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, model = boot(tmp_path)
     with c:
         tid = seed(tmp_path, key="5", options=NUM, figure={**FIGURE, "teacher_note": SHORT})
         assert view(c, tid)["assist"] == "key_only"
         attempt(c, tid, "2")
         r = post(c, tid, "hint", level=1)
         assert r.status_code == 200
-        assert "к этому заданию подсказок нет" in r.json()["panel"]["text"]
+        assert "к этому заданию подсказок нет" in r.json()["panel"]["text"].lower()
         assert r.json()["hints"] == 0
         r = attempt(c, tid, "5").json()
         assert r["state"] == "solved"
@@ -83,7 +84,7 @@ def test_ac11(tmp_path):
 
 
 def test_ac12(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, model = boot(tmp_path)
     with c:
         tid = seed(tmp_path, key="5", options=NUM, figure={**FIGURE, "teacher_note": SHORT})
         assert attempt(c, tid, "1").status_code == 200
@@ -91,7 +92,11 @@ def test_ac12(tmp_path):
         third = attempt(c, tid, "3")
         assert third.status_code == 409 and third.json()["code"] == "need_show"
         no = post(c, tid, "show-answer")
-        assert no.status_code == 409 and no.json()["solution"] is None if "solution" in no.json() else True
+        assert (
+            no.status_code == 409 and no.json()["solution"] is None
+            if "solution" in no.json()
+            else True
+        )
         r = post(c, tid, "show-answer", confirm=True).json()
         assert r["state"] == "answer_shown"
         assert r["solution"]["answer"] == "5" and r["solution"]["explanation"] is None

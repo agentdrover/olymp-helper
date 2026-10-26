@@ -34,10 +34,11 @@ def shown(r):
 def test_ac6(tmp_path):
     for keyed in (True, False):
         for text in NAMING:
+
             def reply(kind, content, text=text):
                 return out("Б", text)
 
-            c, clock, model = boot(tmp_path / f"{keyed}{NAMING.index(text)}", Scripted(reply=reply))
+            c, _clock, _model = boot(tmp_path / f"{keyed}{NAMING.index(text)}", Scripted(reply=reply))
             with c:
                 tid = seed(
                     tmp_path / f"{keyed}{NAMING.index(text)}",
@@ -55,7 +56,7 @@ def test_ac6(tmp_path):
                     assert "Правильный" not in html and "Ответ:" not in html
         # безобидная подсказка проходит без замены
     ok = "Вспомни, какой органоид даёт клетке энергию."
-    c, clock, model = boot(tmp_path / "ok", Scripted(reply=lambda k, content: out("Б", ok)))
+    c, _clock, _model = boot(tmp_path / "ok", Scripted(reply=lambda k, content: out("Б", ok)))
     with c:
         tid = seed(tmp_path / "ok", key="Б", options=options())
         attempt(c, tid, "А")
@@ -64,10 +65,10 @@ def test_ac6(tmp_path):
 
 def test_ac7(tmp_path):
     dirty = (
-        "<script>alert(1)</script>**жирный** и *курсив*\n\n- пункт <b onclick=\"x()\">один</b>\n"
+        '<script>alert(1)</script>**жирный** и *курсив*\n\n- пункт <b onclick="x()">один</b>\n'
         "<img src=x onerror=alert(2)> [ссылка](javascript:alert(3)) ![рис](http://x/y.png)"
     )
-    c, clock, model = boot(tmp_path, Scripted(reply=lambda k, content: out("А", dirty)))
+    c, _clock, _model = boot(tmp_path, Scripted(reply=lambda k, content: out("Б", dirty)))
     with c:
         tid = seed(tmp_path, key="Б", options=options())
         attempt(c, tid, "А")

@@ -2,14 +2,23 @@
 
 import json
 
-from tests.tutor_helpers import CHILD, PARENT, Scripted, attempt, boot, events, out, post, seed, view
+from tests.tutor_helpers import (
+    PARENT,
+    Scripted,
+    attempt,
+    boot,
+    events,
+    out,
+    post,
+    seed,
+)
 
 
 def test_ac19(tmp_path):
     def reply(kind, content):
         return out("Г", "Г — верный вариант, выбирай его.")
 
-    c, clock, model = boot(tmp_path, Scripted(reply=reply))
+    c, _clock, _model = boot(tmp_path, Scripted(reply=reply))
     with c:
         tid = seed(tmp_path, key=None, model_answer="Б")
         r = attempt(c, tid, "А")
@@ -26,7 +35,7 @@ def test_ac19(tmp_path):
 
 
 def test_ac20(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, _model = boot(tmp_path)
     with c:
         tid = seed(tmp_path, key="Б")
         assert post(c, tid, "dispute").status_code == 409  # пока решение не открыто

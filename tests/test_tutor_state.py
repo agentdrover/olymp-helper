@@ -3,7 +3,18 @@
 import json
 
 from tests.bank_helpers import db
-from tests.tutor_helpers import CHILD, PARENT, Scripted, attempt, boot, events, out, post, seed, view
+from tests.tutor_helpers import (
+    CHILD,
+    PARENT,
+    Scripted,
+    attempt,
+    boot,
+    events,
+    out,
+    post,
+    seed,
+    view,
+)
 
 SOLUTION = "SOLUTION-TEXT-ZZZ"
 FORBIDDEN_KEYS = {"correct", "is_correct", "answer_key", "key", "teacher_note", "model_answer"}
@@ -40,7 +51,7 @@ def test_ac1(tmp_path):
             return out("Б", SOLUTION)
         return out("Б", "Подумай, какая наука изучает клетку.")
 
-    c, clock, model = boot(tmp_path, Scripted(reply=reply))
+    c, _clock, model = boot(tmp_path, Scripted(reply=reply))
     with c:
         tid = seed(tmp_path, key="Б", model_answer=None)
         clean(c.get(f"/tasks/{tid}", headers=CHILD))
@@ -75,7 +86,7 @@ def test_ac1(tmp_path):
 
 
 def test_ac2(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, _model = boot(tmp_path)
     with c:
         a = seed(tmp_path, key="Б")
         r = attempt(c, a, "А").json()
@@ -99,7 +110,7 @@ def test_ac4(tmp_path):
     def reply(kind, content):
         return out("В", "EXPLAIN-V-ZZZ")
 
-    c, clock, model = boot(tmp_path, Scripted(reply=reply))
+    c, _clock, _model = boot(tmp_path, Scripted(reply=reply))
     with c:
         tid = seed(tmp_path, key="Б")
         wrong = attempt(c, tid, "А")
@@ -111,7 +122,9 @@ def test_ac4(tmp_path):
         assert sol["explanation"] is None
         assert "EXPLAIN-V-ZZZ" not in json.dumps(solved, ensure_ascii=False)
         conn = db(tmp_path)
-        rows = conn.execute("SELECT * FROM tutor_discrepancy WHERE task_item_id = ?", (tid,)).fetchall()
+        rows = conn.execute(
+            "SELECT * FROM tutor_discrepancy WHERE task_item_id = ?", (tid,)
+        ).fetchall()
         assert rows, "расхождение не записано родителю"
         assert json.loads(rows[-1]["model_answer"]) == "В"
         assert rows[-1]["explanation"] == "EXPLAIN-V-ZZZ"
@@ -124,12 +137,14 @@ def test_ac4(tmp_path):
 
 
 def test_ac5(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, _model = boot(tmp_path)
     with c:
         tid = seed(tmp_path, key=None, model_answer="Б")
         r = attempt(c, tid, "А").json()
         assert r["state"] == "attempted_wrong"
-        assert "Б" not in json.dumps({k: v for k, v in r.items() if k != "task"}, ensure_ascii=False)
+        assert "Б" not in json.dumps(
+            {k: v for k, v in r.items() if k != "task"}, ensure_ascii=False
+        )
         r = attempt(c, tid, "Б").json()
         assert r["state"] == "solved_unknown"
         assert r["solution"]["unverified"] is True
@@ -146,7 +161,7 @@ def test_ac5(tmp_path):
 
 def test_uncertainty_is_stored_and_validated(tmp_path):
     replies = iter([out("Б", "Подумай про клетку.", "high"), out("Б", "Идея.", "maybe")])
-    c, clock, model = boot(tmp_path, Scripted(reply=lambda k, content: next(replies)))
+    c, _clock, _model = boot(tmp_path, Scripted(reply=lambda k, content: next(replies)))
     with c:
         tid = seed(tmp_path, key="Б")
         conn = db(tmp_path)

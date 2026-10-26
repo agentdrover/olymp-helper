@@ -10,7 +10,7 @@ class Exploding(Scripted):
 
 
 def test_ac3(tmp_path):
-    c, clock, model = boot(tmp_path, Exploding())
+    c, _clock, model = boot(tmp_path, Exploding())
     with c:
         # single: равенство
         s = seed(tmp_path, type="single", key="В")

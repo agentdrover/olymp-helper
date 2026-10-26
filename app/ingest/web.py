@@ -455,14 +455,6 @@ def tasks_page(request: Request, conn: Db):
     )
 
 
-@public.get("/tasks/{task_id}", response_class=HTMLResponse)
-def task_page(task_id: int, request: Request, conn: Db):
-    task, material = _published(task_id=task_id, conn=conn)
-    return TEMPLATES.TemplateResponse(
-        request, "child/task.html", {"task": child_view(task, material)}
-    )
-
-
 @public.get("/tasks/{task_id}/figure.png")
 def task_figure_png(task_id: int, request: Request, conn: Db):
     task = get_task(conn, task_id)

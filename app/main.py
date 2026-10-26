@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,6 +13,8 @@ from app.ingest.limits import IMPORT_TIMEOUT_S
 from app.ingest.render import PageCache
 from app.ingest.web import parent as parent_router
 from app.ingest.web import public as public_router
+from app.tutor.panel import Inflight
+from app.tutor.web import router as tutor_router
 
 DEFAULT_DB_PATH = "/srv/olymp/olymp.db"
 INTERRUPTED = "прервано перезапуском"
@@ -25,6 +28,7 @@ def create_app(
     data_dir: str | Path | None = None,
     sync_imports: bool = False,
     import_timeout: float = IMPORT_TIMEOUT_S,
+    clock=None,
 ) -> FastAPI:
     """model - объект с complete(system, messages, schema); тесты подменяют только его.
 
@@ -51,12 +55,16 @@ def create_app(
 
     app = FastAPI(title="olymp-helper", lifespan=lifespan)
     app.state.model = model or ExecutorModel(path)
+    # Часы занятия и разбора: тест подменяет их, чтобы 60 секунд проверялись без ожидания.
+    app.state.clock = clock or (lambda: datetime.now(UTC))
+    app.state.inflight = Inflight()
     ctx = AppContext(path, data, app.state, PageCache(data / "cache" / "pages"))
     app.state.ctx = ctx
     app.state.page_cache = ctx.page_cache
     app.state.imports = ImportJobs(ctx, sync=sync_imports, timeout=import_timeout)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(parent_router)
+    app.include_router(tutor_router)
     app.include_router(public_router)
 
     @app.get("/healthz")

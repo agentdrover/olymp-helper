@@ -1,0 +1,54 @@
+{# Панель помощника на экране задания: подсказки, разбор ошибки, «объясни иначе». #}
+{% set busy = v.panel.busy %}
+<aside class="helper" aria-label="Помощник">
+  <div class="helper-head"><h2>Помощник</h2>{% if v.assist == "hints" %}<span class="pill">подсказки {{ v.hints }}/3</span>{% endif %}</div>
+  {% with p = v.panel %}{% include "child/_panel_status.html" %}{% endwith %}
+  {% if v.notice %}<p class="notice-line" role="alert">{{ v.notice }}</p>{% endif %}
+  {% if v.assist == "key_only" and not v.terminal %}
+  <p class="hint">Рассмотри рисунок крупно. Подсказок к этому заданию нет — проверь ответ по ключу.</p>
+  {% endif %}
+  {% for h in v.hints_list %}
+  <div class="msg"><div class="msg-label">Подсказка {{ h.level }}</div>{{ h.html|safe }}</div>
+  {% endfor %}
+  {% if v.analysis %}<div class="msg"><div class="msg-label">Разбор ответа</div>{{ v.analysis|safe }}</div>{% endif %}
+
+  {% if not v.terminal and v.hint.next %}
+  <div class="actions">
+    {% if v.hint.next == 3 %}
+    <button type="button" data-open="confirm3" {% if busy %}disabled{% endif %}>Подсказка 3 — решение</button>
+    {% else %}
+    <button type="button" data-act="hint" data-level="{{ v.hint.next }}" {% if busy or not v.hint.ready %}disabled{% endif %}>Подсказка {{ v.hint.next }}</button>
+    {% endif %}
+    {% if v.hint.next == 1 and v.hint.wait_s and not busy %}<span class="hint" data-wait="{{ v.hint.wait_s }}">Откроется после первой попытки или через {{ v.hint.wait_s }} с.</span>{% endif %}
+  </div>
+  <div class="confirm" id="confirm3" hidden>
+    <strong>Открыть решение?</strong>
+    <p>Задание засчитается как разобранное по подсказке. Можно ещё подумать.</p>
+    <button type="button" class="primary" data-act="hint" data-level="3" data-confirm="1" {% if busy %}disabled{% endif %}>Открыть решение</button>
+    <button type="button" data-close-confirm="confirm3">Ещё подумаю</button>
+  </div>
+  {% endif %}
+
+  {% if v.can_show_answer %}
+  <div class="confirm">
+    <strong>Проверки закончились.</strong>
+    <p>Можно показать ответ: задание засчитается как показанное.</p>
+    <button type="button" class="primary" data-act="show-answer" data-confirm="1">Показать ответ</button>
+  </div>
+  {% endif %}
+
+  {% if v.terminal %}
+  {% for e in v.explains %}<div class="msg"><div class="msg-label">{{ e.label }}</div>{{ e.html|safe }}</div>{% endfor %}
+  {% if v.assist == "hints" and v.solution and not v.solution.disputed %}
+  <h3 class="small-head">Объясни иначе</h3>
+  <div class="actions">
+    {% for key, label in [("simpler", "Проще"), ("table", "Таблицей"), ("example", "На примере из жизни"), ("olympiad", "Где ловят на олимпиаде"), ("check", "Проверь, что я понял")] %}
+    <button type="button" data-act="explain" data-mode="{{ key }}" {% if busy %}disabled{% endif %}>{{ label }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="actions">
+    <button type="button" data-act="dispute">Кажется, ключ неверный</button>
+  </div>
+  {% endif %}
+</aside>

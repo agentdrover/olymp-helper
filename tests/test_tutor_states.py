@@ -4,7 +4,7 @@ import threading
 
 from app.model.types import LIMIT_MESSAGE, ModelResult
 from tests.bank_helpers import db
-from tests.tutor_helpers import Blocking, Scripted, attempt, boot, out, post, seed, view
+from tests.tutor_helpers import Blocking, Scripted, attempt, boot, post, seed, view
 
 
 def _p(base, name):
@@ -53,14 +53,19 @@ def test_ac21(tmp_path):
         assert view(c, tid)["panel"]["state"] == "idle"
 
     # 2. канал упал
-    down = Scripted(reply=lambda k, content: ModelResult.failure("claude", "stub", "executor_unreachable"))
-    c, clock, _ = boot(_p(tmp_path, "b"), down)
+    down = Scripted(
+        reply=lambda k, content: ModelResult.failure("claude", "stub", "executor_unreachable")
+    )
+    c, _clock, _ = boot(_p(tmp_path, "b"), down)
     with c:
         tid = seed(_p(tmp_path, "b"), key="Б")
         attempt(c, tid, "А")
         r = post(c, tid, "hint", level=1).json()
         assert r["panel"]["state"] == "down"
-        assert "не отвечает" in r["panel"]["text"] and "проверка по ключу работает" in r["panel"]["text"]
+        assert (
+            "не отвечает" in r["panel"]["text"]
+            and "проверка по ключу работает" in r["panel"]["text"]
+        )
         assert r["hints"] == 0
         assert attempt(c, tid, "Б").json()["state"] == "solved"
 
@@ -70,7 +75,7 @@ def test_ac21(tmp_path):
             "claude", "stub", "limit", message=LIMIT_MESSAGE
         )
     )
-    c, clock, _ = boot(_p(tmp_path, "c"), limit)
+    c, _clock, _ = boot(_p(tmp_path, "c"), limit)
     with c:
         tid = seed(_p(tmp_path, "c"), key="Б")
         attempt(c, tid, "А")

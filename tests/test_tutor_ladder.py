@@ -1,7 +1,7 @@
 """Лестница подсказок, лимиты проверок, итоги, уверенность (OH-T06, AC-14..AC-18)."""
 
 from app.tutor.outcomes import outcome_label
-from tests.tutor_helpers import Scripted, attempt, boot, events, out, post, seed, view
+from tests.tutor_helpers import attempt, boot, events, post, seed, view
 
 
 def test_ac14(tmp_path):
@@ -24,7 +24,7 @@ def test_ac14(tmp_path):
 
 
 def test_ac15(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, _model = boot(tmp_path)
     with c:
         a = seed(tmp_path, key="Б")
         attempt(c, a, "А")
@@ -39,7 +39,7 @@ def test_ac15(tmp_path):
 
 
 def test_ac16(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, _model = boot(tmp_path)
     with c:
         a = seed(tmp_path, key="Б")
         r1 = attempt(c, a, "А").json()
@@ -61,13 +61,11 @@ def test_ac17(tmp_path):
     assert outcome_label(True, "solved", 2, 2) == "верно после подсказки 2"
     assert outcome_label(True, "hint3", 2, 3) == "решение по подсказке 3"
     assert outcome_label(False, "solved_unknown", 1, 0) == "совпало с ответом модели, не проверено"
-    assert (
-        outcome_label(False, "hint3", 2, 3) == "решение модели по подсказке 3, не проверено"
-    )
+    assert outcome_label(False, "hint3", 2, 3) == "решение модели по подсказке 3, не проверено"
     assert outcome_label(True, "answer_shown", 2, 0) == "ответ показан после 2 попыток"
     for keyed, state in ((False, "solved_unknown"), (False, "hint3")):
         assert "верно" not in outcome_label(keyed, state, 2, 1).split(",")[0].lower()
-    c, clock, model = boot(tmp_path)
+    c, _clock, _model = boot(tmp_path)
     with c:
         first = seed(tmp_path, key="Б")
         assert attempt(c, first, "Б").json()["outcome"] == "верно с 1-й попытки"
@@ -81,7 +79,7 @@ def test_ac17(tmp_path):
 
 
 def test_ac18(tmp_path):
-    c, clock, model = boot(tmp_path)
+    c, _clock, model = boot(tmp_path)
     with c:
         sure = seed(tmp_path, key="Б")
         attempt(c, sure, "А", confidence="sure")
