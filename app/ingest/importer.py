@@ -392,6 +392,7 @@ def _write_tasks(conn, material, tasks, pdf: bytes, cancel=None, report=None) ->
         stops = _stops(located)
         for index, task in enumerate(tasks):
             if cancel is not None:
+                # истечение не отменяет уже завершённую запись: после последнего задания done верен
                 _check(cancel)  # прерванный запуск не пишет дальше; транзакция откатится
             if report is not None:
                 report(index + 1, len(tasks))

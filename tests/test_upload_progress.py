@@ -196,113 +196,186 @@ def test_the_polling_script_chains_timeouts_and_reloads_once():
 
 
 # ---------------------------------------------------------------- stall deadline (heartbeat)
+# The watchdog runs on a fake clock the test moves: no verdict depends on the scheduler.
 
 
-class SlowChunks:
-    """Every model call takes `delay` seconds; counts calls and can be cut off by the test."""
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+        self._lock = threading.Lock()
 
-    def __init__(self, delay):
-        self.delay = delay
+    def now(self):
+        with self._lock:
+            return self.t
+
+    def advance(self, seconds):
+        with self._lock:
+            self.t += seconds
+
+
+class ClockedModel:
+    """Call number n moves the fake clock by steps.get(n, step) (the model "takes" that long);
+    calls in `hang_on` also wait until the test opens their gate."""
+
+    def __init__(self, clock, step=0.0, hang_on=(), steps=None):
+        self.clock = clock
+        self.step = step
+        self.steps = steps or {}
+        self.hang_on = set(hang_on)
         self.calls = 0
+        self.entered = {n: threading.Event() for n in range(1, 12)}
+        self.gate = {n: threading.Event() for n in range(1, 12)}
+
+    def release_all(self):
+        for gate in self.gate.values():
+            gate.set()
 
     def complete(self, system, messages, schema=None, session_id=None):
         self.calls += 1
-        time.sleep(self.delay)
         n = self.calls
-        return ModelResult(None, reply(make_task(n, pages=[n])), "claude", "s", 1, None)
-
-
-def six_pages():
-    return text_pdf([[f"{n}. " + LONG] for n in range(1, 7)])
+        self.clock.advance(self.steps.get(n, self.step))
+        if n in self.hang_on:
+            self.entered[n].set()
+            assert self.gate[n].wait(30)
+        page = int(re.search(r"\[\[стр\. (\d+)\]\]", messages[-1]["content"]).group(1))
+        return ModelResult(None, reply(make_task(n, pages=[page])), "claude", "s", 1, None)
 
 
 def two_pages():
     return text_pdf([[f"{n}. " + LONG] for n in range(1, 3)])
 
 
+def six_pages():
+    return text_pdf([[f"{n}. " + LONG] for n in range(1, 7)])
+
+
+def clocked_app(tmp_path, model, clock, **kw):
+    return build_app(
+        tmp_path, model, sync_imports=False, import_clock=clock.now, import_poll=0.01, **kw
+    )
+
+
 def wait_status(client, want, seconds=30):
-    for _ in range(int(seconds * 20)):
+    for _ in range(int(seconds * 100)):
         st = client.get("/parent/materials/1", headers=API).json()
         if st["import_status"] == want:
             return st
-        time.sleep(0.05)
+        time.sleep(0.01)
     raise AssertionError(f"never {want}: {st}")
 
 
+def current_run(tmp_path):
+    conn = db(tmp_path)
+    try:
+        return conn.execute("SELECT run_id FROM material WHERE id = 1").fetchone()[0]
+    finally:
+        conn.close()
+
+
 def test_a_long_import_that_keeps_reporting_is_not_cut_off(tmp_path):
-    # 6 chunks x 0.3 s = 1.8 s in all: past a 1 s global deadline, but a call is under the stall
-    model = SlowChunks(0.3)
-    app = build_app(tmp_path, model, sync_imports=False, import_stall=1.0)
-    with TestClient(app) as c:
+    clock = FakeClock()
+    model = ClockedModel(clock, step=0.6)  # 6 calls = 3.6 s of fake time, stall is 1.0 s
+    with TestClient(clocked_app(tmp_path, model, clock, import_stall=1.0)) as c:
         upload(c, six_pages())
         done = wait_status(c, "done")
         assert done["tasks"] == 6 and model.calls == 6
 
 
-def test_a_silent_import_expires_after_the_stall_limit_and_is_logged(tmp_path, caplog):
-    model = ChunkGate(3)
-    app = build_app(tmp_path, model, sync_imports=False, import_stall=0.8)
-    caplog.set_level("WARNING", logger="app.ingest")
-    with TestClient(app) as c:
+def test_real_clock_smoke_import_with_wide_margins(tmp_path):
+    model = StubModel(split=lambda content: reply(make_task(1)))
+    with TestClient(build_app(tmp_path, model, sync_imports=False, import_stall=30)) as c:
         upload(c, two_pages())
-        assert model.entered[0].wait(30)
+        assert wait_status(c, "done")["tasks"] >= 1
+
+
+def test_a_silent_import_expires_after_the_stall_limit_and_is_logged(tmp_path, caplog):
+    clock = FakeClock()
+    model = ClockedModel(clock, hang_on=[1])
+    caplog.set_level("WARNING", logger="app.ingest")
+    with TestClient(clocked_app(tmp_path, model, clock, import_stall=1.0)) as c:
+        upload(c, two_pages())
+        assert model.entered[1].wait(30)
+        clock.advance(0.9)  # within the limit: the watchdog polls many times and keeps quiet
+        time.sleep(0.2)
+        assert c.get("/parent/materials/1", headers=API).json()["import_status"] == "running"
+        clock.advance(0.2)
         failed = wait_status(c, "failed")
         assert "превышено время ожидания" in failed["import_error"]
         lines = [r.getMessage() for r in caplog.records if "import expired" in r.getMessage()]
         assert len(lines) == 1
         assert "material=1" in lines[0] and "phase=chunks" in lines[0] and "chunk=1/2" in lines[0]
-        assert re.search(r"silent_s=\d+\.\d", lines[0])
-        for gate in model.go:
-            gate.set()
+        assert "silent_s=1.1" in lines[0]
+        model.release_all()
 
 
 def test_the_absolute_cap_ends_an_import_that_never_stops_reporting(tmp_path):
-    model = SlowChunks(0.25)  # reports all the time, never stalls
-    app = build_app(
-        tmp_path,
-        model,
-        sync_imports=False,
-        import_stall=5,
-        import_max_base=0.2,
-        import_max_per_chunk=0.1,
+    clock = FakeClock()
+    model = ClockedModel(clock, step=0.25, hang_on=[2])  # reports all the time; stall is 5 s
+    app = clocked_app(
+        tmp_path, model, clock, import_stall=5, import_max_base=0.2, import_max_per_chunk=0.1
     )
     with TestClient(app) as c:
-        upload(c, six_pages())  # cap = 0.2 + 6 * 0.1 = 0.8 s < 1.5 s of work
+        upload(c, two_pages())  # cap = 0.2 + 2 * 0.1 = 0.4 s; the second call ends at 0.5 s
+        assert model.entered[2].wait(30)
         assert "превышено время ожидания" in wait_status(c, "failed")["import_error"]
+        model.release_all()
 
 
 def test_a_late_report_of_an_expired_run_does_not_resurrect_it(tmp_path):
-    model = ChunkGate(3)
-    app = build_app(tmp_path, model, sync_imports=False, import_stall=0.8)
+    clock = FakeClock()
+    model = ClockedModel(clock, hang_on=[1])
+    app = clocked_app(tmp_path, model, clock, import_stall=1.0)
     with TestClient(app) as c:
         upload(c, two_pages())
-        assert model.entered[0].wait(30)
-        conn = db(tmp_path)
-        run_a = conn.execute("SELECT run_id FROM material WHERE id = 1").fetchone()[0]
-        conn.close()
+        assert model.entered[1].wait(30)
+        run_a = current_run(tmp_path)
+        clock.advance(2.0)
         wait_status(c, "failed")
         progress = app.state.ctx.progress
         progress.update(1, run_a, 2, 2, 1)  # run A reports late
         assert len(progress) == 0 and progress.snapshot(1, run_a) is None
-        for gate in model.go:
-            gate.set()
+        model.release_all()
 
 
 def test_cancel_stops_further_model_calls(tmp_path):
-    class Hangs(SlowChunks):
-        def complete(self, *args, **kw):
-            self.delay = 2.0 if self.calls == 1 else 0.01  # the second call hangs past the stall
-            return super().complete(*args, **kw)
-
-    model = Hangs(0)
-    app = build_app(tmp_path, model, sync_imports=False, import_stall=1.2)
+    clock = FakeClock()
+    model = ClockedModel(clock, hang_on=[2])
+    app = clocked_app(tmp_path, model, clock, import_stall=1.0)
     with TestClient(app) as c:
         upload(c, six_pages())
+        assert model.entered[2].wait(30)
+        clock.advance(2.0)
         wait_status(c, "failed")
-        assert model.calls == 2
-        time.sleep(2.5)  # the hung call returns; the expired run must not ask again
+        model.release_all()  # the hung call returns; the expired run must not ask again
+        app.state.imports.wait_idle(30)
         assert model.calls == 2
         assert c.get("/parent/materials/1", headers=API).json()["tasks"] == 0
+
+
+def test_a_late_begin_and_clear_of_an_old_run_do_not_touch_the_newer_run(tmp_path):
+    clock = FakeClock()
+    # call 1 = run A (hangs, expires); call 2 = run B chunk 1 (hangs); call 3 = run B chunk 2
+    model = ClockedModel(clock, hang_on=[1, 2], steps={3: 0.6})
+    app = clocked_app(tmp_path, model, clock, import_stall=1.0)
+    with TestClient(app) as c:
+        pdf = two_pages()
+        upload(c, pdf)
+        assert model.entered[1].wait(30)
+        run_a = current_run(tmp_path)
+        clock.advance(2.0)
+        wait_status(c, "failed")
+        assert upload(c, pdf).json()["requeued"] is True  # run B
+        assert model.entered[2].wait(30)
+        run_b = current_run(tmp_path)
+        assert run_b != run_a
+        progress = app.state.ctx.progress
+        progress.begin(1, run_a)  # run A resumes after its ownership check ...
+        progress.clear(1, run_a)  # ... and cleans up
+        assert progress.snapshot(1, run_b) is not None
+        clock.advance(0.6)
+        model.release_all()
+        done = wait_status(c, "done")  # B keeps beating: 0.6 s + 0.6 s apart, never 1.0 s silent
+        assert done["tasks"] == 2
 
 
 def test_the_writing_phase_is_shown_with_its_own_text(tmp_path):

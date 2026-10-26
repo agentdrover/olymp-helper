@@ -20,6 +20,8 @@ class ImportJobs:
         *,
         sync: bool = False,
         stall: float = IMPORT_STALL_S,
+        clock=time.monotonic,
+        poll: float | None = None,
         max_base: float = IMPORT_MAX_BASE_S,
         max_per_chunk: float = IMPORT_MAX_PER_CHUNK_S,
     ):
@@ -28,7 +30,8 @@ class ImportJobs:
         self.stall = stall
         self.max_base = max_base
         self.max_per_chunk = max_per_chunk
-        self._tick = max(0.02, min(1.0, stall / 5))
+        self._clock = clock  # одни часы с ImportProgress; тесты подставляют свои
+        self._tick = poll if poll is not None else max(0.02, min(1.0, stall / 5))
         self._threads: list[threading.Thread] = []
 
     def _new_run(self, material_id: int) -> str:
@@ -43,6 +46,7 @@ class ImportJobs:
 
     def submit(self, material_id: int) -> None:
         run_id = self._new_run(material_id)
+        self.ctx.progress.claim(material_id, run_id)
         if self.sync:
             run_import(self.ctx, material_id, threading.Event(), run_id)
             return
@@ -62,12 +66,12 @@ class ImportJobs:
     def _watch(self, worker, material_id: int, cancel: threading.Event, run_id: str) -> None:
         """Прервать запуск, который молчит дольше stall или идёт дольше потолка по размеру.
         Пульс - отчёт о ходе (ImportProgress); отчёт истёкшего запуска записи не оживляет."""
-        started = last = time.monotonic()
+        started = last = self._clock()
         while True:
             worker.join(self._tick)
             if not worker.is_alive():
                 return
-            now = time.monotonic()
+            now = self._clock()
             item = self.ctx.progress.snapshot(material_id, run_id)
             if item is not None:
                 last = item["beat"]

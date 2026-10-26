@@ -29,18 +29,30 @@ class ImportProgress:
         self._items: dict[int, dict] = {}
         self._clock = clock
 
-    def begin(self, material_id: int, run_id: str) -> None:
+    def _fresh(self, run_id: str, now: float) -> dict:
+        return {
+            "run_id": run_id,
+            "phase": "reading",
+            "chunk": 0,
+            "chunks": 0,
+            "accepted": 0,
+            "cap_chunks": 0,
+            "beat": now,
+        }
+
+    def claim(self, material_id: int, run_id: str) -> None:
+        """Новый запуск материала (из submit, по порядку запусков): заменяет запись прежнего."""
         now = self._clock()
         with self._lock:
-            self._items[material_id] = {
-                "run_id": run_id,
-                "phase": "reading",
-                "chunk": 0,
-                "chunks": 0,
-                "accepted": 0,
-                "cap_chunks": 0,
-                "beat": now,
-            }
+            self._items[material_id] = self._fresh(run_id, now)
+
+    def begin(self, material_id: int, run_id: str) -> None:
+        """Начало работы самого запуска: создаёт запись, только если материал ничей. Запись
+        более нового запуска не заменяется (поздний begin истёкшего запуска безвреден)."""
+        now = self._clock()
+        with self._lock:
+            if material_id not in self._items:
+                self._items[material_id] = self._fresh(run_id, now)
 
     def update(
         self,
