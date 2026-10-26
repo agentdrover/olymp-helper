@@ -10,7 +10,7 @@ import threading
 import time
 
 PHASES = {
-    "reading": "Читаем страницы",
+    "reading": "Читаем страницы: {chunk} из {chunks}",
     "chunks": "Разбирается: порция {chunk} из {chunks}, принято заданий {accepted}",
     "writing": "Сохраняем задания и рисунки: {chunk} из {chunks}",
 }
@@ -20,6 +20,8 @@ def progress_text(item: dict | None, running: bool = True) -> str:
     """Что видит родитель; одна строка для страницы и для опроса."""
     if item is None:
         return "Разбирается: готовим порции" if running else "В очереди"
+    if item["phase"] == "reading" and not item["chunks"]:
+        return "Читаем страницы"
     return PHASES[item["phase"]].format(**item)
 
 

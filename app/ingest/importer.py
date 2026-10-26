@@ -509,7 +509,12 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
         ctx.progress.begin(material_id, run_id)
         try:
             pdf = ctx.material_path(material["file"]).read_bytes()
-            pages = extract_pages(pdf)
+            pages = extract_pages(
+                pdf,
+                lambda done, total: ctx.progress.update(
+                    material_id, run_id, done, total, phase="reading"
+                ),
+            )
             if not any(text for _, text in pages):
                 raise ImportFailure(NO_TEXT)
             _check(cancel)

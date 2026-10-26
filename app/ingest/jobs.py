@@ -32,6 +32,7 @@ class ImportJobs:
         self.max_per_chunk = max_per_chunk
         self._clock = clock  # одни часы с ImportProgress; тесты подставляют свои
         self._tick = poll if poll is not None else max(0.02, min(1.0, stall / 5))
+        self.watch_started = threading.Event()  # сторожок прочитал время старта (тесты)
         self._threads: list[threading.Thread] = []
         # запись run_id в базу и захват записи хода - одно действие: при двух почти
         # одновременных повторах последний владелец в базе совпадает с владельцем записи
@@ -71,6 +72,7 @@ class ImportJobs:
         """Прервать запуск, который молчит дольше stall или идёт дольше потолка по размеру.
         Пульс - отчёт о ходе (ImportProgress); отчёт истёкшего запуска записи не оживляет."""
         started = last = self._clock()
+        self.watch_started.set()
         while True:
             worker.join(self._tick)
             if not worker.is_alive():

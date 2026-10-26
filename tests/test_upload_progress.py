@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.model.types import ModelResult
 from tests.bank_helpers import (
     PARENT,
+    FakeClock,
     StubModel,
     build_app,
     db,
@@ -157,23 +158,19 @@ def test_accept_is_parsed_with_q_values(tmp_path):
 
 
 def test_a_late_entry_of_an_expired_run_is_not_shown(tmp_path):
-    model = ChunkGate(4)
-    pdf = text_pdf([["1. " + LONG], ["2. " + LONG]])
-    app = build_app(tmp_path, model, sync_imports=False, import_stall=0.5)
+    clock = FakeClock()
+    model = ClockedModel(clock, hang_on=[1, 2])  # call 1 = run A, call 2 = run B chunk 1
+    app = clocked_app(tmp_path, model, clock, import_stall=1.0)
+    pdf = two_pages()
     with TestClient(app) as c:
         assert upload(c, pdf).status_code == 202
-        assert model.entered[0].wait(30)
-        conn = db(tmp_path)
-        run_a = conn.execute("SELECT run_id FROM material WHERE id = 1").fetchone()[0]
-        conn.close()
-        for _ in range(100):  # the watchdog expires run A
-            if c.get("/parent/materials/1", headers=API).json()["import_status"] == "failed":
-                break
-            threading.Event().wait(0.1)
-        assert c.get("/parent/materials/1", headers=API).json()["import_status"] == "failed"
+        assert model.entered[1].wait(30)
+        run_a = current_run(tmp_path)
+        clock.advance(2.0)
+        wait_status(c, "failed")
         assert len(app.state.ctx.progress) == 0  # A's entry is dropped on expiry
         assert upload(c, pdf).json()["requeued"] is True  # run B
-        assert model.entered[1].wait(30)
+        assert model.entered[2].wait(30)
         status = c.get("/parent/materials/1", headers=API).json()
         assert status["import_status"] == "running"
         assert status["progress"] == {"phase": "chunks", "chunk": 1, "chunks": 2, "accepted": 0}
@@ -181,8 +178,7 @@ def test_a_late_entry_of_an_expired_run_is_not_shown(tmp_path):
         status = c.get("/parent/materials/1", headers=API).json()
         assert status["progress"]["chunk"] == 1 and status["progress"]["accepted"] == 0
         assert "принято заданий 7" not in c.get("/parent/materials", headers=HTML).text
-        for gate in model.go:
-            gate.set()
+        model.release_all()
         app.state.imports.wait_idle(30)
 
 
@@ -199,20 +195,6 @@ def test_the_polling_script_chains_timeouts_and_reloads_once():
 # The watchdog runs on a fake clock the test moves: no verdict depends on the scheduler.
 
 
-class FakeClock:
-    def __init__(self):
-        self.t = 1000.0
-        self._lock = threading.Lock()
-
-    def now(self):
-        with self._lock:
-            return self.t
-
-    def advance(self, seconds):
-        with self._lock:
-            self.t += seconds
-
-
 class ClockedModel:
     """Call number n moves the fake clock by steps.get(n, step) (the model "takes" that long);
     calls in `hang_on` also wait until the test opens their gate."""
@@ -223,6 +205,7 @@ class ClockedModel:
         self.steps = steps or {}
         self.hang_on = set(hang_on)
         self.calls = 0
+        self.wait_for = None  # the watchdog has read its start time before time moves
         self.entered = {n: threading.Event() for n in range(1, 12)}
         self.gate = {n: threading.Event() for n in range(1, 12)}
 
@@ -233,6 +216,8 @@ class ClockedModel:
     def complete(self, system, messages, schema=None, session_id=None):
         self.calls += 1
         n = self.calls
+        if self.wait_for is not None:
+            assert self.wait_for.wait(30)
         self.clock.advance(self.steps.get(n, self.step))
         if n in self.hang_on:
             self.entered[n].set()
@@ -250,9 +235,11 @@ def six_pages():
 
 
 def clocked_app(tmp_path, model, clock, **kw):
-    return build_app(
+    app = build_app(
         tmp_path, model, sync_imports=False, import_clock=clock.now, import_poll=0.01, **kw
     )
+    model.wait_for = app.state.imports.watch_started
+    return app
 
 
 def wait_status(client, want, seconds=30):
@@ -376,6 +363,41 @@ def test_a_late_begin_and_clear_of_an_old_run_do_not_touch_the_newer_run(tmp_pat
         model.release_all()
         done = wait_status(c, "done")  # B keeps beating: 0.6 s + 0.6 s apart, never 1.0 s silent
         assert done["tasks"] == 2
+
+
+def test_reading_a_big_pdf_keeps_the_heartbeat(tmp_path, monkeypatch):
+    from app.ingest import importer
+
+    clock = FakeClock()
+    real = importer.extract_pages
+    seen = []
+
+    def slow_extract(data, on_page=None):
+        for page in range(1, 4):
+            clock.advance(0.9)  # a slow machine: each page takes almost the whole stall limit
+            time.sleep(0.1)  # the watchdog polls here
+            on_page(page, 3)
+            seen.append(page)
+        return real(data)
+
+    monkeypatch.setattr(importer, "extract_pages", slow_extract)
+    model = ClockedModel(clock)
+    with TestClient(clocked_app(tmp_path, model, clock, import_stall=1.0)) as c:
+        upload(c, two_pages())
+        done = wait_status(c, "done")  # 2.7 s of reading in all, yet never expired
+        assert seen == [1, 2, 3] and done["tasks"] == 2
+
+
+def test_reading_is_reported_page_by_page():
+    from app.ingest.extract import extract_pages
+    from app.ingest.progress import progress_text
+
+    seen = []
+    pages = extract_pages(text_pdf([["1. a"], ["2. b"]]), lambda n, total: seen.append((n, total)))
+    assert [n for n, _ in pages] == [1, 2] and seen == [(1, 2), (2, 2)]
+    assert progress_text({"phase": "reading", "chunk": 2, "chunks": 9, "accepted": 0}) == (
+        "Читаем страницы: 2 из 9"
+    )
 
 
 def test_the_writing_phase_is_shown_with_its_own_text(tmp_path):
