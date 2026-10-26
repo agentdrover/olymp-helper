@@ -2,13 +2,39 @@
 {% block title %}Вход родителя{% endblock %}
 {% block content %}
 <div class="login">
-  <form method="post" action="/parent/login" class="card login-card">
+  <div class="card login-card">
     <a href="/">← Назад к помощнику</a>
     <h1>Вход для родителя</h1>
-    <label for="key">Ключ</label>
-    <input id="key" type="password" name="key" autocomplete="current-password" required>
-    {% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
-    <button class="primary">Войти</button>
-  </form>
+    {% if pin_set %}
+    <form method="post" action="/parent/login" id="pin-form" class="pin-form">
+      <label for="pin">PIN — можно набрать на клавиатуре. Вход сразу после 4-й цифры.</label>
+      <input id="pin" class="pin-input" type="password" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" aria-describedby="pin-msg"{% if locked %} disabled{% endif %}>
+      <div id="pin-msg" role="status" class="pin-msg{% if locked %} locked{% elif error %} warn{% endif %}">{% if error %}{{ error }}{% else %}После {{ max_failures }} ошибок вход закроется на 5 минут.{% endif %}</div>
+      <div class="keypad">
+        {% for k in ["1","2","3","4","5","6","7","8","9"] %}<button type="button" data-key="{{ k }}" aria-label="Цифра {{ k }}"{% if locked %} disabled{% endif %}>{{ k }}</button>{% endfor %}
+        <span></span>
+        <button type="button" data-key="0" aria-label="Цифра 0"{% if locked %} disabled{% endif %}>0</button>
+        <button type="button" data-key="back" aria-label="Стереть"{% if locked %} disabled{% endif %}>⌫</button>
+      </div>
+      <noscript><button class="primary">Войти</button></noscript>
+    </form>
+    <script src="/static/pin.js"></script>
+    {% elif key_configured %}
+    <form method="post" action="/parent/setup" class="pin-form">
+      <h2>Задайте PIN</h2>
+      <p class="hint">Первый вход. Ключ родителя задан при установке; после этого PIN входа ключ больше не нужен.</p>
+      <label for="key">Ключ родителя</label>
+      <input id="key" type="password" name="key" autocomplete="off" required>
+      <label for="pin">Новый PIN — четыре цифры</label>
+      <input id="pin" type="password" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required>
+      <label for="pin2">PIN ещё раз</label>
+      <input id="pin2" type="password" name="pin2" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required>
+      {% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
+      <button class="primary">Сохранить PIN</button>
+    </form>
+    {% else %}
+    <p class="err" role="alert">Вход родителя не настроен: администратор не задал ключ первого входа.</p>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block head %}<meta name="csrf-token" content="{{ csrf_token(request) }}">{% endblock %}
 {% block body_class %}role-parent{% endblock %}
 {% block shell %}
 {% set path = request.url.path %}
@@ -8,8 +9,10 @@
     <div class="mode">режим родителя</div>
     <a href="/parent/review"{% if path.startswith("/parent/review") or path.startswith("/parent/tasks") %} aria-current="page"{% endif %}>Проверка заданий</a>
     <a href="/parent/materials"{% if path.startswith("/parent/materials") %} aria-current="page"{% endif %}>Материалы и модель</a>
+    <a href="/parent/conversations"{% if path.startswith("/parent/conversations") %} aria-current="page"{% endif %}>Переписка</a>
+    <a href="/parent/settings"{% if path.startswith("/parent/settings") %} aria-current="page"{% endif %}>Настройки</a>
     <div class="spacer"></div>
-    <form method="post" action="/parent/logout"><button class="navlink" type="submit">Выйти</button></form>
+    <form method="post" action="/parent/logout"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="navlink" type="submit">Выйти</button></form>
   </nav>
   <main class="content">{% block content %}{% endblock %}</main>
 </div>

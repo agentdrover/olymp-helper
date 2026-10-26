@@ -20,19 +20,13 @@ from app.ingest.publish import child_view, is_published
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
 from app.ingest.topics import load_catalog
-from app.roles import (
-    COOKIE,
-    PARENT,
-    current_role,
-    key_matches,
-    parent_key,
-    parent_token,
-    require_parent,
-)
+from app.notice import notice_redirect, notice_seen
+from app.roles import PARENT, csrf_token, current_role, require_csrf, require_parent
 from app.search import search
 from app.search.tasks import search_published_tasks
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
+TEMPLATES.env.globals["csrf_token"] = csrf_token
 KINDS = ("tasks", "key", "textbook")
 PAGE_SCALE = 1.5
 TYPE_LABELS = {
@@ -42,7 +36,7 @@ TYPE_LABELS = {
     "numeric": "число",
 }
 
-parent = APIRouter(dependencies=[Depends(require_parent)])
+parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)])
 public = APIRouter()
 
 
@@ -61,6 +55,19 @@ def db_of(request: Request):
 Db = Annotated[sqlite3.Connection, Depends(db_of)]
 
 
+def child_notice_gate(request: Request, conn: Db) -> None:
+    """API ребёнка до уведомления о внешней модели закрыт (SPEC 1.6); родителю оно не нужно."""
+    if current_role(request) != PARENT and not notice_seen(conn):
+        raise HTTPException(
+            403,
+            detail={
+                "error": "notice_required",
+                "message": "Сначала прочитайте уведомление о внешней модели.",
+                "notice_url": "/notice",
+            },
+        )
+
+
 def _refusal(exc: Refusal) -> JSONResponse:
     return JSONResponse({"error": exc.message}, status_code=exc.status)
 
@@ -72,34 +79,6 @@ def _refusal(exc: Refusal) -> JSONResponse:
 def start_page(request: Request):
     """Две двери: ребёнку и родителю. Банк не читается — на странице нет данных."""
     return TEMPLATES.TemplateResponse(request, "start.html", {})
-
-
-@public.get("/parent/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    return TEMPLATES.TemplateResponse(request, "parent/login.html", {"error": None})
-
-
-@public.post("/parent/login")
-def login(request: Request, key: Annotated[str, Form()] = ""):
-    if not key_matches(key):
-        page = TEMPLATES.TemplateResponse(
-            request, "parent/login.html", {"error": "Неверный ключ или вход не настроен."}
-        )
-        page.status_code = 403
-        return page
-    response = RedirectResponse("/parent/review", status_code=303)
-    response.set_cookie(
-        COOKIE, parent_token(parent_key()), httponly=True, samesite="strict", path="/"
-    )
-    return response
-
-
-@parent.post("/parent/logout")
-def logout():
-    """Выход родителя: cookie стирается, дальше - стартовая страница."""
-    response = RedirectResponse("/", status_code=303)
-    response.delete_cookie(COOKIE, path="/", httponly=True, samesite="strict")
-    return response
 
 
 # --------------------------------------------------------------------- материалы
@@ -134,8 +113,14 @@ def upload_material(
     conn = open_db(ctx.db_path)
     try:
         existing = conn.execute(
-            "SELECT id, kind, import_status, import_error FROM material WHERE sha256 = ?", (sha,)
+            "SELECT id, kind, import_status, import_error, deleted_at FROM material WHERE sha256 = ?",
+            (sha,),
         ).fetchone()
+        if existing is not None and existing["deleted_at"] is not None:
+            return JSONResponse(
+                {"error": "Этот материал удалён вместе с файлом; подтверждённые задания остались."},
+                status_code=409,
+            )
         if existing is not None:
             # повтор: упавший импорт или пустой сборник - модель отклонена целиком (есть отчёт о
             # пропусках, заданий нет). Ключ и учебник заданий не дают: их done - это успех.
@@ -202,8 +187,10 @@ def material_status(material_id: int, conn: Db):
 
 
 def _material_file(request: Request, conn, material_id: int) -> Path:
-    row = conn.execute("SELECT file, sha256 FROM material WHERE id = ?", (material_id,)).fetchone()
-    if row is None:
+    row = conn.execute(
+        "SELECT file, sha256, deleted_at FROM material WHERE id = ?", (material_id,)
+    ).fetchone()
+    if row is None or row["deleted_at"] is not None:
         raise HTTPException(404, "Материал не найден")
     return ctx_of(request).material_path(row["file"]), row["sha256"]
 
@@ -498,7 +485,7 @@ def _published(conn, task_id: int):
     return task, material
 
 
-@public.get("/api/tasks")
+@public.get("/api/tasks", dependencies=[Depends(child_notice_gate)])
 def api_tasks(conn: Db):
     out = []
     for task in conn.execute("SELECT * FROM task_item ORDER BY id").fetchall():
@@ -510,7 +497,7 @@ def api_tasks(conn: Db):
     return {"tasks": out}
 
 
-@public.get("/api/tasks/{task_id}")
+@public.get("/api/tasks/{task_id}", dependencies=[Depends(child_notice_gate)])
 def api_task(task_id: int, conn: Db):
     task, material = _published(task_id=task_id, conn=conn)
     return child_view(task, material)
@@ -518,6 +505,8 @@ def api_task(task_id: int, conn: Db):
 
 @public.get("/tasks", response_class=HTMLResponse)
 def tasks_page(request: Request, conn: Db):
+    if current_role(request) != PARENT and not notice_seen(conn):
+        return notice_redirect("/tasks")
     data = api_tasks(conn)
     # Ребёнку — название темы из справочника, не код; список уже содержит только опубликованные.
     topics = {
@@ -534,12 +523,15 @@ def tasks_page(request: Request, conn: Db):
 @public.get("/tasks/{task_id}", response_class=HTMLResponse)
 def task_page(task_id: int, request: Request, conn: Db):
     task, material = _published(task_id=task_id, conn=conn)
+    # Первое задание ребёнка - после уведомления о внешней модели (SPEC 1.6).
+    if current_role(request) != PARENT and not notice_seen(conn):
+        return notice_redirect(f"/tasks/{task_id}")
     return TEMPLATES.TemplateResponse(
         request, "child/task.html", {"task": child_view(task, material)}
     )
 
 
-@public.get("/tasks/{task_id}/figure.png")
+@public.get("/tasks/{task_id}/figure.png", dependencies=[Depends(child_notice_gate)])
 def task_figure_png(task_id: int, request: Request, conn: Db):
     task = get_task(conn, task_id)
     figure = figure_of(task) if task is not None else None
@@ -550,7 +542,7 @@ def task_figure_png(task_id: int, request: Request, conn: Db):
     return FileResponse(ctx_of(request).material_path(figure["file"]), media_type="image/png")
 
 
-@public.get("/api/search")
+@public.get("/api/search", dependencies=[Depends(child_notice_gate)])
 def api_search(request: Request, conn: Db, q: str = ""):
     """Родитель ищет по страницам материалов; ребёнок - только по опубликованным заданиям."""
     if current_role(request) == PARENT:

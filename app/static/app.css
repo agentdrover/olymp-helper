@@ -102,3 +102,18 @@ fieldset { border: 1px solid var(--line); border-radius: 12px; }
 .login-card { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 14px; padding: 32px; border-radius: 20px; }
 .login-card h1 { margin: 0; font-size: 22px; }
 .login-card input { font-size: 18px; padding: 10px 12px; }
+
+/* Экран PIN: поле, сообщение и цифровая клавиатура. */
+.pin-form { display: flex; flex-direction: column; gap: 14px; }
+.pin-input { font-family: var(--font-mono); font-size: 28px !important; letter-spacing: 0.6em; text-align: center; border: 2px solid var(--line); border-radius: 12px; }
+.pin-msg { min-height: 24px; font-size: 14px; color: var(--ink-3); border-radius: 10px; }
+.pin-msg.warn { padding: 8px 12px; background: #FCEFD8; color: #6E3F00; }
+.pin-msg.locked { padding: 8px 12px; background: #F7E2E2; color: var(--warn); }
+.keypad { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.keypad button { height: 56px; margin: 0; font-size: 20px; }
+.keypad button:disabled { color: #8A9A92; background: var(--pill); cursor: not-allowed; }
+
+/* Счётчик дней до этапа: того же размера, что остальные цифры экрана «Сегодня». */
+.stat { display: flex; align-items: baseline; gap: 8px; }
+.stat .num { font-family: var(--font-head); font-size: 26px; font-weight: 600; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
