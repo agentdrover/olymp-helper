@@ -83,13 +83,15 @@ class Flow:
             return True
         return False
 
-    def _safe(self, task, text: str, kind: str, *, reveal=False):
-        ref, _ = state.reference(task)
+    def _safe(self, task, text: str, kind: str, *, reveal=False, own=()):
+        """(HTML, причина отклонения или None): общая подсказка вместо текста с признаками ответа."""
+        ref, keyed = state.reference(task)
         figure = figure_of(task) or {}
         options = json.loads(task["options"]) if task["options"] else None
         return finish(
-            text, kind, task["type"], options, ref, figure.get("teacher_note"), reveal=reveal
-        )
+            text, kind, task["type"], options, ref, figure.get("teacher_note"),
+            reveal=reveal, keyed=keyed, condition=task["text"], own=own,
+        )  # fmt: skip
 
     # ------------------------------------------------------------------- действия
 
@@ -110,12 +112,16 @@ class Flow:
         out = self._ask(task, run, "mistake")
         if out is None:
             return
-        mismatch = self._judge(task, run, out)
-        if mismatch:
-            html, generic = self._safe(task, "", "mistake")
+        own = [json.loads(run["attempts_json"])[-1]["answer"]] if run["attempts"] else []
+        own = [x.strip() for part in own for x in part.replace(";", ",").split(",")]
+        if self._judge(task, run, out):
+            html, reason = self._safe(task, "", "mistake")
+            reason = "discrepancy"
         else:
-            html, generic = self._safe(task, out.explanation, "mistake")
-        state.store_analysis(self.conn, run["id"], run["attempts"], html, generic, out.uncertainty)
+            html, reason = self._safe(task, out.explanation, "mistake", own=own)
+        state.store_analysis(
+            self.conn, run["id"], run["attempts"], html, reason is not None, out.uncertainty, reason
+        )
 
     def _explain_solution(self, task, run) -> None:
         """Объяснение решения при ключе: независимое решение модели сверяется с ключом."""
@@ -128,8 +134,8 @@ class Flow:
         if self._judge(task, run, out):
             state.merge_solution(self.conn, run["id"], disputed=True, explanation_html=None)
             return
-        html, generic = self._safe(task, out.explanation, "explain", reveal=True)
-        state.merge_solution(self.conn, run["id"], explanation_html=None if generic else html)
+        html, reason = self._safe(task, out.explanation, "explain", reveal=True)
+        state.merge_solution(self.conn, run["id"], explanation_html=None if reason else html)
 
     def hint(self, task_id: int, level, confirm: bool) -> None:
         task = get_task(self.conn, task_id)
@@ -148,16 +154,19 @@ class Flow:
         if out is None:
             return
         if self._judge(task, run, out):
-            html, generic = self._safe(task, "", f"hint{level}")
+            html, reason = self._safe(task, "", f"hint{level}")
+            reason = "discrepancy"
         else:
-            html, generic = self._safe(task, out.explanation, f"hint{level}")
-        state.store_hint(self.conn, run["id"], level, html, generic, out.uncertainty, self.now)
+            html, reason = self._safe(task, out.explanation, f"hint{level}")
+        state.store_hint(
+            self.conn, run["id"], level, html, reason is not None, out.uncertainty, self.now, reason
+        )
 
     def explain(self, task_id: int, mode) -> None:
         if mode not in EXPLAIN_MODES:
             raise Refused(422, "bad_mode", "Такого способа объяснить нет.")
         task = get_task(self.conn, task_id)
-        run = state.latest_run(self.conn, task_id)
+        run = state.active_run(self.conn, task)
         if run is None or not state.is_terminal(run):
             raise Refused(409, "not_open", "Объяснить иначе можно, когда решение открыто.")
         if assist_mode(task) == "key_only" or run["state"] == "answer_shown":
@@ -174,8 +183,14 @@ class Flow:
         )
         if out is None:
             return
-        html, generic = self._safe(task, out.explanation, "explain", reveal=True)
-        if generic:
+        if self._judge(
+            task, run, out
+        ):  # свежее объяснение расходится с ключом: родителю, не ребёнку
+            state.merge_solution(self.conn, run["id"], disputed=True, explanation_html=None)
+            self.notice = DISPUTED[0].upper() + DISPUTED[1:] + "."
+            return
+        html, reason = self._safe(task, out.explanation, "explain", reveal=True)
+        if reason:
             self.notice = "Объяснение не получилось, попробуй другой способ."
             return
         state.add_explain(self.conn, run["id"], mode, label, html, out.uncertainty, self.now)

@@ -90,3 +90,86 @@ def test_render_markdown_escapes_everything_else():
     html = render_markdown("a < b & c > d <iframe src=x></iframe> <style>p{}</style>")
     assert "<iframe" not in html and "<style" not in html
     assert "&lt;" in html and "&amp;" in html
+
+
+OPTS = [
+    {"label": "А", "text": "белок мембраны"},
+    {"label": "Б", "text": "молекула ДНК хранит наследственность"},
+    {"label": "В", "text": "углевод запасной"},
+    {"label": "Г", "text": "липид клетки"},
+]
+COND = "Что хранит наследственную информацию клетки?"
+
+# (текст модели, эталон, тип, варианты, почему отклоняется)
+CODEX = [
+    ("б — правильный выбор", "Б", "single", OPTS),  # обозначение строчной буквой
+    ("Правильный ответ — молекула ДНК", "Б", "single", OPTS),  # текст верного варианта
+    ("Думаю, нужна молекула с кодом", "Б", "single", OPTS),  # слово текста варианта
+    ("Ответ — двадцать восемь", "28", "numeric", None),  # число словами
+    ("Посчитай: получится 28", "28", "numeric", None),  # число цифрами
+]
+PARAPHRASES = [
+    ("Выбирай Б.", "Б", OPTS),
+    ("выбирай б", "Б", OPTS),
+    ("Нужен вариант (Б)", "Б", OPTS),
+    ("Это под буквой Б", "Б", OPTS),
+    ("Ну, Б же", "Б", OPTS),
+    ("Скорее всего, [б]", "Б", OPTS),
+    ("Ищи среди вариантов молекулу ДНК", "Б", OPTS),
+    ("Речь идёт о молекуле, которая хранит наследственность", "Б", OPTS),
+    ("Это молекула, то есть вариант с молекулой", "Б", OPTS),
+    ("Подходит последний из двух крайних: Г", "Г", OPTS),
+    ("Верный: А", "А", OPTS),
+    ("Правильно тут В", "В", OPTS),
+    ("Ответом служит углевод", "В", OPTS),
+    ("Подумай про запасной углевод", "В", OPTS),
+    ("Липид, конечно", "Г", OPTS),
+    ("Это номер пять", "5", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
+    ("Тут пятёрка? нет: 5", "5", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
+    ("ответ: четыре", "4", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
+    ("Цифрой 3 обозначен лепесток", "5", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
+    ("Оно называется завязь, смотри на цифру 5", "5", [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]),
+]  # fmt: skip
+NOTE = "1 - тычинка, 2 - пестик, 3 - лепесток, 4 - чашелистик, 5 - завязь, 6 - рыльце"
+
+
+def reason(text, ref, kind="single", options=OPTS, note=None, condition=COND):
+    from app.tutor.guard import finish
+
+    return finish(text, "hint1", kind, options, ref, note, condition=condition)[1]
+
+
+def test_every_codex_input_is_rejected():
+    for text, ref, kind, options in CODEX:
+        assert reason(text, ref, kind, options) is not None, text
+
+
+def test_twenty_paraphrases_are_rejected_fail_closed():
+    assert len(PARAPHRASES) == 20
+    for text, ref, options in PARAPHRASES:
+        kind = "single"
+        note = NOTE if ref == "5" or ref in "1234567" else None
+        assert reason(text, ref, kind, options, note=note) is not None, text
+
+
+def test_number_words_cover_0_to_1000():
+    from app.tutor.guard import number_words
+
+    assert number_words(0) == ["ноль"] and number_words(28) == ["двадцать", "восемь"]
+    assert number_words(105) == ["сто", "пять"] and number_words(1000) == ["тысяча"]
+    for n in range(1001):
+        assert number_words(n)
+    for n, words in ((5, "пять"), (5, "пяти"), (40, "сорока"), (12, "двенадцати")):
+        assert reason(f"Это {words} штук", str(n), "numeric", None) is not None, words
+
+
+def test_innocent_text_passes_and_note_pairs_are_cut():
+    ok = "Вспомни, какой процесс отвечает за хранение кода в клетке и где он идёт."
+    assert reason(ok, "Б") is None
+    assert reason("Обрати внимание на условие.", "Б") is None
+    # пара «обозначение + слово» из пояснения режется в любом порядке
+    nums = [{"label": str(i), "text": f"цифра {i}"} for i in range(1, 7)]
+    for text in ("Цифрой 3 обозначен лепесток", "Лепесток - это цифра 3", "3? лепесток!"):
+        assert reason(text, "5", "single", nums, note=NOTE) in ("note", "note_pair"), text
+    assert reason("Цифрой 3 обозначен лепесток", "5", "single", nums, note=NOTE) == "note_pair"
+    assert reason("Посмотри на пестик на рисунке", "5", "single", nums, note=NOTE) is None

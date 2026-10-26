@@ -202,7 +202,10 @@ def test_uncertainty_is_stored_and_validated(tmp_path):
 
 
 def test_parent_resolution_reopens_explanations(tmp_path):
-    c, _clock, model = boot(tmp_path, Scripted(reply=lambda k, content: out("В", "EXPLAIN-V-ZZZ")))
+    said = {"answer": "В"}
+    c, _clock, model = boot(
+        tmp_path, Scripted(reply=lambda k, content: out(said["answer"], "EXPLAIN-V-ZZZ"))
+    )
     with c:
         tid = seed(tmp_path, key="Б")
         attempt(c, tid, "Б")
@@ -212,5 +215,72 @@ def test_parent_resolution_reopens_explanations(tmp_path):
         assert r.status_code == 200, r.text
         found = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["model_discrepancies"]
         assert found and all(d["resolved"] for d in found)
+        said["answer"] = "Б"  # теперь модель согласна с ключом
         got = post(c, tid, "explain", mode="simpler").json()
         assert len(model.calls) == calls + 1 and got["explains"][0]["mode"] == "simpler"
+
+
+def test_explain_disagreeing_with_the_key_is_suppressed(tmp_path):
+    """A fresh «explain differently» is judged like every other model text (Codex P2)."""
+    said = {"answer": "Б"}
+    c, _clock, _model = boot(
+        tmp_path, Scripted(reply=lambda k, content: out(said["answer"], "SECOND-OPINION-ZZZ"))
+    )
+    with c:
+        tid = seed(tmp_path, key="Б")
+        attempt(c, tid, "Б")
+        said["answer"] = "В"
+        r = post(c, tid, "explain", mode="table").json()
+        assert "SECOND-OPINION-ZZZ" not in json.dumps(r, ensure_ascii=False)
+        assert r["explains"] == []
+        assert r["solution"]["answer"] == "Б" and "уточняется у родителя" in r["solution"]["note"]
+        found = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["model_discrepancies"]
+        assert found and found[-1]["model_answer"] == "В"
+
+
+def test_a_run_started_before_the_key_changed_is_replaced(tmp_path):
+    """After the parent corrects the key an old solved run must not show the old answer (P2)."""
+    c, _clock, _model = boot(tmp_path)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        assert attempt(c, tid, "Б").json()["solution"]["answer"] == "Б"
+        conn = db(tmp_path)
+        from app.ingest.answers import key_json
+
+        conn.execute(
+            "UPDATE task_item SET answer_key = ?, key_version = key_version + 1 WHERE id = ?",
+            (key_json("В", "single"), tid),
+        )
+        fresh = view(c, tid)
+        assert fresh["state"] == "new" and fresh["solution"] is None
+        assert "исправили" in fresh["correction"]
+        assert "уточняется" not in json.dumps(fresh, ensure_ascii=False)
+        assert attempt(c, tid, "Б").json()["state"] == "attempted_wrong"  # старый ответ не верен
+        done = attempt(c, tid, "В").json()
+        assert done["solution"]["answer"] == "В" and done["repeat"] is True
+        old_events = [e for e in events(tmp_path, "attempt") if e["data"]["key_version"] == 1]
+        assert len(old_events) == 1  # прежние события на месте
+
+
+def test_no_key_solution_never_claims_correctness(tmp_path):
+    claims = "Верно, это митохондрия. Она даёт энергию. Правильный ответ подтверждён."
+
+    def reply(kind, content):
+        return out("Б", claims)
+
+    c, _clock, _model = boot(tmp_path, Scripted(reply=reply))
+    with c:
+        tid = seed(
+            tmp_path,
+            key=None,
+            model_answer="Б",
+            model_explanation="Верно, это ДНК. Она хранит код.",
+        )
+        done = attempt(c, tid, "Б").json()
+        text = json.dumps(done["solution"], ensure_ascii=False).lower()
+        assert "верно" not in text and "правильн" not in text
+        assert "хранит код" in text
+        got = post(c, tid, "explain", mode="simpler").json()
+        shown = json.dumps(got["explains"], ensure_ascii=False).lower()
+        assert "верно" not in shown and "правильн" not in shown
+        assert "даёт энергию" in shown

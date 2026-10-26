@@ -58,7 +58,7 @@ def _is_fragment(request: Request) -> bool:
 def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, notice=None):
     app = request.app
     task, material = _published(conn, task_id)
-    run = state.latest_run(conn, task_id)
+    run = state.active_run(conn, task)
     clock = app.state.clock
     view = build_view(
         conn, task, material, run, clock(),
@@ -156,7 +156,7 @@ def _respond_json(request, conn, task_id):
     task, material = _published(conn, task_id)
     app = request.app
     view = build_view(
-        conn, task, material, state.latest_run(conn, task_id), app.state.clock(),
+        conn, task, material, state.active_run(conn, task), app.state.clock(),
         inflight=app.state.inflight,
     )  # fmt: skip
     return JSONResponse(view)
@@ -167,7 +167,7 @@ def tutor_fragment(task_id: int, request: Request, conn: Db):
     task, material = _published(conn, task_id)
     app = request.app
     view = build_view(
-        conn, task, material, state.latest_run(conn, task_id), app.state.clock(),
+        conn, task, material, state.active_run(conn, task), app.state.clock(),
         inflight=app.state.inflight,
     )  # fmt: skip
     return TEMPLATES.TemplateResponse(
@@ -182,7 +182,7 @@ def task_page(task_id: int, request: Request, conn: Db):
     with atomic(conn):  # экран открыт: с этого момента идут 60 секунд до подсказки 1
         state.ensure_run(conn, task_id, app.state.clock())
     view = build_view(
-        conn, task, material, state.latest_run(conn, task_id), app.state.clock(),
+        conn, task, material, state.active_run(conn, task), app.state.clock(),
         inflight=app.state.inflight,
     )  # fmt: skip
     return TEMPLATES.TemplateResponse(request, "child/task.html", {"v": view, "task": view["task"]})

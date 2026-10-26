@@ -4,6 +4,9 @@ CREATE TABLE tutor_run (
     id INTEGER PRIMARY KEY,
     task_item_id INTEGER NOT NULL REFERENCES task_item (id) ON DELETE CASCADE,
     session_id INTEGER REFERENCES study_session (id) ON DELETE SET NULL,
+    -- Ревизия и версия ключа, по которым идёт этот прогон: после правки родителя начинается новый.
+    revision INTEGER NOT NULL DEFAULT 1,
+    key_version INTEGER NOT NULL DEFAULT 1,
     is_repeat INTEGER NOT NULL DEFAULT 0 CHECK (is_repeat IN (0, 1)),
     state TEXT NOT NULL DEFAULT 'new' CHECK (state IN (
         'new', 'attempted_wrong', 'hint1', 'hint2', 'hint3', 'solved', 'solved_unknown',

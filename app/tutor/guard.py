@@ -2,9 +2,14 @@
 
 1. Разметка: всё, что похоже на HTML, вырезается, остальное экранируется; из Markdown
    разрешены только абзацы, списки, **жирный**, *курсив* и `код`. Ссылки и картинки - в текст.
-2. Верный вариант: подсказка или разбор, которые его называют, заменяются общей подсказкой.
-   Фильтр по обозначениям - дополнительная мера: главная защита - сервер не отдаёт ответ.
-3. teacher_note: его фразы в выводе модели ребёнку не показываются никогда.
+2. Верный вариант (до открытия решения): текст модели ОТКЛОНЯЕТСЯ и заменяется общей подсказкой,
+   если он содержит ЛЮБОЙ признак ответа: обозначение верного варианта как отдельное слово,
+   значимое слово его текста (которого нет в условии), число эталона цифрами или словами,
+   слова «верн*/правильн*/ответ*» рядом с обозначением или словом варианта. Это не список
+   формулировок, а закрытие по составу слов: проходит только текст без таких признаков.
+3. teacher_note: ни его фразы, ни пары «обозначение + слово» ребёнку не показываются никогда.
+4. Без ключа в решении и «объясни иначе» предложения с «верно/правильно/правильный» вырезаются:
+   ответ модели не проверен, утверждать его верность нельзя.
 """
 
 import html
@@ -86,43 +91,66 @@ def plain(text: str) -> str:
 
 # ----------------------------------------------------------------------- утечки
 
-_TOKEN = re.compile(r"(?<![\w])(?:[A-ZА-ЯЁ]|\d{1,2})(?![\w])")
-_AFTER_WORD = re.compile(
-    r"(?:вариант\w*|ответ\w*|пункт\w*|цифр\w*|№|номер\w*)\W{0,3}([A-Za-zА-Яа-яЁё])(?![\w])",
-    re.IGNORECASE,
-)
-_CUE = re.compile(
-    r"(?<![Нн]е)(?<![Нн]е )(?:верн\w*|правильн\w*|подходит|подходящ\w*|ответ\w*|решени\w*|"
-    r"выбира\w*|выбери\w*|единственн\w*)",
-    re.IGNORECASE,
-)
-_NUMBER = re.compile(r"(?<![\w.,])\d+(?:[.,]\d+)?(?![\w])")
+_TOKENS = re.compile(r"[0-9a-zа-я]+")
+_NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+CUES = ("верн", "правильн", "ответ")
+CUE_RANGE = 3
+
+_UNITS = ["ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять"]
+_TEENS = ["десять", "одиннадцать", "двенадцать", "тринадцать", "четырнадцать", "пятнадцать",
+          "шестнадцать", "семнадцать", "восемнадцать", "девятнадцать"]  # fmt: skip
+_TENS = ["", "", "двадцать", "тридцать", "сорок", "пятьдесят", "шестьдесят", "семьдесят",
+         "восемьдесят", "девяносто"]  # fmt: skip
+_HUNDREDS = ["", "сто", "двести", "триста", "четыреста", "пятьсот", "шестьсот", "семьсот",
+             "восемьсот", "девятьсот"]  # fmt: skip
+
+
+def number_words(n: int) -> list[str]:
+    """Число 0..1000 словами (именительный падеж), по словам."""
+    if n == 1000:
+        return ["тысяча"]
+    out = []
+    if n >= 100:
+        out.append(_HUNDREDS[n // 100])
+        n %= 100
+    if n >= 20:
+        out.append(_TENS[n // 10])
+        n %= 10
+        if n:
+            out.append(_UNITS[n])
+    elif n >= 10:
+        out.append(_TEENS[n - 10])
+    elif n or not out:
+        out.append(_UNITS[n])
+    return out
+
+
+def tokens_of(text: str) -> list[str]:
+    return _TOKENS.findall((text or "").lower().replace("ё", "е"))
+
+
+def _stem(word: str) -> str:
+    return word[:5]
+
+
+def _is_word(tok: str) -> bool:
+    return len(tok) >= 4 and tok.isalpha()
 
 
 def _label(raw: str) -> str | None:
     return normalize_answer(raw, "single")
 
 
-def _mentions(text: str) -> list[tuple[str, int, int]]:
-    found = []
-    for m in _TOKEN.finditer(text):
-        label = _label(m.group(0))
-        if label:
-            found.append((label, m.start(), m.end()))
-    for m in _AFTER_WORD.finditer(text):
-        label = _label(m.group(1))
-        if label:
-            found.append((label, m.start(1), m.end(1)))
-    return found
+def _label_of_token(tok: str) -> str | None:
+    return _label(tok) if len(tok) <= 2 else None
 
 
-def _option_texts(options) -> dict[str, str]:
-    items = []
+def _options_flat(options) -> list[dict]:
     if isinstance(options, list):
-        items = options
-    elif isinstance(options, dict):
-        items = [o for side in options.values() for o in side]
-    return {_label(o["label"]) or o["label"]: " ".join(o["text"].lower().split()) for o in items}
+        return options
+    if isinstance(options, dict):
+        return [o for side in options.values() for o in side]
+    return []
 
 
 def _flat(value) -> list[str]:
@@ -130,56 +158,135 @@ def _flat(value) -> list[str]:
         return [value]
     if isinstance(value, list):
         return list(value)
+    if isinstance(value, dict):
+        return [str(v) for v in value.values()] + [str(k) for k in value]
     return []
 
 
-def _norm(text: str) -> str:
-    return re.sub(r"[\s\-–—:]+", " ", text.lower()).strip()
+def _same_word(tok: str, word: str) -> bool:
+    return tok.startswith(word[: max(3, len(word) - 3)])
+
+
+def _number_words_in(toks: list[str], words: list[str]) -> bool:
+    """Все слова числа по порядку, с промежутком не более одного слова."""
+    for start, tok in enumerate(toks):
+        if not _same_word(tok, words[0]):
+            continue
+        at, ok = start, True
+        for word in words[1:]:
+            nxt = next(
+                (i for i in range(at + 1, min(len(toks), at + 3)) if _same_word(toks[i], word)),
+                None,
+            )
+            if nxt is None:
+                ok = False
+                break
+            at = nxt
+        if ok:
+            return True
+    return False
 
 
 def note_segments(note: str | None) -> list[str]:
-    parts = re.split(r"[.;,\n]+", note or "")
-    return [_norm(p) for p in parts if len(_norm(p)) >= 5]
+    parts = (" ".join(tokens_of(p)) for p in re.split(r"[.;,\n]+", note or ""))
+    return [p for p in parts if len(p) >= 5]
+
+
+def note_pairs(note: str | None) -> list[tuple[str, str]]:
+    """Пары (обозначение, значимое слово) из каждой фразы пояснения: «3 - лепесток»."""
+    pairs = []
+    for part in re.split(r"[.;,\n]+", note or ""):
+        toks = tokens_of(part)
+        labels = [t for t in toks if (t.isdigit() and len(t) <= 2) or (len(t) == 1 and t.isalpha())]
+        words = [_stem(t) for t in toks if _is_word(t)]
+        pairs.extend((lab, w) for lab in labels for w in words)
+    return pairs
+
+
+def note_reason(text: str, note: str | None) -> str | None:
+    if not note:
+        return None
+    toks = tokens_of(text)
+    joined = " ".join(toks)
+    if any(seg in joined for seg in note_segments(note)):
+        return "note"
+    have = set(toks)
+    stems = {_stem(t) for t in toks if _is_word(t)}
+    for lab, word in note_pairs(note):
+        if lab in have and word in stems:
+            return "note_pair"
+    return None
 
 
 def leaks_note(text: str, note: str | None) -> bool:
-    body = _norm(text)
-    return any(seg in body for seg in note_segments(note))
+    return note_reason(text, note) is not None
 
 
-def names_answer(text: str, task_type: str, options, reference) -> bool:
-    """Текст называет вариант верным или содержит эталонный ответ."""
-    body = plain(text)
-    mentions = _mentions(body)
-    texts = _option_texts(options)
-    lowered = " ".join(body.lower().split())
-    # 1. любое обозначение рядом со словами «верный», «ответ», «подходит» (не «неверный»)
-    for _, start, end in mentions:
-        if _CUE.search(body[max(0, start - 30) : end + 30]):
-            return True
-    if reference is None:
-        return False
-    # 2. эталонный ответ
-    if task_type == "numeric":
+def answer_reason(
+    text: str, task_type: str, options, reference, condition: str = "", own=()
+) -> str | None:
+    """Почему текст нельзя показывать до открытия решения; None - признаков ответа нет."""
+    toks = tokens_of(text)
+    if not toks:
+        return None
+    items = _options_flat(options)
+    all_labels = {x for o in items if (x := _label(o["label"]))}
+    own = set(own)
+    correct = {x for v in _flat(reference) if (x := _label(v))} if task_type != "numeric" else set()
+    # 1. обозначение верного варианта как отдельное слово, в любом регистре
+    if any(lab in correct for lab in (_label_of_token(t) for t in toks) if lab):
+        return "label"
+    # 2. значимые слова текста верного варианта: их нет в условии и не у всех вариантов
+    cond = {_stem(t) for t in tokens_of(condition) if _is_word(t)}
+    per_option = [{_stem(t) for t in tokens_of(o["text"]) if _is_word(t)} for o in items]
+    common = set.intersection(*per_option) if per_option else set()
+    banned: set[str] = set()
+    for o in items:
+        if _label(o["label"]) in correct:
+            banned |= {_stem(t) for t in tokens_of(o["text"]) if _is_word(t)}
+    banned -= cond | common
+    if banned & {_stem(t) for t in toks if _is_word(t)}:
+        return "option_word"
+    # 3. число эталона цифрами и словами (и числовое обозначение варианта словами)
+    wanted = []
+    if task_type == "numeric" and reference is not None:
         want = normalize_answer(reference, "numeric")
-        return any(normalize_answer(n, "numeric") == want for n in _NUMBER.findall(body))
-    if task_type == "match" and isinstance(reference, dict):
-        for left, right in reference.items():
-            pair = re.compile(
-                rf"(?<![\w]){re.escape(left)}\W{{0,8}}{re.escape(right)}(?![\w])", re.IGNORECASE
-            )
-            if pair.search(body):
-                return True
-        return False
-    named = set(_flat(reference))
-    if any(label in named for label, _, _ in mentions):
-        return True
-    # 3. текст верного варианта
-    return any(
-        len(texts.get(label, "")) >= 4 and texts[label] in lowered
-        for label in named
-        if label in texts
-    )
+        found = _NUMBER.findall(text.replace("ё", "е"))
+        if any(normalize_answer(n, "numeric") == want for n in found):
+            return "number"
+        wanted = [want]
+    wanted += [lab for lab in correct if lab.isdigit()]
+    for want in wanted:
+        spelled = want and re.fullmatch(r"\d+", want) and int(want) <= 1000
+        if spelled and _number_words_in(toks, number_words(int(want))):
+            return "number"
+    # 4. «верн*/правильн*/ответ*» рядом с обозначением или словом любого варианта
+    option_words = {_stem(t) for o in items for t in tokens_of(o["text"]) if _is_word(t)}
+    for i, tok in enumerate(toks):
+        if not tok.startswith(CUES) or (i and toks[i - 1] == "не"):
+            continue
+        for j in range(max(0, i - CUE_RANGE), min(len(toks), i + CUE_RANGE + 1)):
+            if j == i:
+                continue
+            lab = _label_of_token(toks[j])
+            if lab and lab in all_labels and lab not in own:
+                return "cue"
+            if _is_word(toks[j]) and _stem(toks[j]) in option_words:
+                return "cue"
+    return None
+
+
+def names_answer(text: str, task_type: str, options, reference, condition: str = "") -> bool:
+    return answer_reason(plain(text), task_type, options, reference, condition) is not None
+
+
+_CLAIM = re.compile(r"(?<![\w])(верн\w*|правильн\w*)", re.IGNORECASE)
+
+
+def strip_claims(text: str) -> str:
+    """Предложения с «верно/правильно/правильный» вырезаются (ответ модели не проверен)."""
+    parts = re.split(r"(?<=[.!?])\s+|\n+", plain(text))
+    return "\n".join(p for p in parts if p.strip() and not _CLAIM.search(p))
 
 
 def finish(
@@ -191,16 +298,23 @@ def finish(
     note: str | None,
     *,
     reveal: bool = False,
-) -> tuple[str, bool]:
-    """(безопасный HTML, заменено ли общей подсказкой). reveal=True - решение уже открыто:
-    ответ называть можно, пояснение к рисунку - нет."""
+    keyed: bool = True,
+    condition: str = "",
+    own=(),
+) -> tuple[str, str | None]:
+    """(безопасный HTML, причина отклонения или None). reveal=True - решение уже открыто:
+    ответ называть можно, пояснение к рисунку - нет; без ключа утверждения о верности вырезаются."""
     body = plain(text)
-    bad = leaks_note(body, note) or (
-        not reveal and names_answer(body, task_type, options, reference)
-    )
-    if bad or not body.strip():
-        return render_markdown(GENERIC.get(kind, GENERIC["explain"])), True
-    return render_markdown(text), False
+    reason = note_reason(body, note)
+    if reason is None and not reveal:
+        reason = answer_reason(body, task_type, options, reference, condition, own)
+    if reason is None and reveal and not keyed:
+        text = strip_claims(text)
+        if not text.strip():
+            reason = "claims"
+    if reason or not body.strip():
+        return render_markdown(GENERIC.get(kind, GENERIC["explain"])), reason or "empty"
+    return render_markdown(text), None
 
 
 def dumps(value) -> str:

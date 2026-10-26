@@ -15,7 +15,7 @@ from app.ingest.publish import assist_mode
 from app.ingest.store import atomic, get_task, options_of
 from app.sessions import IDLE_TIMEOUT
 from app.tutor.check import BadAnswer, parse_answer
-from app.tutor.guard import render_markdown
+from app.tutor.guard import leaks_note, render_markdown, strip_claims
 from app.tutor.outcomes import outcome_label
 
 TERMINAL = ("solved", "solved_unknown", "hint3", "answer_shown")
@@ -84,17 +84,47 @@ def get_run(conn, run_id: int):
     return conn.execute("SELECT * FROM tutor_run WHERE id = ?", (run_id,)).fetchone()
 
 
-def _new_run(conn, task_id: int, now: datetime, repeat: bool):
+def _new_run(conn, task, now: datetime, repeat: bool):
     cur = conn.execute(
-        "INSERT INTO tutor_run (task_item_id, session_id, is_repeat, opened_at) VALUES (?, ?, ?, ?)",
-        (task_id, session_id_for(conn, now), int(repeat), iso(now)),
+        "INSERT INTO tutor_run (task_item_id, session_id, revision, key_version, is_repeat, "
+        "opened_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            task["id"],
+            session_id_for(conn, now),
+            task["revision"],
+            task["key_version"],
+            int(repeat),
+            iso(now),
+        ),
     )
     return get_run(conn, cur.lastrowid)
 
 
-def ensure_run(conn, task_id: int, now: datetime):
+def _current(run, task) -> bool:
+    return run is not None and (run["revision"], run["key_version"]) == (
+        task["revision"],
+        task["key_version"],
+    )
+
+
+def active_run(conn, task, now: datetime | None = None):
+    """Прогон по ТЕКУЩИМ ревизии и версии ключа. Прогон, начатый до правки родителя, устарел:
+    его решение показывало бы старый ответ. С `now` вместо него начинается новый (после решённого -
+    с пометкой «повтор»), без `now` возвращается None."""
+    run = latest_run(conn, task["id"])
+    if _current(run, task):
+        return run
+    if now is None:
+        return None
     with atomic(conn):
-        return latest_run(conn, task_id) or _new_run(conn, task_id, now, False)
+        run = latest_run(conn, task["id"])
+        if _current(run, task):
+            return run
+        return _new_run(conn, task, now, run is not None and is_terminal(run))
+
+
+def ensure_run(conn, task_id: int, now: datetime):
+    return active_run(conn, get_task(conn, task_id), now)
 
 
 def reference(task):
@@ -136,7 +166,10 @@ def initial_solution(task, keyed: bool) -> dict:
     }
     if not keyed and task["model_answer"]:
         text = json.loads(task["model_answer"]).get("explanation") or ""
-        sol["explanation_html"] = render_markdown(text) if text.strip() else None
+        figure = json.loads(task["figure"]) if task["figure"] else {}
+        text = strip_claims(text)  # ответ модели не проверен: «верно/правильно» не утверждаем
+        if text.strip() and not leaks_note(text, (figure or {}).get("teacher_note")):
+            sol["explanation_html"] = render_markdown(text)
     return sol
 
 
@@ -152,7 +185,7 @@ def record_attempt(conn, task_id: int, raw, confidence, now: datetime) -> dict:
     conf = _confidence(confidence)
     with atomic(conn):
         task = get_task(conn, task_id)
-        run = latest_run(conn, task_id) or _new_run(conn, task_id, now, False)
+        run = active_run(conn, task, now)
         if is_terminal(run):
             raise Refused(409, "closed", "Это задание уже разобрано. Можно разобрать его ещё раз.")
         try:
@@ -216,7 +249,7 @@ def record_attempt(conn, task_id: int, raw, confidence, now: datetime) -> dict:
 def begin_hint(conn, task_id: int, level, confirm: bool, now: datetime):
     """Проверка очередности и барьеров; возвращает прогон. Ничего не пишет."""
     task = get_task(conn, task_id)
-    run = latest_run(conn, task_id) or ensure_run(conn, task_id, now)
+    run = active_run(conn, task, now)
     if is_terminal(run):
         raise Refused(409, "closed", "Решение уже открыто.")
     nxt = run["hints"] + 1
@@ -242,7 +275,9 @@ def begin_hint(conn, task_id: int, level, confirm: bool, now: datetime):
     return run
 
 
-def store_hint(conn, run_id: int, level: int, html: str, generic: bool, uncertainty: str, now):
+def store_hint(
+    conn, run_id: int, level: int, html: str, generic: bool, uncertainty: str, now, reason=None
+):
     """Записать подсказку 1 или 2, если прогон не ушёл вперёд за время запроса к модели."""
     with atomic(conn):
         run = get_run(conn, run_id)
@@ -255,7 +290,8 @@ def store_hint(conn, run_id: int, level: int, html: str, generic: bool, uncertai
             (level, f"hint{level}", json.dumps(hints, ensure_ascii=False), run_id),
         )
         add_event(conn, now, "hint", run["task_item_id"], {
-            "level": level, "generic": generic, "uncertainty": uncertainty, "text": html,
+            "level": level, "generic": generic, "rejected_by": reason, "uncertainty": uncertainty,
+            "text": html,
             "run": run_id, "repeat": bool(run["is_repeat"]),
         })  # fmt: skip
         return True
@@ -288,7 +324,7 @@ def show_answer(conn, task_id: int, confirm: bool, now):
     """«Показать ответ» в режиме «только проверка по ключу» после двух проверок."""
     with atomic(conn):
         task = get_task(conn, task_id)
-        run = latest_run(conn, task_id) or _new_run(conn, task_id, now, False)
+        run = active_run(conn, task, now)
         if assist_mode(task) != "key_only":
             raise Refused(409, "not_key_only", "Здесь ответ показывается по подсказкам.")
         if is_terminal(run):
@@ -317,15 +353,16 @@ def show_answer(conn, task_id: int, confirm: bool, now):
 
 def start_repeat(conn, task_id: int, now):
     with atomic(conn):
-        run = latest_run(conn, task_id)
+        task = get_task(conn, task_id)
+        run = active_run(conn, task)
         if run is None or not is_terminal(run):
             raise Refused(409, "not_solved", "Повторить можно задание, которое уже разобрано.")
-        return _new_run(conn, task_id, now, True)
+        return _new_run(conn, task, now, True)
 
 
 def dispute_key(conn, task_id: int, now):
     with atomic(conn):
-        run = latest_run(conn, task_id)
+        run = active_run(conn, get_task(conn, task_id))
         if run is None or not is_terminal(run):
             raise Refused(409, "not_solved", "Отметить ключ спорным можно, когда решение открыто.")
         add_event(conn, now, "disputed_key", task_id, {"from_child": True, "run": run["id"]})
@@ -352,7 +389,9 @@ def merge_solution(conn, run_id: int, **fields) -> None:
         update_run_json(conn, run_id, "solution_json", sol)
 
 
-def store_analysis(conn, run_id: int, attempts: int, html: str, generic: bool, uncertainty: str):
+def store_analysis(
+    conn, run_id: int, attempts: int, html: str, generic: bool, uncertainty: str, reason=None
+):
     """Разбор ошибки; пишется, только если с тех пор не было новой попытки."""
     with atomic(conn):
         run = get_run(conn, run_id)
@@ -360,7 +399,7 @@ def store_analysis(conn, run_id: int, attempts: int, html: str, generic: bool, u
             return
         update_run_json(
             conn, run_id, "analysis_json",
-            {"html": html, "generic": generic, "uncertainty": uncertainty},
+            {"html": html, "generic": generic, "rejected_by": reason, "uncertainty": uncertainty},
         )  # fmt: skip
 
 

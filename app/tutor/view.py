@@ -53,8 +53,20 @@ def build_view(
     shown = panel_state if panel_state and panel_state != "idle" else live
     if assist == "key_only" and shown == "idle":
         shown = "idle"
+    correction = None
+    if not terminal and attempts == 0:
+        stale = conn.execute(
+            "SELECT 1 FROM tutor_run WHERE task_item_id = ? AND closed_at IS NOT NULL "
+            "AND (revision <> ? OR key_version <> ?) LIMIT 1",
+            (task["id"], task["revision"], task["key_version"]),
+        ).fetchone()
+        if stale:
+            correction = (
+                "Задание или ключ к нему исправили после твоей прошлой попытки: разбираем заново."
+            )
     return {
         "ok": True,
+        "correction": correction,
         "state": current,
         "terminal": terminal,
         "repeat": bool(run["is_repeat"]) if run else False,

@@ -13,6 +13,7 @@
       <p class="hint">{{ task.source }} · рисунок к заданию {{ task.number }}</p>
     </dialog>
     {% endif %}
+    {% if v.correction %}<p class="notice-line" role="status">{{ v.correction }}</p>{% endif %}
     <p>{{ task.text }}</p>
     <div class="hint">
       {% if v.has_key %}есть ключ ответов{% else %}ключа нет: я сверяю с ответом модели, он не проверен{% endif %}
