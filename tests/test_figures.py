@@ -876,3 +876,28 @@ def test_key_and_options_edit_work_after_the_material_file_is_deleted(tmp_path):
         r = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"options": new_opts})
         assert r.status_code == 200, r.text
         assert detail(c, tid)["figure"]["confirmed"] is True
+
+
+def test_after_the_pdf_is_deleted_a_key_change_still_rechecks_the_alt(tmp_path):
+    """Review finding (T08 gen 2): skipping the recheck when the PDF is gone also skipped the alt
+    check, and the child saw the answer letter in the picture description."""
+    with figure_client(tmp_path, "raster") as c:
+        tid = task_ids(tmp_path)[0]
+        alt = "Стрелка указывает на часть В органа"
+        assert confirm_figure(c, tid, alt=alt).status_code == 200
+        r = c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={"answer": "Б"})
+        assert r.status_code == 200, r.text
+        r = c.post(
+            f"/parent/materials/{c.material_id}/delete",
+            headers=PARENT,
+            data={"confirm": "1"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        r = c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": "В"})
+        assert r.status_code == 200, r.text
+        assert detail(c, tid)["figure"]["confirmed"] is False
+        assert row(tmp_path, tid)["import_status"] == "unsupported"
+        c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={})
+        page = c.get(f"/tasks/{tid}", headers=CHILD)
+        assert alt not in page.text

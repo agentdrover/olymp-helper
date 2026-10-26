@@ -293,6 +293,8 @@ class _Shared:
     def __init__(self, ctx, conn, material_id: int, prepared: dict | None = None):
         self.ctx, self.conn, self.material_id = ctx, conn, material_id
         self.prepared = prepared or {}
+        # файл удалён родителем: текст рамок читать неоткуда, проверка alt идёт без него
+        self.gone = material_file_gone(ctx, conn, material_id)
         self.tasks = {
             t["id"]: t
             for t in conn.execute("SELECT * FROM task_item WHERE material_id = ?", (material_id,))
@@ -349,7 +351,9 @@ def recheck_figure(
     try:
         regions = figures.regions_of(figure)
         found = []
-        if regions:
+        if regions and shared.gone:
+            found = list(figure.get("leak") or [])  # вырезку не перечитать: прежнее найденное
+        elif regions:
             found = shared.leaks(task, regions)
         alt_bad = figures.alt_problem(
             figure.get("alt", ""), options_of(task), shared.labels[task_id]
@@ -378,12 +382,7 @@ def recheck_material_figures(ctx, conn, task_id: int, prepared: dict | None = No
     другого задания материала, поэтому уже подтверждённые рисунки соседей проходят проверку заново.
     prepared - prepare_crop_lines, выполненный до транзакции."""
     task = get_task(conn, task_id)
-    # сгенерированное задание: материала и рисунков нет; файл материала удалён: PDF не открывать
-    if (
-        task is None
-        or task["material_id"] is None
-        or material_file_gone(ctx, conn, task["material_id"])
-    ):
+    if task is None or task["material_id"] is None:  # сгенерированное: материала и рисунков нет
         return
     shared = _Shared(ctx, conn, task["material_id"], prepared)
     try:
@@ -400,8 +399,6 @@ def recheck_materials_figures(ctx, conn, material_ids) -> None:
     утечки включает ответы остальных заданий материала. Решение родителя об ответе в вырезке
     остаётся, если найденное не изменилось."""
     for material_id in sorted(material_ids):
-        if material_file_gone(ctx, conn, material_id):
-            continue
         shared = _Shared(ctx, conn, material_id)
         try:
             for task_id in shared.confirmed():
