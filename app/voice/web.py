@@ -1,5 +1,7 @@
 """Маршрут голоса (ребёнок): запись -> текст для поля ввода. Текст НЕ уходит модели сам: ребёнок
-правит его и отправляет сам. Те же замки, что у остальных POST ребёнка: свой источник, JSON,
+правит его и отправляет сам. Голос только распознаёт запись локально и модель не зовёт, поэтому
+замок `Inflight` задания его не касается: у распознавания своя очередь на 1 задачу
+(VoiceService), а отправленный в чат текст замок `Inflight` берёт. Те же замки, что у остальных POST ребёнка: свой источник, JSON,
 уведомление прочитано. Аудио приходит в JSON (base64): так остаётся защита по типу содержимого."""
 
 import base64
@@ -41,11 +43,21 @@ async def _body(request: Request) -> bytes:
     return b"".join(chunks)
 
 
+def decoded_size(b64: str) -> int:
+    """Размер записи после декодирования, считается по длине base64 без самого декодирования."""
+    return len(b64) * 3 // 4 - (b64.endswith("==") + b64.endswith("="))
+
+
 def _audio(raw: bytes) -> tuple[bytes, str]:
     bad = VoiceError("bad_request", 422, "Не получилось отправить запись. Запиши ещё раз.")
     try:
         body = json.loads(raw)
-        data = base64.b64decode(body["audio"], validate=True)
+        encoded = body["audio"]
+        if not isinstance(encoded, str):
+            raise TypeError
+        if decoded_size(encoded) > MAX_BYTES:  # ровно 2 МБ проходят, больше - до декодирования
+            raise VoiceError("too_big", 413, "Запись больше 2 МБ. Запиши короче.")
+        data = base64.b64decode(encoded, validate=True)
         mime = str(body.get("mime") or "")
     except (ValueError, KeyError, TypeError, binascii.Error):
         raise bad from None

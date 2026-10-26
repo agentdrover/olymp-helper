@@ -230,3 +230,65 @@ def test_a_failed_model_shows_the_panel_state_not_a_reply(tmp_path):
         r = say(c, tid, "Привет?")
         assert r.status_code == 200 and r.json()["panel"]["state"] == "down"
         assert r.json()["chat"] == [] and events(tmp_path, "chat") == []
+
+
+PARAPHRASE = "ПЕРЕФРАЗ-ОТВЕТА: органоид с двумя мембранами, где идёт дыхание"
+
+
+def test_the_judge_reads_the_quotes_as_part_of_the_visible_response(tmp_path):
+    book = "Митохондрии — энергия клетки. " + PARAPHRASE
+    _mid, ids = textbook(tmp_path, {5: book})
+
+    def judge(content):  # clean reply text, but the quote beside it gives the answer away
+        return {"reveals": "ПЕРЕФРАЗ" in Scripted.candidate(None, content), "reason": "цитата"}
+
+    model = Scripted(default=chat_reply("Посмотри в учебнике.", citations=[ids[5]]), judge=judge)
+    c, model, _v, _a = boot_chat(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        r = say(c, tid, "Что такое митохондрии?")
+        item = r.json()["chat"][-1]
+        assert item["citations"] == [] and "ПЕРЕФРАЗ" not in shown(r)
+        assert not item["withheld"] and "Посмотри" in item["reply"]  # the text itself was fine
+        assert any("ПЕРЕФРАЗ" in Scripted.candidate(None, j["content"]) for j in model.judge_calls)
+
+    # a quote the judge approves is shown, and the judge sees it later as already shown
+    _mid, ids = textbook(tmp_path / "b", {5: "Митохондрии — энергия клетки. ЦИТАТА-БЕЗОБИДНАЯ"})
+    model = Scripted(default=chat_reply("Смотри.", citations=[ids[5]]))
+    c, model, _v, _a = boot_chat(tmp_path / "b", model)
+    with c:
+        tid = seed(tmp_path / "b", key="Б")
+        assert say(c, tid, "Что такое митохондрии?").json()["chat"][-1]["citations"]
+        say(c, tid, "Что такое митохондрии ещё раз?")
+        assert "ЦИТАТА-БЕЗОБИДНАЯ" in block_of(model.judge_calls[-1]["content"], "shown_data")
+
+
+def test_the_judge_never_sees_an_older_session_reply(tmp_path):
+    model = Scripted(default=chat_reply("СТАРЫЙ-ОТВЕТ про энергию."))
+    c, model, _v, _a = boot_chat(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        say(c, tid, "первый вопрос")
+        c.clock.advance(31 * 60)  # the session closes by idle; the task run goes on
+        model.default = chat_reply("НОВЫЙ-ОТВЕТ про клетку.")
+        say(c, tid, "второй вопрос")
+        assert "СТАРЫЙ-ОТВЕТ" not in block_of(model.judge_calls[-1]["content"], "shown_data")
+        say(c, tid, "третий вопрос")
+        assert "НОВЫЙ-ОТВЕТ" in block_of(model.judge_calls[-1]["content"], "shown_data")
+
+
+def test_a_new_run_starts_with_an_empty_chat(tmp_path):
+    def reply(kind, content):
+        return out("Б", "Решение.") if kind == "solution" else chat_reply("Ответ: Б, ВОТ-РЕШЕНИЕ.")
+
+    c, model, _v, _a = boot_chat(tmp_path, Scripted(reply=reply))
+    with c:
+        tid = seed(tmp_path, key="Б")
+        assert attempt(c, tid, "Б").json()["terminal"] is True
+        r = say(c, tid, "СТАРЫЙ-ВОПРОС")
+        assert "ВОТ-РЕШЕНИЕ" in shown(r)
+        fresh = c.post(f"/tasks/{tid}/repeat", json={}, headers=CHILD).json()
+        assert fresh["terminal"] is False and fresh["chat"] == [] and fresh["compose"] == []
+        say(c, tid, "новый вопрос")
+        assert "СТАРЫЙ-ВОПРОС" not in model.calls[-1]["content"]
+        assert "ВОТ-РЕШЕНИЕ" not in model.calls[-1]["content"]

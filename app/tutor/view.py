@@ -65,7 +65,9 @@ def build_view(
             correction = (
                 "Задание или ключ к нему исправили после твоей прошлой попытки: разбираем заново."
             )
-    chat = chat_store.screen_items(conn, chat_store.open_session(conn, now), task["id"])
+    chat = chat_store.screen_items(
+        conn, chat_store.open_session(conn, now), task["id"], run["id"] if run else None
+    )
     return {
         "ok": True,
         "correction": correction,

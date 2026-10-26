@@ -27,7 +27,7 @@ from app.ingest.store import atomic, get_task
 from app.search.textbook import search_textbooks
 from app.tutor import state
 from app.tutor.flow import Flow
-from app.tutor.guard import plain, prefilter_reason, render_markdown, strip_claims, strip_markup
+from app.tutor.guard import plain, prefilter_reason, strip_claims, strip_markup
 from app.tutor.panel import failure_state
 from app.tutor.prompts import ModelOutputError
 from app.tutor.state import Refused
@@ -81,7 +81,7 @@ class ChatFlow(Flow):
     def _exchange(self, task, run, mode: str, message: str) -> None:
         with state.atomic(self.conn):
             self.session = state.session_id_for(self.conn, self.now)
-        history = store.history_for_model(self.conn, self.session, task["id"])
+        history = store.history_for_model(self.conn, self.session, task["id"], run["id"])
         fragments = []
         if mode == "chat":
             fragments = search_textbooks(self.conn, f"{message} {task['text']}")
@@ -90,29 +90,36 @@ class ChatFlow(Flow):
         out = self._generate(*args)
         if out is None:
             return
-        reply, suggestions, reason = out.reply, out.suggestions, None
+        reply, suggestions, citations, reason = out.reply, out.suggestions, [], None
         if opened is None:
-            text = "\n".join([reply, *suggestions])
             for attempt in (0, 1):
-                reason, feedback = self._check_text(task, run, text, mode, ())
-                if reason is None:
-                    break
-                if attempt == 1 or reason == "judge_unavailable":
+                citations = self._citations(task, out, fragments, reveal=False)
+                reason, feedback = self._check_visible(task, run, mode, out, citations)
+                if reason and citations and reason != "judge_unavailable":
+                    # the quotes may be what gives the answer away: try the same text without them
+                    bare, _ = self._check_visible(task, run, mode, out, [])
+                    if bare is None:
+                        citations, reason = [], None
+                if reason is None or attempt == 1 or reason == "judge_unavailable":
                     break
                 again = self._generate(*args, feedback=feedback)
                 if again is None:
                     break
                 out = again
-                reply, suggestions = again.reply, again.suggestions
-                text = "\n".join([reply, *suggestions])
+            reply, suggestions = out.reply, out.suggestions
         else:
             reply, reason = self._open_text(task, reply)
+            citations = self._citations(task, out, fragments, reveal=True)
         if reason:
             reply, suggestions, citations = GENERIC[mode], [], []
         else:
-            citations = self._citations(task, out, fragments, reveal=opened is not None)
             suggestions = [strip_markup(s) for s in suggestions]
         self._store(task, run, mode, message, reply, suggestions, citations, reason)
+
+    def _check_visible(self, task, run, mode, out, citations) -> tuple[str | None, str]:
+        """The leak check sees the COMPLETE visible response: reply, wordings and every quote."""
+        text = "\n".join([out.reply, *out.suggestions, *(c["quote"] for c in citations)])
+        return self._check_text(task, run, text, mode, ())
 
     def _open_text(self, task, reply: str) -> tuple[str, str | None]:
         """Решение открыто: ответ называть можно; без ключа утверждения о верности вырезаются."""
@@ -146,17 +153,18 @@ class ChatFlow(Flow):
         return picked[:MAX_CITATIONS]
 
     def _store(self, task, run, mode, message, reply, suggestions, citations, reason) -> None:
+        # What the child can read, as one text: the judge reads it in later requests of the
+        # same session and run (Flow._verdict), never an older session's.
+        visible = "\n".join([reply, *suggestions, *(c["quote"] for c in citations)])
         data = {
             "mode": mode,
+            "run_id": run["id"],
             "question": message,
             "reply": reply,
             "suggestions": suggestions,
             "citations": citations,
+            "visible": visible,
             "withheld": reason,
         }
         with atomic(self.conn):
             state.add_event(self.conn, self.now, "chat", task["id"], data)
-            if not reason:  # показанное ребёнку читает судья в следующих запросах
-                state._remember(
-                    self.conn, run["id"], render_markdown("\n".join([reply, *suggestions]))
-                )

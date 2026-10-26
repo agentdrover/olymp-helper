@@ -31,11 +31,26 @@ VOICE_STATES = {
     "too_long": f"Запись длиннее {MAX_SECONDS} с. Запиши ещё раз, покороче.",
 }
 
-# Тип записи определяет браузер (MediaRecorder.isTypeSupported); принимаем то, что он выдаёт.
-ACCEPTED = {
-    "audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav", "audio/x-wav",
-    "audio/aac", "video/webm", "video/mp4",
-}  # fmt: skip
+# Тип записи определяет браузер (MediaRecorder.isTypeSupported). Принимаем WebM (Chrome, Firefox),
+# Ogg и MP4/M4A (Safari, audio/mp4). Тип из запроса ничего не решает: формат определяют первые
+# байты, и именно этот демультиплексор ffmpeg получает принудительно (-f).
+ACCEPTED = {"audio/webm", "video/webm", "audio/ogg", "audio/mp4", "video/mp4"}
+DEMUXERS = {
+    "webm": "matroska,webm",
+    "ogg": "ogg",
+    "mp4": "mov,mp4,m4a,3gp,3g2,mj2",
+}
+
+
+def sniff(data: bytes) -> str | None:
+    """webm | ogg | mp4 по магическим байтам; всё остальное (манифесты, списки, текст) - None."""
+    if data[:4] == b"\x1a\x45\xdf\xa3":  # EBML: WebM / Matroska
+        return "webm"
+    if data[:4] == b"OggS":
+        return "ogg"
+    if data[4:8] == b"ftyp":  # MP4 / M4A
+        return "mp4"
+    return None
 
 
 class VoiceError(Exception):
@@ -50,20 +65,20 @@ class RecognizerTimeout(Exception):
     """Распознавание не уложилось во время."""
 
 
-def _run(cmd: list[str], timeout: float) -> tuple[int, str]:
+def _run(cmd: list[str], timeout: float, data: bytes | None = None) -> tuple[int, str]:
     """Запуск в своей группе процессов: по таймауту убивается вся группа, а не только оболочка."""
     proc = subprocess.Popen(
-        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        start_new_session=True, text=True,
+        cmd, stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
     )  # fmt: skip
     try:
-        out, _ = proc.communicate(timeout=max(timeout, 0.1))
+        out, _ = proc.communicate(data, timeout=max(timeout, 0.1))
     except subprocess.TimeoutExpired:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)
         proc.communicate()
         raise RecognizerTimeout from None
-    return proc.returncode, out or ""
+    return proc.returncode, (out or b"").decode("utf-8", "replace")
 
 
 class VoiceService:
@@ -115,23 +130,24 @@ class VoiceService:
             raise VoiceError("unsupported", 415, "Такой формат записи не поддерживается.")
         if len(data) > MAX_BYTES:
             raise VoiceError("too_big", 413, "Запись больше 2 МБ. Запиши короче.")
+        fmt = sniff(data)
+        if fmt is None:  # манифест, список воспроизведения, текст: до ffmpeg не доходит
+            raise VoiceError("bad_audio", 422, "Не получилось разобрать запись. Запиши ещё раз.")
         if not self._slot.acquire(blocking=False):
             raise VoiceError("busy", 409, "Подожди: я ещё распознаю прошлую запись.")
         try:
-            return self._pipeline(data)
+            return self._pipeline(data, fmt)
         finally:
             self._slot.release()
 
-    def _pipeline(self, data: bytes) -> tuple[str, float]:
+    def _pipeline(self, data: bytes, fmt: str) -> tuple[str, float]:
         if self.workdir is not None:
             self.workdir.mkdir(parents=True, exist_ok=True)
         work = Path(tempfile.mkdtemp(prefix="voice-", dir=self.workdir))
         deadline = time.monotonic() + self.timeout_s
         try:
-            src, wav = work / "in.audio", work / "out.wav"
-            src.write_bytes(data)
-            del data
-            seconds = self._convert(src, wav, deadline)
+            wav = work / "out.wav"
+            seconds = self._convert(data, fmt, wav, deadline)
             text = self._transcribe(wav, deadline)
             return text, seconds
         except RecognizerTimeout:
@@ -141,14 +157,18 @@ class VoiceService:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def _convert(self, src: Path, wav: Path, deadline: float) -> float:
+    def _convert(self, data: bytes, fmt: str, wav: Path, deadline: float) -> float:
+        """Вход идёт в ffmpeg только через stdin с принудительным демультиплексором и белым
+        списком протоколов `pipe`: содержимое записи не может открыть ни файл, ни сеть.
+        Длина ограничена `-t`: дольше MAX_SECONDS + доли секунды не конвертируется."""
         cmd = [
-            self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-            "-t", str(MAX_SECONDS + 1), "-vn", "-ac", "1", "-ar", str(RATE),
+            self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-protocol_whitelist", "pipe", "-f", DEMUXERS[fmt], "-i", "pipe:0",
+            "-t", str(MAX_SECONDS + SECONDS_SLACK + 0.1), "-vn", "-ac", "1", "-ar", str(RATE),
             "-c:a", "pcm_s16le", "-f", "wav", str(wav),
         ]  # fmt: skip
         try:
-            code, _ = _run(cmd, deadline - time.monotonic())
+            code, _ = _run(cmd, deadline - time.monotonic(), data)
         except FileNotFoundError:
             raise VoiceError(
                 "unavailable", 503, "Голос сейчас не работает. Напиши вопрос."

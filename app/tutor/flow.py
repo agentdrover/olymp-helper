@@ -14,6 +14,7 @@
 import json
 from datetime import datetime
 
+from app.chat import store as chat_store
 from app.ingest.answers import display
 from app.ingest.publish import assist_mode
 from app.ingest.store import figure_of, get_task
@@ -121,7 +122,8 @@ class Flow:
             text,
             _answer_text(ref, options),
             purpose,
-            shown=json.loads(fresh["shown_json"]),
+            shown=json.loads(fresh["shown_json"])
+            + chat_store.visible_texts(self.conn, self.session, task["id"], run["id"]),
             attempts=json.loads(fresh["attempts_json"]),
         )
         try:

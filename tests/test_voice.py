@@ -173,3 +173,55 @@ def test_voice_goes_through_the_same_gates_as_the_other_child_posts(tmp_path):
         tid = seed(tmp_path / "n", key="Б")
         r = voice_post(c2, tid)
         assert r.status_code == 403 and r.json()["detail"]["error"] == "notice_required"
+
+
+SPY = '#!/bin/sh\necho "$@" >> {log}\nexec ffmpeg "$@"\n'
+
+
+def _spied(tmp_path):
+    log = tmp_path / "ffmpeg.log"
+    script = tmp_path / "ffmpeg-spy.sh"
+    script.write_text(SPY.format(log=log))
+    script.chmod(0o755)
+    voice = VoiceService(Recognizer(), workdir=tmp_path / "w", ffmpeg=str(script))
+    return voice, log
+
+
+def test_hostile_payloads_are_refused_before_ffmpeg(tmp_path):
+    voice, log = _spied(tmp_path)
+    c, _model, _voice, _audio = boot_chat(tmp_path / "app", voice=voice)
+    with c:
+        tid = seed(tmp_path / "app", key="Б")
+        payloads = [
+            b'<?xml version="1.0"?><MPD><BaseURL>file:///etc/hosts</BaseURL></MPD>',
+            b"#EXTM3U\n#EXT-X-VERSION:3\nfile:///etc/hosts\n",
+            b"ffconcat version 1.0\nfile '/etc/hosts'\n",
+            b"RIFF\0\0\0\0WAVE" + b"file:///etc/hosts",
+        ]
+        for data in payloads:
+            r = voice_post(c, tid, data=data)
+            assert r.status_code == 422 and r.json()["code"] == "bad_audio", data[:12]
+        assert not log.exists()  # ffmpeg was never started
+        # the real recording still converts, with a forced demuxer and the pipe protocol only
+        assert voice_post(c, tid).status_code == 200
+        args = log.read_text()
+        assert "-protocol_whitelist pipe" in args and "-f matroska,webm" in args
+        assert "-i pipe:0" in args and "-nostdin" in args and "-t 30.6" in args
+
+
+def test_the_size_limit_is_computed_before_the_audio_is_decoded(tmp_path, monkeypatch):
+    from app.voice import web
+
+    c, _model, _voice, _audio = boot_chat(tmp_path, recognizer=Recognizer())
+    with c:
+        tid = seed(tmp_path, key="Б")
+        calls = []
+        real = web.base64.b64decode
+        monkeypatch.setattr(
+            web.base64, "b64decode", lambda *a, **k: calls.append(1) or real(*a, **k)
+        )
+        r = voice_post(c, tid, data=b"\0" * (MAX_BYTES + 1))
+        assert r.status_code == 413 and r.json()["code"] == "too_big" and calls == []
+        # exactly 2 MiB is within the limit: it is decoded, and then refused as not audio
+        r = voice_post(c, tid, data=b"\0" * MAX_BYTES)
+        assert r.status_code == 422 and calls == [1]

@@ -25,25 +25,36 @@ def open_session(conn, now: datetime) -> int | None:
     return row[0] if row else None
 
 
-def exchanges(conn, session_id: int | None, task_id: int, limit: int) -> list[dict]:
-    if session_id is None:
+def exchanges(conn, session_id: int | None, task_id: int, run_id: int | None, limit: int):
+    """Обмены этого занятия, этого задания и ЭТОГО прогона: новый прогон (повтор, правка
+    родителя) начинается с пустого чата, открытое решение старого в нём не видно."""
+    if session_id is None or run_id is None:
         return []
     rows = conn.execute(
         "SELECT data FROM event WHERE type = 'chat' AND session_id = ? AND task_item_id = ? "
-        "ORDER BY id DESC LIMIT ?",
-        (session_id, task_id, limit),
+        "AND json_extract(data, '$.run_id') = ? ORDER BY id DESC LIMIT ?",
+        (session_id, task_id, run_id, limit),
     ).fetchall()
     return [json.loads(r[0]) for r in reversed(rows) if r[0]]
 
 
-def history_for_model(conn, session_id: int | None, task_id: int) -> list[dict]:
+def history_for_model(conn, session_id: int | None, task_id: int, run_id: int | None):
     return [
         {"question": x["question"], "reply": x["reply"]}
-        for x in exchanges(conn, session_id, task_id, HISTORY_FOR_MODEL)
+        for x in exchanges(conn, session_id, task_id, run_id, HISTORY_FOR_MODEL)
     ]
 
 
-def screen_items(conn, session_id: int | None, task_id: int) -> list[dict]:
+def visible_texts(conn, session_id: int | None, task_id: int, run_id: int | None) -> list[str]:
+    """Всё, что ребёнок прочёл в чате этого занятия и прогона: это видит судья."""
+    return [
+        f"Уже показано в чате: {x['visible']}"
+        for x in exchanges(conn, session_id, task_id, run_id, HISTORY_ON_SCREEN)
+        if x.get("visible") and not x.get("withheld")
+    ]
+
+
+def screen_items(conn, session_id: int | None, task_id: int, run_id: int | None) -> list[dict]:
     """Что показать в панели: ответ - безопасный HTML из Markdown, подсказки - обычный текст."""
     return [
         {
@@ -54,7 +65,7 @@ def screen_items(conn, session_id: int | None, task_id: int) -> list[dict]:
             "suggestions": x.get("suggestions", []),
             "withheld": bool(x.get("withheld")),
         }
-        for x in exchanges(conn, session_id, task_id, HISTORY_ON_SCREEN)
+        for x in exchanges(conn, session_id, task_id, run_id, HISTORY_ON_SCREEN)
     ]
 
 

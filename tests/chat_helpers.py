@@ -29,6 +29,7 @@ _counter = itertools.count(1)
 
 def textbook(tmp_path, pages: dict[int, str], kind="textbook"):
     """(material_id, {page: search id}). The search id is the FTS row id the server hands out."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     seed_state(tmp_path / "olymp.db")  # the schema exists before the app boots
     conn = db(tmp_path)
     try:
@@ -82,8 +83,10 @@ def boot_chat(tmp_path, model=None, recognizer=None, voice=None, notice=True):
     audio.mkdir(parents=True, exist_ok=True)
     if voice is None:
         voice = VoiceService(recognizer or Recognizer(), workdir=audio)
-    app = build_app(tmp_path, model, clock=Clock(), notice=notice, voice=voice)
+    clock = Clock()
+    app = build_app(tmp_path, model, clock=clock, notice=notice, voice=voice)
     c = TestClient(app)
+    c.clock = clock  # the tests move time
     c.__enter__()
     return c, model, voice, audio
 
