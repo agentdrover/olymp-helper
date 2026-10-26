@@ -396,11 +396,45 @@ def record_discrepancy(conn, task, run_id: int, out, now) -> None:
 
 
 def is_disputed(conn, task) -> bool:
+    """Ответ модели расходится с ключом и родитель ещё не разобрал расхождение: объяснение
+    модели ребёнку не показывается. Расхождение бывает и до первой попытки (SPEC 1.2): тогда
+    оно лежит в model_answer задания."""
+    ref, keyed = reference(task)
+    if keyed and task["model_answer"]:
+        seen = model_value(task)
+        if seen != ref and task["discrepancy_ack"] != json.dumps(seen, ensure_ascii=False):
+            return True
     return (
         conn.execute(
             "SELECT 1 FROM tutor_discrepancy WHERE task_item_id = ? AND revision = ? "
-            "AND key_version = ? LIMIT 1",
+            "AND key_version = ? AND resolved_at IS NULL LIMIT 1",
             (task["id"], task["revision"], task["key_version"]),
         ).fetchone()
         is not None
     )
+
+
+def resolve_discrepancies(conn, task_id: int) -> None:
+    """Родитель разобрал расхождение в ленте проверки."""
+    conn.execute(
+        "UPDATE tutor_discrepancy SET resolved_at = ? WHERE task_item_id = ? AND resolved_at IS NULL",
+        (iso(datetime.now(UTC)), task_id),
+    )
+
+
+def discrepancies(conn, task_id: int) -> list[dict]:
+    """Записи расхождений для родителя: ответ и объяснение модели."""
+    rows = conn.execute(
+        "SELECT * FROM tutor_discrepancy WHERE task_item_id = ? ORDER BY id", (task_id,)
+    ).fetchall()
+    return [
+        {
+            "model_answer": json.loads(r["model_answer"]),
+            "explanation": r["explanation"],
+            "uncertainty": r["uncertainty"],
+            "revision": r["revision"],
+            "key_version": r["key_version"],
+            "resolved": r["resolved_at"] is not None,
+        }
+        for r in rows
+    ]

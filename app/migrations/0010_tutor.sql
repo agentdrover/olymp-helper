@@ -34,6 +34,8 @@ CREATE TABLE tutor_discrepancy (
     model_answer TEXT NOT NULL CHECK (json_valid(model_answer)),
     explanation TEXT NOT NULL,
     uncertainty TEXT NOT NULL CHECK (uncertainty IN ('low', 'high')),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- Родитель разобрал расхождение («ключ прав» или свой ответ): объяснение модели снова допустимо.
+    resolved_at TEXT
 );
 CREATE INDEX idx_tutor_discrepancy_task ON tutor_discrepancy (task_item_id, revision, key_version);

@@ -38,7 +38,9 @@ def test_ac6(tmp_path):
             def reply(kind, content, text=text):
                 return out("Б", text)
 
-            c, _clock, _model = boot(tmp_path / f"{keyed}{NAMING.index(text)}", Scripted(reply=reply))
+            c, _clock, _model = boot(
+                tmp_path / f"{keyed}{NAMING.index(text)}", Scripted(reply=reply)
+            )
             with c:
                 tid = seed(
                     tmp_path / f"{keyed}{NAMING.index(text)}",

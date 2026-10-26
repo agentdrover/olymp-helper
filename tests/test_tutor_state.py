@@ -131,6 +131,17 @@ def test_ac4(tmp_path):
         # родитель видит расхождение в данных задания
         parent = c.get(f"/parent/tasks/{tid}", headers=PARENT)
         assert parent.status_code == 200
+        found = parent.json()["model_discrepancies"]
+        assert (
+            found
+            and found[-1]["model_answer"] == "В"
+            and found[-1]["explanation"] == "EXPLAIN-V-ZZZ"
+        )
+        # расхождение, которое уже лежит в задании до первой попытки, тоже скрывает объяснение
+        early = seed(tmp_path, key="Б", model_answer="В", model_explanation="EARLY-ZZZ")
+        solved = attempt(c, early, "Б").json()["solution"]
+        assert solved["answer"] == "Б" and "уточняется у родителя" in solved["note"]
+        assert "EARLY-ZZZ" not in str(solved)
         # «объясни иначе» по спорному ключу ребёнку объяснения модели не отдаёт
         r = post(c, tid, "explain", mode="simpler")
         assert "EXPLAIN-V-ZZZ" not in r.text
@@ -187,3 +198,18 @@ def test_uncertainty_is_stored_and_validated(tmp_path):
                 pass
             else:
                 raise AssertionError(bad)
+
+
+def test_parent_resolution_reopens_explanations(tmp_path):
+    c, _clock, model = boot(tmp_path, Scripted(reply=lambda k, content: out("В", "EXPLAIN-V-ZZZ")))
+    with c:
+        tid = seed(tmp_path, key="Б")
+        attempt(c, tid, "Б")
+        assert post(c, tid, "explain", mode="simpler").json()["explains"] == []
+        calls = len(model.calls)
+        r = c.post(f"/parent/tasks/{tid}/resolve", headers=PARENT, json={"choice": "key"})
+        assert r.status_code == 200, r.text
+        found = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["model_discrepancies"]
+        assert found and all(d["resolved"] for d in found)
+        got = post(c, tid, "explain", mode="simpler").json()
+        assert len(model.calls) == calls + 1 and got["explains"][0]["mode"] == "simpler"

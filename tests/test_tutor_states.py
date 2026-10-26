@@ -17,7 +17,7 @@ def test_ac21(tmp_path):
     # 1. запрос в работе: второй не уходит, проверка по ключу работает
     model = Blocking()
     model.release.set()
-    c, clock, _ = boot(_p(tmp_path, "a"), model)
+    c, _clock, _ = boot(_p(tmp_path, "a"), model)
     with c:
         tid = seed(_p(tmp_path, "a"), key="Б")
         attempt(c, tid, "А")
