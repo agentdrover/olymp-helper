@@ -33,6 +33,9 @@ class ImportJobs:
         self._clock = clock  # одни часы с ImportProgress; тесты подставляют свои
         self._tick = poll if poll is not None else max(0.02, min(1.0, stall / 5))
         self._threads: list[threading.Thread] = []
+        # запись run_id в базу и захват записи хода - одно действие: при двух почти
+        # одновременных повторах последний владелец в базе совпадает с владельцем записи
+        self._owner_lock = threading.Lock()
 
     def _new_run(self, material_id: int) -> str:
         """Новый запуск получает свой run_id: результат пишет только его владелец."""
@@ -45,8 +48,9 @@ class ImportJobs:
         return run_id
 
     def submit(self, material_id: int) -> None:
-        run_id = self._new_run(material_id)
-        self.ctx.progress.claim(material_id, run_id)
+        with self._owner_lock:
+            run_id = self._new_run(material_id)
+            self.ctx.progress.claim(material_id, run_id)
         if self.sync:
             run_import(self.ctx, material_id, threading.Event(), run_id)
             return

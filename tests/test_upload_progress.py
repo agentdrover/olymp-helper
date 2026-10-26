@@ -387,3 +387,46 @@ def test_the_writing_phase_is_shown_with_its_own_text(tmp_path):
     assert progress_text({"phase": "reading", "chunk": 0, "chunks": 0, "accepted": 0}) == (
         "Читаем страницы"
     )
+
+
+def test_two_near_simultaneous_requeues_leave_one_owner(tmp_path, monkeypatch):
+    """Codex round 4: run A writes its run_id and pauses, run B writes and claims, then A claims
+    over B - B loses its entry and its heartbeats are ignored. The DB write and the claim are one
+    step under a lock, so the owner in the database is always the owner of the progress entry."""
+    import threading
+
+    from app.ingest import jobs as jobs_module
+
+    clock = FakeClock()
+    app = clocked_app(tmp_path, ClockedModel(clock), clock, import_stall=30.0)
+    with TestClient(app) as c:
+        upload(c, two_pages())
+        jobs = app.state.imports
+        jobs.wait_idle(5)
+        monkeypatch.setattr(jobs_module, "run_import", lambda *a, **k: None)
+        real_new_run = jobs._new_run
+        paused, resume = threading.Event(), threading.Event()
+        calls = []
+
+        def new_run(material_id):
+            run_id = real_new_run(material_id)
+            calls.append(run_id)
+            if len(calls) == 1:
+                paused.set()
+                resume.wait(1.0)  # A pauses after its DB write; with the lock B cannot slip in
+            return run_id
+
+        monkeypatch.setattr(jobs, "_new_run", new_run)
+        a = threading.Thread(target=jobs.submit, args=(1,))
+        b = threading.Thread(target=jobs.submit, args=(1,))
+        a.start()
+        assert paused.wait(5)
+        b.start()
+        b.join(0.3)
+        assert len(calls) == 1  # B waits for A to finish its claim
+        resume.set()
+        a.join(5)
+        b.join(5)
+        owner = current_run(tmp_path)
+        assert owner == calls[-1]
+        assert app.state.ctx.progress.snapshot(1, owner) is not None
