@@ -107,3 +107,42 @@ def test_parent_logout_ends_the_parent_session(tmp_path):
         assert back.headers["location"] == "/parent/login"
         # запрос скрипта без входа по-прежнему получает 403
         assert c.get("/parent/review").status_code == 403
+
+
+def test_the_upload_form_has_labelled_fields_and_a_file_zone(tmp_path):
+    c, _ = started(tmp_path)
+    with c:
+        html = c.get("/parent/materials", headers=PARENT).text
+    form = re.search(r'<form id="upload".*?</form>', html, re.DOTALL).group(0)
+    assert 'name="csrf"' in form and 'type="hidden"' in form
+    assert 'class="dropzone"' in form
+    for name in ("file", "kind", "year", "stage", "variant"):
+        tag = re.search(rf"<(?:input|select)[^>]*\bname=\"{name}\"[^>]*>", form)
+        assert tag, name
+        field_id = re.search(r'\bid="([^"]+)"', tag.group(0))
+        assert field_id, name
+        assert re.search(rf'<label[^>]*\bfor="{field_id.group(1)}"', form), name
+
+
+def _css_rule(css, selector_part):
+    for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+        if selector_part in [s.strip() for s in m.group(1).split(",")]:
+            yield m.group(2)
+
+
+def test_controls_share_one_height_and_select_is_styled():
+    from pathlib import Path
+
+    css = Path(__file__).resolve().parents[1].joinpath("app/static/app.css").read_text()
+    heights = {}
+    for sel in ("input", "select", "textarea"):
+        found = [re.search(r"min-height:\s*([\w.]+)", body) for body in _css_rule(css, sel)]
+        found = [f.group(1) for f in found if f]
+        assert found, sel
+        heights[sel] = found[0]
+    assert len(set(heights.values())) == 1, heights
+    select_css = " ".join(_css_rule(css, "select"))
+    assert "appearance: none" in select_css or "appearance:none" in select_css
+    assert "-webkit-appearance: none" in select_css or "-webkit-appearance:none" in select_css
+    primary = " ".join(_css_rule(css, "button.primary"))
+    assert "var(--accent)" in primary

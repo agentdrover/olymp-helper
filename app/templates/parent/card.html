@@ -68,14 +68,14 @@
         <button data-action="edit">Поправить (E)</button>
         {% if card.kind != "open_exclude" %}<button data-action="exclude">Исключить</button>{% endif %}
       </p>
-      <div id="edit-panel" hidden>
-        <p><textarea id="edit-text" rows="5" cols="50">{{ card.text }}</textarea></p>
-        <p><label>Тема <select id="edit-topic">
+      <div id="edit-panel" class="fields" hidden>
+        <div class="field"><label for="edit-text">Текст задания</label><textarea id="edit-text" rows="5">{{ card.text }}</textarea></div>
+        <div class="field"><label for="edit-topic">Тема</label><select id="edit-topic">
           <option value="">не размечено</option>
           {% for t in card.topics %}<option value="{{ t.code }}"{% if t.code == card.topic %} selected{% endif %}>{{ t.title }}</option>{% endfor %}
-        </select></label></p>
-        <label><input type="checkbox" id="manual"> самодостаточное условие (без рисунка)</label>
-        <button data-action="save-edit">Сохранить правку</button>
+        </select></div>
+        <label class="check-row"><input type="checkbox" id="manual"> самодостаточное условие (без рисунка)</label>
+        <div class="form-actions"><button class="primary" data-action="save-edit">Сохранить правку</button></div>
       </div>
       <p class="err" id="error" role="alert"></p>
     </div>
