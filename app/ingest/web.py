@@ -8,7 +8,7 @@ from typing import Annotated
 
 import pymupdf
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -18,19 +18,13 @@ from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
 from app.ingest.publish import child_view, is_published
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
-from app.roles import (
-    COOKIE,
-    PARENT,
-    current_role,
-    key_matches,
-    parent_key,
-    parent_token,
-    require_parent,
-)
+from app.notice import notice_redirect, notice_seen
+from app.roles import PARENT, csrf_token, current_role, require_csrf, require_parent
 from app.search import search
 from app.search.tasks import search_published_tasks
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
+TEMPLATES.env.globals["csrf_token"] = csrf_token
 KINDS = ("tasks", "key", "textbook")
 PAGE_SCALE = 1.5
 TYPE_LABELS = {
@@ -40,7 +34,7 @@ TYPE_LABELS = {
     "numeric": "число",
 }
 
-parent = APIRouter(dependencies=[Depends(require_parent)])
+parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)])
 public = APIRouter()
 
 
@@ -70,34 +64,6 @@ def _refusal(exc: Refusal) -> JSONResponse:
 def start_page(request: Request):
     """Две двери: ребёнку и родителю. Банк не читается — на странице нет данных."""
     return TEMPLATES.TemplateResponse(request, "start.html", {})
-
-
-@public.get("/parent/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    return TEMPLATES.TemplateResponse(request, "parent/login.html", {"error": None})
-
-
-@public.post("/parent/login")
-def login(request: Request, key: Annotated[str, Form()] = ""):
-    if not key_matches(key):
-        page = TEMPLATES.TemplateResponse(
-            request, "parent/login.html", {"error": "Неверный ключ или вход не настроен."}
-        )
-        page.status_code = 403
-        return page
-    response = RedirectResponse("/parent/review", status_code=303)
-    response.set_cookie(
-        COOKIE, parent_token(parent_key()), httponly=True, samesite="strict", path="/"
-    )
-    return response
-
-
-@parent.post("/parent/logout")
-def logout():
-    """Выход родителя: cookie стирается, дальше - стартовая страница."""
-    response = RedirectResponse("/", status_code=303)
-    response.delete_cookie(COOKIE, path="/", httponly=True, samesite="strict")
-    return response
 
 
 # --------------------------------------------------------------------- материалы
@@ -132,8 +98,13 @@ def upload_material(
     conn = open_db(ctx.db_path)
     try:
         existing = conn.execute(
-            "SELECT id, import_status FROM material WHERE sha256 = ?", (sha,)
+            "SELECT id, import_status, deleted_at FROM material WHERE sha256 = ?", (sha,)
         ).fetchone()
+        if existing is not None and existing["deleted_at"] is not None:
+            return JSONResponse(
+                {"error": "Этот материал удалён вместе с файлом; подтверждённые задания остались."},
+                status_code=409,
+            )
         if existing is not None:
             requeued = existing["import_status"] == "failed"
             if requeued:
@@ -190,8 +161,10 @@ def material_status(material_id: int, conn: Db):
 
 
 def _material_file(request: Request, conn, material_id: int) -> Path:
-    row = conn.execute("SELECT file, sha256 FROM material WHERE id = ?", (material_id,)).fetchone()
-    if row is None:
+    row = conn.execute(
+        "SELECT file, sha256, deleted_at FROM material WHERE id = ?", (material_id,)
+    ).fetchone()
+    if row is None or row["deleted_at"] is not None:
         raise HTTPException(404, "Материал не найден")
     return ctx_of(request).material_path(row["file"]), row["sha256"]
 
@@ -458,6 +431,9 @@ def tasks_page(request: Request, conn: Db):
 @public.get("/tasks/{task_id}", response_class=HTMLResponse)
 def task_page(task_id: int, request: Request, conn: Db):
     task, material = _published(task_id=task_id, conn=conn)
+    # Первое задание ребёнка - после уведомления о внешней модели (SPEC 1.6).
+    if current_role(request) != PARENT and not notice_seen(conn):
+        return notice_redirect(f"/tasks/{task_id}")
     return TEMPLATES.TemplateResponse(
         request, "child/task.html", {"task": child_view(task, material)}
     )

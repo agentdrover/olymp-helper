@@ -128,7 +128,10 @@ def confirm_figure(
     material = conn.execute(
         "SELECT file FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
-    doc = pymupdf.open(str(ctx.material_path(material["file"])))
+    source = ctx.material_path(material["file"])
+    if not source.exists():
+        raise Refusal("Файл материала удалён: рамку рисунка уже не поправить.", 409)
+    doc = pymupdf.open(str(source))
     try:
         page_no = figure["page"]
         regions = figures.regions_of(figure)
@@ -220,6 +223,9 @@ def prepare_crop_lines(ctx, conn, material_id: int) -> dict:
     tasks = [(t, regions) for t, regions in tasks if regions]
     if not tasks:
         return {}
+    material = conn.execute("SELECT file FROM material WHERE id = ?", (material_id,)).fetchone()
+    if not ctx.material_path(material["file"]).exists():
+        return {}  # файл удалён родителем: строк вырезок для сверки нет
     with contextlib.closing(_open_material(ctx, conn, material_id)) as doc:
         return {t["id"]: (regions, figures.region_lines(doc, regions)) for t, regions in tasks}
 

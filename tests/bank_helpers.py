@@ -1,25 +1,25 @@
 """Shared builders for the task-bank tests: PDFs built on the fly, a stub model, app factory."""
 
 import hashlib
-import hmac
 import sqlite3
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pymupdf
 
+from app.db import connect, migrate
 from app.main import create_app
 from app.model.types import ModelResult
 
 TEST_PARENT_KEY = "test-parent-key"
 
 
-def parent_cookie(key: str) -> str:
-    """Independent of the app: what a correct parent cookie must be."""
-    return hmac.new(key.encode(), b"parent", hashlib.sha256).hexdigest()
-
-
-PARENT = {"Cookie": "olymp_parent=" + parent_cookie(TEST_PARENT_KEY)}
+# A parent session seeded straight into the database by build_app: the cookie value is the raw
+# session id (the table keeps only its sha256), the header is the session's CSRF token.
+TEST_SID = "test-session-id-0123456789abcdef"
+TEST_CSRF = "test-csrf-token-0123456789abcdef"
+PARENT = {"Cookie": f"olymp_parent={TEST_SID}", "X-CSRF-Token": TEST_CSRF}
 CHILD: dict = {}
 FONT = pymupdf.Font("helv")
 
@@ -199,9 +199,32 @@ class BlockingModel:
 # ------------------------------------------------------------------ app helpers
 
 
-def build_app(tmp_path, model=None, **kw):
+def seed_state(path, *, parent=True, notice=True) -> None:
+    """Prepare a fresh database the way a logged-in parent and a child who read the notice
+    would find it, without going through the login screens."""
+    conn = connect(path)
+    try:
+        migrate(conn)
+        if parent:
+            now = datetime.now(UTC).isoformat()
+            conn.execute(
+                "INSERT OR REPLACE INTO parent_session (id_hash, csrf_token, created_at, "
+                "last_seen_at) VALUES (?, ?, ?, ?)",
+                (hashlib.sha256(TEST_SID.encode()).hexdigest(), TEST_CSRF, now, now),
+            )
+        if notice:
+            conn.execute(
+                "UPDATE settings SET child_notice_seen_at = ? WHERE id = 1",
+                (datetime.now(UTC).isoformat(),),
+            )
+    finally:
+        conn.close()
+
+
+def build_app(tmp_path, model=None, *, parent=True, notice=True, **kw):
     tmp_path.mkdir(parents=True, exist_ok=True)
     kw.setdefault("sync_imports", True)
+    seed_state(tmp_path / "olymp.db", parent=parent, notice=notice)
     return create_app(db_path=tmp_path / "olymp.db", model=model, **kw)
 
 

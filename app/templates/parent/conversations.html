@@ -1,0 +1,18 @@
+{% extends "base_parent.html" %}
+{% block title %}Переписка{% endblock %}
+{% block content %}
+<h1>Переписка</h1>
+<p class="hint">Переписка хранится 180 дней, итоги занятий — бессрочно. Здесь её можно удалить раньше.</p>
+<div class="panel"><table>
+  <thead><tr><th scope="col">Занятие</th><th scope="col">Начало</th><th scope="col">Сообщений</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
+  {% for s in sessions %}
+  <tr>
+    <td>№{{ s.id }}</td><td>{{ s.started_at[:16].replace("T", " ") }}</td><td>{{ s.messages }}</td>
+    <td>{% if s.messages %}<a href="/parent/conversations/{{ s.id }}/delete">Удалить переписку</a>{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4">Занятий пока нет.</td></tr>
+  {% endfor %}
+</table></div>
+{% if total %}<p><a class="btn" href="/parent/conversations/delete">Удалить всю переписку ({{ total }})</a></p>{% endif %}
+{% endblock %}

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Олимпиадный помощник{% endblock %}</title>
 <link rel="stylesheet" href="/static/app.css">
+{% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}role-bare{% endblock %}">
 {% block shell %}<main class="bare">{% block content %}{% endblock %}</main>{% endblock %}

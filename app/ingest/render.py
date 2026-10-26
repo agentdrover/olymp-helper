@@ -20,7 +20,21 @@ class PageCache:
         self._lock = threading.Lock()
 
     def _path(self, key: str) -> Path:
-        return self.root / (hashlib.sha256(key.encode("utf-8")).hexdigest() + ".png")
+        # Ключ страницы начинается с хэша материала: по этой приставке кэш чистится при
+        # удалении материала.
+        group = key.split(":", 1)[0] if ":" in key else ""
+        prefix = f"{group}-" if group else ""
+        return self.root / (prefix + hashlib.sha256(key.encode("utf-8")).hexdigest() + ".png")
+
+    def discard(self, group: str) -> int:
+        """Убрать из кэша все страницы материала с этим хэшем."""
+        removed = 0
+        with self._lock:
+            if self.root.is_dir():
+                for entry in self.root.glob(f"{group}-*.png"):
+                    entry.unlink(missing_ok=True)
+                    removed += 1
+        return removed
 
     def get(self, key: str, render: Callable[[], bytes]) -> bytes:
         path = self._path(key)
