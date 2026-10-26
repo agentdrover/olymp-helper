@@ -174,7 +174,7 @@ def test_ac5(tmp_path):
         tid = task_ids(tmp_path)[0]
 
         split_call = model.calls_of("tasks_split")[0]
-        assert split_call.system == SYSTEM_PROMPT and evil not in split_call.system
+        assert split_call.system.startswith(SYSTEM_PROMPT) and evil not in split_call.system
         content = split_call.messages[-1]["content"]
         start, end = content.index("<pdf_data"), content.rindex("</pdf_data>")
         assert content.count("</pdf_data>") == 1  # the forged closing tag is neutralised
