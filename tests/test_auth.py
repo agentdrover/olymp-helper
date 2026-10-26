@@ -288,3 +288,17 @@ def test_html_pages_redirect_a_browser_to_the_pin_screen(tmp_path, path):
     with TestClient(fresh(tmp_path)) as c:
         r = c.get(path, headers={"Accept": "text/html"}, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/parent/login"
+
+
+def test_every_parent_post_form_carries_the_csrf_field(tmp_path):
+    """A plain HTML form cannot send the X-CSRF-Token header: without the hidden field the
+    browser gets 403 on submit (found when G2's pack form met T08)."""
+    with TestClient(build_app(tmp_path, StubModel())) as c:
+        for path in ("/parent/materials", "/parent/generate", "/parent/settings"):
+            html = c.get(path, headers=PARENT).text
+            forms = re.findall(
+                r"<form\b[^>]*method=\"post\"[^>]*>(.*?)</form>", html, re.DOTALL | re.IGNORECASE
+            )
+            assert forms, path
+            for body in forms:
+                assert 'name="csrf"' in body, path
