@@ -152,8 +152,13 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
 
 
 @parent.get("/parent/materials", response_class=HTMLResponse)
-def materials_page(request: Request, conn: Db, msg: str = ""):
-    return _materials_view(request, conn, flash=FLASH.get(msg))
+def materials_page(request: Request, conn: Db, msg: str = "", id: int = 0):
+    flash = FLASH.get(msg)
+    if msg in ("queued", "requeued"):  # «разбор идёт» - только пока он правда идёт
+        row = conn.execute("SELECT import_status FROM material WHERE id = ?", (id,)).fetchone()
+        if row is None or row["import_status"] not in ("queued", "running"):
+            flash = None
+    return _materials_view(request, conn, flash=flash)
 
 
 @parent.post("/parent/materials")
@@ -174,7 +179,9 @@ def upload_material(
     if "error" in body:
         return _materials_view(request, conn, error=body["error"], status=answer.status_code)
     code = "requeued" if body.get("requeued") else "duplicate" if body["duplicate"] else "queued"
-    return RedirectResponse(f"/parent/materials?msg={code}", status_code=303)
+    return RedirectResponse(
+        f"/parent/materials?msg={code}&id={body['material_id']}", status_code=303
+    )
 
 
 def _store_upload(

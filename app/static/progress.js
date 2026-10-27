@@ -27,7 +27,7 @@
           }
           if (!reloading) {
             reloading = true;
-            location.reload(); // готово или упало: страница покажет итог и отчёт о пропусках
+            location.replace(location.pathname); // готово или упало: страница покажет итог и отчёт о пропусках
           }
         })
         .catch(next); // сеть моргнула: следующий опрос повторит

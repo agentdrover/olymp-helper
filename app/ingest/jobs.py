@@ -1,6 +1,7 @@
 """Фоновый импорт со статусом и таймаутом (SPEC-1.0 1.7): HTTP не блокируется."""
 
 import logging
+import sqlite3
 import threading
 import time
 import uuid
@@ -65,7 +66,10 @@ class ImportJobs:
         self._threads.append(worker)
         worker.start()
         threading.Thread(
-            target=self._watch, args=(worker, material_id, cancel, run_id), daemon=True
+            target=self._watch,
+            args=(worker, material_id, cancel, run_id),
+            daemon=True,
+            name=f"watch-{material_id}",
         ).start()
 
     def _watch(self, worker, material_id: int, cancel: threading.Event, run_id: str) -> None:
@@ -98,11 +102,39 @@ class ImportJobs:
             silent_s,
         )
         self.ctx.progress.clear(material_id, run_id)
-        conn = open_db(self.ctx.db_path)
-        try:
-            fail_material(conn, material_id, run_id, TIMEOUT_MESSAGE)
-        finally:
-            conn.close()
+        self._fail_with_retry(material_id, run_id)
+
+    def _fail_with_retry(self, material_id: int, run_id: str) -> None:
+        """Записать failed, пока запуск ещё владеет материалом. Чужая запись (транзакция другого
+        импорта) может держать базу дольше busy_timeout: ждём и повторяем, сторожок не умирает."""
+        delay = 0.05
+        while True:
+            try:
+                conn = open_db(self.ctx.db_path)
+                try:
+                    owner = conn.execute(
+                        "SELECT import_status, run_id FROM material WHERE id = ?", (material_id,)
+                    ).fetchone()
+                    if (
+                        owner is None
+                        or owner["run_id"] != run_id
+                        or owner["import_status"] not in ("queued", "running")
+                    ):
+                        return  # запуск уже не владелец: новый запуск или конец
+                    fail_material(conn, material_id, run_id, TIMEOUT_MESSAGE)
+                    return
+                finally:
+                    conn.close()
+            except sqlite3.OperationalError as exc:
+                log.warning(
+                    "import expiry not recorded yet: material=%s run=%s error=%s; retry in %.2fs",
+                    material_id,
+                    run_id,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 2.0)
 
     def wait_idle(self, seconds: float = 10) -> None:
         for thread in list(self._threads):

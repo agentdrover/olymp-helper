@@ -45,12 +45,19 @@ def test_the_browser_form_gets_a_page_not_json(tmp_path):
         pdf = one_task_pdf()
         got = post(c, HTML, pdf)
         assert got.status_code == 303
-        assert got.headers["location"] == "/parent/materials?msg=queued"
+        assert got.headers["location"] == "/parent/materials?msg=queued&id=1"
+        # the import already finished (sync stub): «разбор идёт» must not linger on the page
+        assert "Сборник принят" not in c.get(got.headers["location"], headers=HTML).text
+        conn = db(tmp_path)
+        conn.execute("UPDATE material SET import_status = 'running' WHERE id = 1")
         page = c.get(got.headers["location"], headers=HTML)
         assert "Сборник принят, разбор идёт" in page.text
+        conn.execute("UPDATE material SET import_status = 'done' WHERE id = 1")
+        conn.close()
 
         again = post(c, HTML, pdf)
         assert again.status_code == 303
+        assert again.headers["location"] == "/parent/materials?msg=duplicate&id=1"
         assert "Файл уже загружен" in c.get(again.headers["location"], headers=HTML).text
 
         # an API client keeps the JSON, byte for byte
@@ -187,8 +194,12 @@ def test_the_polling_script_chains_timeouts_and_reloads_once():
     src = (Path(__file__).parent.parent / "app/static/progress.js").read_text()
     assert "setInterval" not in src
     assert "setTimeout(tick" in src and src.count("setTimeout(") == 1
-    assert "if (!reloading) {" in src and src.count("location.reload()") == 1
-    assert src.index("reloading = true") < src.index("location.reload()")
+    assert (
+        "if (!reloading) {" in src
+        and src.count("location.replace(location.pathname)") == 1
+        and "reload" not in src.replace("reloading", "")
+    )
+    assert src.index("reloading = true") < src.index("location.replace(")
 
 
 # ---------------------------------------------------------------- stall deadline (heartbeat)
@@ -452,3 +463,43 @@ def test_two_near_simultaneous_requeues_leave_one_owner(tmp_path, monkeypatch):
         owner = current_run(tmp_path)
         assert owner == calls[-1]
         assert app.state.ctx.progress.snapshot(1, owner) is not None
+
+
+def test_an_expiry_blocked_by_a_write_lock_is_retried_until_it_is_recorded(
+    tmp_path, monkeypatch, caplog
+):
+    import sqlite3
+
+    from app.ingest import jobs
+
+    real_open = jobs.open_db
+
+    def short_wait(path):
+        conn = real_open(path)
+        conn.execute("PRAGMA busy_timeout = 50")  # a lock held longer than this fails the write
+        return conn
+
+    monkeypatch.setattr(jobs, "open_db", short_wait)
+    caplog.set_level("WARNING", logger="app.ingest")
+    clock = FakeClock()
+    model = ClockedModel(clock, hang_on=[1])
+    app = clocked_app(tmp_path, model, clock, import_stall=1.0)
+    with TestClient(app) as c:
+        upload(c, two_pages())
+        assert model.entered[1].wait(30)
+        other = sqlite3.connect(str(tmp_path / "olymp.db"), isolation_level=None)
+        other.execute("BEGIN IMMEDIATE")  # another writer holds the database
+        try:
+            clock.advance(2.0)  # the run expires; its failed-write hits the lock
+            for _ in range(500):
+                if any("expiry not recorded yet" in r.getMessage() for r in caplog.records):
+                    break
+                time.sleep(0.01)
+            assert any("expiry not recorded yet" in r.getMessage() for r in caplog.records)
+            assert any(t.name == "watch-1" and t.is_alive() for t in threading.enumerate())
+        finally:
+            other.execute("ROLLBACK")
+            other.close()
+        failed = wait_status(c, "failed")
+        assert "превышено время ожидания" in failed["import_error"]
+        model.release_all()
