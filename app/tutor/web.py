@@ -19,6 +19,7 @@ from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, current_role
 from app.tutor import state, steps
 from app.tutor.flow import Flow
+from app.tutor.panel import BUSY
 from app.tutor.state import Refused
 from app.tutor.today import build_today
 from app.tutor.view import build_view, snapshot_live
@@ -100,6 +101,9 @@ def _step_result(conn, task_id: int, step_id: int | None):
     row = steps.get(conn, step_id) if step_id else None
     if row is None or row["task_item_id"] != task_id or row["status"] == "running":
         return None, None
+    newest = steps.latest(conn, task_id)
+    if newest is None or newest["id"] != row["id"]:  # итог устаревшего номера не показываем
+        return None, None
     if row["status"] == "failed":
         return "step_failed", None
     return row["panel_state"], row["notice"]
@@ -115,7 +119,9 @@ def _view_of(
     live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # сначала: идёт ли
     # Итог шага - ДО прогона: если шаг найден оконченным, прогон читается после его записи, и ответ
     # с итогом (например «помощник не ответил») не прячет подсказку, которую шаг уже записал.
-    shown, note = _step_result(conn, task_id, step)
+    # Снимок «идёт шаг» главнее итога: пока какой-то шаг идёт, ответ занят ИМЕННО им, а итог
+    # более старого шага не показывается (иначе вкладка бросит опрос и пропустит новый шаг).
+    shown, note = (None, None) if live in BUSY else _step_result(conn, task_id, step)
     run = state.active_run(conn, task)
     if flow is not None:
         shown = shown or flow.panel_state

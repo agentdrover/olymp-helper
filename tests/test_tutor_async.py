@@ -479,3 +479,44 @@ def test_a_finished_step_never_reports_a_stale_run(tmp_path, monkeypatch):
         assert mid["panel"]["busy"] or mid["hints"] == 1, "итог шага при устаревшем прогоне"
         done = c.get(f"/api/tasks/{tid}/tutor?step={step}", headers=CHILD).json()
         assert done["panel"]["state"] == "down" and done["hints"] == 1
+
+
+def test_an_older_steps_result_never_hides_a_newer_running_step(tmp_path):
+    """Шаг A кончился отказом модели, шаг B уже идёт: ответ занят шагом B и несёт его номер."""
+    seen = {"hint1": 0}
+
+    def reply(kind, _content):
+        if kind == "hint1":
+            seen["hint1"] += 1
+            return None if seen["hint1"] == 1 else out()  # A: модель не отвечает
+        return out()
+
+    model = Gated(reply=reply)
+    c, _clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        normal_wrong(c, tid)
+        post(c, tid, "hint", level=1)  # шаг A
+        c.app.state.steps.join()
+        step_a = rows(tmp_path, "SELECT MAX(id) FROM tutor_step")[0][0]
+        k = model.started
+        model.blocked.add(k)
+        post(c, tid, "hint", level=1)  # шаг B встаёт в модели
+        assert model.entered(k).wait(10)
+        step_b = rows(tmp_path, "SELECT MAX(id) FROM tutor_step")[0][0]
+        assert step_b != step_a
+        for resp in (
+            c.get(f"/api/tasks/{tid}/tutor?step={step_a}", headers=CHILD),  # GET с номером A
+            post(c, tid, "hint", level=1),  # POST, отказанный из-за шага B
+        ):
+            panel = resp.json()["panel"]
+            assert panel["busy"] and panel["step"] == step_b, panel
+        html = c.get(f"/tasks/{tid}/tutor?step={step_a}", headers=CHILD).text
+        assert f'data-step="{step_b}"' in html
+        model.gate(k).set()
+        c.app.state.steps.join()
+        # итог B показывается по его номеру; итог A с устаревшим номером - нет
+        done = c.get(f"/api/tasks/{tid}/tutor?step={step_b}", headers=CHILD).json()
+        assert done["hints"] == 1 and done["panel"]["state"] == "idle"
+        stale = c.get(f"/api/tasks/{tid}/tutor?step={step_a}", headers=CHILD).json()
+        assert stale["panel"]["state"] == "idle"
