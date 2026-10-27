@@ -29,6 +29,7 @@
       {% if card.key %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }})</p>{% endif %}
       {% if card.model_answer %}<p>Ответ модели (не проверен): <b>{{ card.model_answer }}</b></p>{% endif %}
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
+      {% if card.auto_note %}<p class="hint">{{ card.auto_note|capitalize }}.</p>{% endif %}
       <p class="hint">{{ card.hint }}</p>
       {% if card.note %}<p class="err">Обратите внимание: {{ card.note }}.</p>{% endif %}
       {% if card.warning %}<p class="err" role="alert">{{ card.warning }}</p>{% endif %}

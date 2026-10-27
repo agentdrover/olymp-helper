@@ -56,6 +56,7 @@ class AppContext:
     page_cache: PageCache
     feed: FeedState = field(default_factory=FeedState)
     progress: ImportProgress = field(default_factory=ImportProgress)
+    auto_publish: bool = True  # K5b: задания с официальным ключом публикуются без родителя
 
     @property
     def model(self):

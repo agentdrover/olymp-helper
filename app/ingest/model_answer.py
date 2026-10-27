@@ -13,19 +13,27 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
 
     Для задания с рисунком не вычисляется никогда: модель картинку не видит.
     """
+    return compute_model_answer_why(ctx, conn, task_id)[0]
+
+
+def compute_model_answer_why(
+    ctx, conn, task_id: int, *, keyed: bool = False
+) -> tuple[bool, str | None]:
+    """(записан ли ответ, причина отказа). keyed=True - автопубликация (K5b): ответ нужен и
+    заданию с ключом, чтобы сравнить его с ключом до того, как задание увидит ребёнок."""
     task = get_task(conn, task_id)
     if task is None or figure_of(task) is not None or task["type"] == "open":
-        return False
-    if task["answer_key"] is not None or candidate(conn, task) is not None:
-        return False  # ключ (в том числе загруженный) есть: ответ модели не нужен
+        return False, "figure_or_open"
+    if not keyed and (task["answer_key"] is not None or candidate(conn, task) is not None):
+        return False, "has_key"  # ключ (в том числе загруженный) есть: ответ модели не нужен
     system, messages = build_task_request(task)
     result = ctx.model.complete(system, messages, ANSWER_SCHEMA)
     payload = getattr(result, "json", None)
     if not getattr(result, "ok", False) or not isinstance(payload, dict):
-        return False
+        return False, getattr(result, "error_kind", None) or "error"
     value = normalize_answer(payload.get("proposed_answer"), task["type"])
     if value is None:
-        return False
+        return False, "unparsed"
     record = {
         "answer": display(value),
         "value": value,
@@ -52,7 +60,7 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
-    return cur.rowcount == 1
+    return cur.rowcount == 1, None
 
 
 def model_value(task):
@@ -60,4 +68,4 @@ def model_value(task):
     return json.loads(task["model_answer"])["value"] if task["model_answer"] else None
 
 
-__all__ = ["compute_model_answer", "model_value"]
+__all__ = ["compute_model_answer", "compute_model_answer_why", "model_value"]

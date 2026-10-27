@@ -99,7 +99,13 @@ def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
     """Правка, создающая новую ревизию: «проверено» снимается, model_answer сбрасывается."""
     task = get_task(conn, task_id)
     status = "draft" if task["import_status"] == "checked" else task["import_status"]
-    fields = {"revision": task["revision"] + 1, "import_status": status, "model_answer": None}
+    fields = {
+        "revision": task["revision"] + 1,
+        "import_status": status,
+        "model_answer": None,
+        "auto_published": 0,
+        "auto_hold": None,
+    }
     fields.update(cols)
     update_task(conn, task_id, **fields)
     save_snapshot(conn, task_id)

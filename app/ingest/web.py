@@ -450,6 +450,11 @@ def review_queue(request: Request, conn: Db):
     return review.open_feed(ctx_of(request), conn)
 
 
+@parent.get("/parent/review/auto")
+def review_auto(conn: Db):
+    return {"tasks": review.auto_published(conn)}
+
+
 @parent.get("/parent/review/{task_id}", response_class=HTMLResponse)
 def review_card(task_id: int, request: Request, conn: Db, fragment: int = 0):
     ctx = ctx_of(request)

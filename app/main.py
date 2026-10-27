@@ -57,6 +57,7 @@ def create_app(
     model=None,
     data_dir: str | Path | None = None,
     sync_imports: bool = False,
+    auto_publish: bool = True,
     import_stall: float = IMPORT_STALL_S,
     import_clock=None,
     import_poll: float | None = None,
@@ -120,6 +121,7 @@ def create_app(
         app.state,
         PageCache(data / "cache" / "pages"),
         progress=ImportProgress(import_clock or time.monotonic),
+        auto_publish=auto_publish,
     )
     app.state.ctx = ctx
     app.state.page_cache = ctx.page_cache

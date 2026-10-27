@@ -47,12 +47,12 @@ def candidate(conn: sqlite3.Connection, task) -> dict | None:
     return _uploaded_candidate(conn, task) or page_candidate(task)
 
 
-def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
-    """Ответ из загруженного ключа ТОГО ЖЕ сборника, варианта и номера; иначе None."""
+def _uploaded_rows(conn: sqlite3.Connection, task) -> list:
+    """Строки загруженных ключей ТОГО ЖЕ сборника, варианта и номера, новые первыми."""
     number = normalize_number(str(task["source_number"] or ""))
     if not number:
-        return None
-    rows = conn.execute(
+        return []
+    return conn.execute(
         "SELECT k.material_id, k.answer FROM key_entry k "
         "JOIN material km ON km.id = k.material_id "
         "JOIN material tm ON tm.id = ? "
@@ -64,7 +64,11 @@ def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
         "ORDER BY km.id DESC",
         (task["material_id"], number, task["variant"], task["stage"]),
     ).fetchall()
-    for material_id, raw in rows:
+
+
+def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
+    """Ответ из загруженного ключа ТОГО ЖЕ сборника, варианта и номера; иначе None."""
+    for material_id, raw in _uploaded_rows(conn, task):
         value = normalize_answer(raw, task["type"])
         if value is not None:
             return {
@@ -74,3 +78,17 @@ def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
                 "source": "key_file",
             }
     return None
+
+
+def official_values(conn: sqlite3.Connection, task) -> list:
+    """Все различные официальные ответы на задание: из каждого файла ключа и со страницы.
+    Больше одного - ключ неоднозначен (автопубликация такое задание не берёт)."""
+    found: list = []
+    for _, raw in _uploaded_rows(conn, task):
+        value = normalize_answer(raw, task["type"])
+        if value is not None and value not in found:
+            found.append(value)
+    page = page_candidate(task)
+    if page is not None and page["value"] not in found:
+        found.append(page["value"])
+    return found

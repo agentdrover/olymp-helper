@@ -238,6 +238,9 @@ def seed_state(path, *, parent=True, notice=True) -> None:
 def build_app(tmp_path, model=None, *, parent=True, notice=True, **kw):
     tmp_path.mkdir(parents=True, exist_ok=True)
     kw.setdefault("sync_imports", True)
+    # Auto-publication (K5b) is on in production; the older tests describe the parent-reviewed
+    # path, so they run without it. tests/test_pipeline_imported.py turns it on.
+    kw.setdefault("auto_publish", False)
     seed_state(tmp_path / "olymp.db", parent=parent, notice=notice)
     return create_app(db_path=tmp_path / "olymp.db", model=model, **kw)
 
