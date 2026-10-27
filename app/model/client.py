@@ -26,11 +26,19 @@ def encode_payload(payload: dict) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 
-def request_size(system: str, messages: list, schema: dict | None, images=()) -> int:
-    """Байт в теле запроса (кириллица в JSON занимает по 6 байт на знак): мерить только так."""
+def request_size(
+    system: str,
+    messages: list,
+    schema: dict | None,
+    images=(),
+    channel: str = "claude",
+    model: str = "",
+) -> int:
+    """Байт в теле запроса (кириллица в JSON занимает по 6 байт на знак): мерить только так.
+    Канал и имя модели входят в тело, поэтому проверка до резерва лимита берёт фактические."""
     payload = {
-        "channel": "claude",
-        "model": "",
+        "channel": channel,
+        "model": model,
         "system": system,
         "messages": messages,
         "schema": schema,

@@ -7,7 +7,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 from app.ingest.store import atomic
-from app.model.client import MAX_IMAGE_REQUEST_BYTES, request_size
+from app.model.client import MAX_IMAGE_REQUEST_BYTES, MAX_REQUEST_BYTES, request_size
 from app.model.ledger import Ledger
 from app.model.redaction import redact
 from app.model.types import CHANNELS, LIMIT_MESSAGE, ChannelError, ModelChannel, ModelResult
@@ -62,7 +62,7 @@ class ModelService:
         }
         spare = next(c for c in CHANNELS if c != primary)
         first = self._attempt(primary, models[primary], system, messages, schema, fallback=False)
-        if first.ok or first.error_kind == "limit":
+        if first.ok or first.error_kind in ("limit", "request_too_large"):
             return first
         self._fallback_event(session_id, primary, spare, first.error_kind)
         return self._attempt(spare, models[spare], system, messages, schema, fallback=True)
@@ -101,13 +101,14 @@ class ModelService:
         }
 
     def _attempt(self, name, model, system, messages, schema, fallback, images=None) -> ModelResult:
-        if images:
-            # Локально отклонённое вложение не расходует дневной лимит запусков.
-            try:
-                if request_size(system, messages, schema, images) > MAX_IMAGE_REQUEST_BYTES:
-                    raise ChannelError("request_too_large")
-            except ChannelError as exc:
-                return ModelResult.failure(name, model, exc.kind)
+        # Размер тела (с вложениями и фактическим именем модели) - до резерва лимита:
+        # слишком большой запрос не списывает запуск и не уходит на запасной канал.
+        try:
+            limit = MAX_IMAGE_REQUEST_BYTES if images else MAX_REQUEST_BYTES
+            if request_size(system, messages, schema, images or (), name, model) > limit:
+                raise ChannelError("request_too_large")
+        except ChannelError as exc:
+            return ModelResult.failure(name, model, exc.kind)
         run_id = self.ledger.reserve(name, model, fallback)
         if run_id is None:
             return ModelResult.failure(name, model, "limit", message=LIMIT_MESSAGE)

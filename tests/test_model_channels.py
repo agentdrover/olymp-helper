@@ -10,6 +10,7 @@ import pytest
 
 from app.db import connect, migrate
 from app.model.adapters import TOKEN_VARS, ClaudeAdapter, CursorAdapter, build_env
+from app.model.client import MAX_REQUEST_BYTES, request_size
 from app.model.ledger import usage_report
 from app.model.runner import run_cli
 from app.model.service import ModelService
@@ -344,3 +345,32 @@ def test_tmpdir_is_set_after_the_uid_switch(tmp_path):
     tmpdir, home = out.read_text(encoding="utf-8").splitlines()
     assert tmpdir == home
     assert home.startswith(str(tmp_path))
+
+
+def _pad_for(total, channel, model):
+    """Длина ASCII-реплики, при которой тело запроса ровно total байт."""
+    base = request_size(SYSTEM, [{"role": "user", "content": ""}], None, (), channel, model)
+    return [{"role": "user", "content": "a" * (total - base)}]
+
+
+def test_boundary_request_is_rejected_before_reserve_and_fallback(db):
+    # Граница по фактическому имени модели: с пустым именем (как мерил старый код) запрос
+    # помещается, с "sonnet" - нет. Лимит не списывается, запасной канал не зовётся.
+    big = _pad_for(MAX_REQUEST_BYTES + 1, "claude", "sonnet")
+    assert request_size(SYSTEM, big, None) <= MAX_REQUEST_BYTES  # старая мерка: «помещается»
+    claude, cursor = FakeChannel("claude"), FakeChannel("cursor")
+    svc = ModelService(db, {"claude": claude, "cursor": cursor}, clock)
+    before = db.execute("SELECT count(*) FROM model_run").fetchone()[0]
+    res = svc.complete(SYSTEM, big, session_id=1)
+    assert res.error_kind == "request_too_large" and res.text is None
+    assert not claude.calls and not cursor.calls
+    assert db.execute("SELECT count(*) FROM model_run").fetchone()[0] == before
+    assert db.execute("SELECT count(*) FROM event").fetchone()[0] == 0
+    res = svc.complete_on("claude", SYSTEM, big)
+    assert res.error_kind == "request_too_large" and not claude.calls
+    assert db.execute("SELECT count(*) FROM model_run").fetchone()[0] == before
+    # Чуть меньше границы проходит.
+    ok = _pad_for(MAX_REQUEST_BYTES, "claude", "sonnet")
+    assert svc.complete(SYSTEM, ok).error is None
+    assert len(claude.calls) == 1
+    assert db.execute("SELECT count(*) FROM model_run").fetchone()[0] == before + 1
