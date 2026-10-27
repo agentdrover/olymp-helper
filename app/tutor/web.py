@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from app.chat.flow import ChatFlow
 from app.ingest.publish import is_published
 from app.ingest.store import atomic, get_task, open_db
 from app.ingest.web import child_notice_gate
@@ -21,8 +22,10 @@ from app.tutor.flow import Flow
 from app.tutor.state import Refused
 from app.tutor.today import build_today
 from app.tutor.view import build_view
+from app.voice.service import VOICE_STATES
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
+TEMPLATES.env.globals["VOICE_STATES"] = VOICE_STATES
 router = APIRouter()
 
 
@@ -43,6 +46,7 @@ class Body(BaseModel):
     level: int | None = None
     confirm: bool = False
     mode: str | None = None
+    message: str | None = None
 
 
 def _published(conn, task_id: int):
@@ -117,12 +121,12 @@ def _refused(request: Request, conn, task_id: int, exc: Refused):
     )
 
 
-def _flow(request: Request, conn) -> Flow:
+def _flow(request: Request, conn, cls=Flow) -> Flow:
     app = request.app
-    return Flow(conn, app.state.model, app.state.inflight, app.state.clock)
+    return cls(conn, app.state.model, app.state.inflight, app.state.clock)
 
 
-def _act(name: str):
+def _act(name: str, cls=Flow):
     def decorate(fn):
         @router.post(
             "/tasks/{task_id}/" + name,
@@ -130,7 +134,7 @@ def _act(name: str):
         )
         def route(task_id: int, request: Request, conn: Db, body: Body | None = None):
             _published(conn, task_id)
-            flow = _flow(request, conn)
+            flow = _flow(request, conn, cls)
             try:
                 fn(flow, task_id, body or Body(), request)
             except Refused as exc:
@@ -169,6 +173,11 @@ def hint(flow: Flow, task_id, body, request):
 @_act("explain")
 def explain(flow: Flow, task_id, body, request):
     flow.explain(task_id, body.mode)
+
+
+@_act("chat", ChatFlow)
+def chat(flow: ChatFlow, task_id, body, request):
+    flow.chat(task_id, body.message, body.mode)
 
 
 @_act("show-answer")

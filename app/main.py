@@ -23,6 +23,8 @@ from app.ingest.web import public as public_router
 from app.sessions import utcnow
 from app.tutor.panel import Inflight
 from app.tutor.web import router as tutor_router
+from app.voice.service import VoiceService
+from app.voice.web import router as voice_router
 
 DEFAULT_DB_PATH = "/srv/olymp/olymp.db"
 INTERRUPTED = "прервано перезапуском"
@@ -61,11 +63,15 @@ def create_app(
     import_max_base: float = IMPORT_MAX_BASE_S,
     import_max_per_chunk: float = IMPORT_MAX_PER_CHUNK_S,
     clock=None,
+    voice: VoiceService | None = None,
 ) -> FastAPI:
     """model - объект с complete(system, messages, schema); тесты подменяют только его.
 
     clock() - текущее время для сессий родителя, блокировки входа и срока хранения (тесты его
     подменяют).
+
+    voice - распознавание речи (в работе ffmpeg и whisper.cpp из образа); тесты подменяют
+    распознаватель.
 
     sync_imports=True выполняет импорт в потоке запроса (тесты); в работе импорт идёт фоном.
     """
@@ -107,6 +113,7 @@ def create_app(
     # Часы одни на всё приложение (clock выше): тест подменяет их, и 60 секунд до подсказки,
     # простой занятия и сессия родителя идут по одному времени.
     app.state.inflight = Inflight()
+    app.state.voice = voice or VoiceService.from_env()
     ctx = AppContext(
         path,
         data,
@@ -130,6 +137,7 @@ def create_app(
     app.include_router(account_public)
     app.include_router(parent_router)
     app.include_router(tutor_router)
+    app.include_router(voice_router)
     app.include_router(public_router)
 
     @app.get("/healthz")

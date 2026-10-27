@@ -14,10 +14,34 @@ log = logging.getLogger("app.model")
 REQUEST_TIMEOUT_S = 130
 
 
+# Исполнитель отказывает от запроса больше 1 000 000 байт; запас на канал, модель и заголовки.
+MAX_REQUEST_BYTES = 900_000
+
+
+def encode_payload(payload: dict) -> bytes:
+    """Тело запроса к исполнителю ровно в том виде, в каком его отправляет http_post."""
+    return json.dumps(payload).encode("utf-8")
+
+
+def request_size(system: str, messages: list, schema: dict | None) -> int:
+    """Байт в теле запроса (кириллица в JSON занимает по 6 байт на знак): мерить только так."""
+    return len(
+        encode_payload(
+            {
+                "channel": "claude",
+                "model": "",
+                "system": system,
+                "messages": messages,
+                "schema": schema,
+            }
+        )
+    )
+
+
 def http_post(url: str, payload: dict, timeout: float, headers: dict | None = None) -> dict:
     req = urllib.request.Request(
         url,
-        data=json.dumps(payload).encode("utf-8"),
+        data=encode_payload(payload),
         headers={"Content-Type": "application/json", **(headers or {})},
     )
     try:

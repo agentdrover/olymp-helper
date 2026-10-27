@@ -1,0 +1,33 @@
+{# Чат, «помоги задать вопрос» и голос: часть панели помощника, не пункт навигации (SPEC-1.0 1.3а).
+   Состояние запроса — тот же компонент панели (_panel_status.html), своего варианта нет. #}
+<section class="chat" aria-label="Вопрос помощнику">
+  <h3 class="small-head">Вопрос помощнику</h3>
+  {% for m in v.chat %}
+  <div class="msg msg-child"><div class="msg-label">Ты</div><p>{{ m.question }}</p></div>
+  <div class="msg"><div class="msg-label">Помощник</div>{{ m.reply|safe }}
+    {% for c in m.citations %}
+    <blockquote class="cite">«{{ c.quote }}»<footer>{{ c.file }}, стр. {{ c.page }}</footer></blockquote>
+    {% endfor %}
+  </div>
+  {% endfor %}
+  {% if v.compose %}
+  <div class="compose">
+    <p class="hint">Готовые формулировки: нажми, и текст встанет в поле. Поправь его и отправь сам.</p>
+    {% for s in v.compose %}<button type="button" class="insert" data-insert="{{ s }}">{{ s }}</button>{% endfor %}
+  </div>
+  {% endif %}
+  <form class="chat-form" data-chat-form>
+    <label for="chat-input">Твой вопрос по заданию</label>
+    <textarea id="chat-input" name="message" rows="3" maxlength="1000" placeholder="Напиши вопрос или запиши голосом"></textarea>
+    <div class="actions">
+      <button type="button" class="primary" data-chat-mode="chat" {% if busy %}disabled{% endif %}>Отправить в разбор</button>
+      <button type="button" data-chat-mode="formulate" {% if busy %}disabled{% endif %}>Помоги задать вопрос</button>
+      <button type="button" id="voice-record" data-voice {% if busy %}disabled{% endif %}>Записать голосом</button>
+    </div>
+    <div class="voice-states" role="status" aria-live="polite">
+      {% for key, text in VOICE_STATES.items() %}<p class="voice-state" data-voice-state="{{ key }}" hidden>{{ text }}</p>{% endfor %}
+      <p class="voice-state" data-voice-error hidden></p>
+    </div>
+    <p class="hint">Голос распознаётся дома и никуда не уходит. Распознанный текст встаёт в поле: поправь его перед отправкой.</p>
+  </form>
+</section>
