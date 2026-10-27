@@ -257,6 +257,23 @@ def test_pending_helper_answer_is_withheld_after_start(tmp_path):
         assert db(tmp_path).execute("SELECT COUNT(*) FROM exam_attempt").fetchone()[0] == 1
 
 
+def test_pending_helper_answer_is_withheld_for_htmx(tmp_path):
+    model = StartsExam(tmp_path, 0)
+    c, clock, _ = boot(tmp_path, model=model)
+    NOW["clock"] = clock
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        r = c.post(
+            f"/tasks/{task}/attempt",
+            json={"answer": "А", "confidence": "sure"},
+            headers={**CHILD, "HX-Request": "true"},
+        )
+        assert r.status_code == 409 and "идёт олимпиада" in r.text
+        assert "Разбор." not in r.text and "не то" not in r.text
+
+
 def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
     c, clock, _ = boot(tmp_path)
     with c:
@@ -265,11 +282,19 @@ def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
         first = start_real(c).json()["attempt_id"]
         _, view = current(c)
         assert (
-            c.post("/exam/answer", json={"position": 1, "answer": "Б"}, headers=CHILD).status_code
+            c.post(
+                "/exam/answer",
+                json={"attempt_id": first, "position": 1, "answer": "Б"},
+                headers=CHILD,
+            ).status_code
             == 200
         )
         assert (
-            c.post("/exam/mark", json={"position": 2, "marked": True}, headers=CHILD).status_code
+            c.post(
+                "/exam/mark",
+                json={"attempt_id": first, "position": 2, "marked": True},
+                headers=CHILD,
+            ).status_code
             == 200
         )
         clock.advance(30)
@@ -281,8 +306,18 @@ def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
         assert reloaded["items"][0]["answer"] == "Б" and reloaded["items"][1]["marked"]
         assert db(tmp_path).execute("SELECT COUNT(*) FROM exam_attempt").fetchone()[0] == 1
         # две вкладки: открытие другого задания закрывает прежний интервал
-        assert c.post("/exam/open", json={"position": 3}, headers=CHILD).status_code == 200
-        assert c.post("/exam/open", json={"position": 2}, headers=CHILD).status_code == 200
+        assert (
+            c.post(
+                "/exam/open", json={"attempt_id": first, "position": 3}, headers=CHILD
+            ).status_code
+            == 200
+        )
+        assert (
+            c.post(
+                "/exam/open", json={"attempt_id": first, "position": 2}, headers=CHILD
+            ).status_code
+            == 200
+        )
         opened = (
             db(tmp_path)
             .execute("SELECT COUNT(*) FROM exam_view WHERE closed_at IS NULL")
@@ -291,10 +326,14 @@ def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
         assert opened == 1
         # последняя секунда ещё внутри срока, граница - уже нет
         clock.advance(569)
-        ok = c.post("/exam/answer", json={"position": 4, "answer": "28"}, headers=CHILD)
+        ok = c.post(
+            "/exam/answer", json={"attempt_id": first, "position": 4, "answer": "28"}, headers=CHILD
+        )
         assert ok.status_code == 200
         clock.advance(1)
-        late = c.post("/exam/answer", json={"position": 1, "answer": "А"}, headers=CHILD)
+        late = c.post(
+            "/exam/answer", json={"attempt_id": first, "position": 1, "answer": "А"}, headers=CHILD
+        )
         assert late.status_code == 409 and late.json()["code"] == "time_up"
         row = db(tmp_path).execute("SELECT * FROM exam_attempt").fetchone()
         assert row["status"] == "submitted" and row["end_reason"] == "time"
@@ -323,7 +362,11 @@ def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
         four(tmp_path / "third")
         save_format(c3, tmp_path / "third")
         attempt_id = start_real(c3).json()["attempt_id"]
-        c3.post("/exam/answer", json={"position": 1, "answer": "Б"}, headers=CHILD)
+        c3.post(
+            "/exam/answer",
+            json={"attempt_id": attempt_id, "position": 1, "answer": "Б"},
+            headers=CHILD,
+        )
         no = c3.post("/exam/submit", json={"attempt_id": attempt_id}, headers=CHILD)
         assert no.status_code == 422 and no.json()["code"] == "confirm_required"
         body = {"attempt_id": attempt_id, "confirm": True}
@@ -331,7 +374,11 @@ def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
         clock3.advance(5)
         two = c3.post("/exam/submit", json=body, headers=CHILD).json()
         assert one["result"] == two["result"] and one["result"]["score"] == 1
-        after = c3.post("/exam/answer", json={"position": 2, "answer": "А"}, headers=CHILD)
+        after = c3.post(
+            "/exam/answer",
+            json={"attempt_id": attempt_id, "position": 2, "answer": "А"},
+            headers=CHILD,
+        )
         assert after.status_code == 409
         assert c3.get(f"/exam/results/{attempt_id}", headers=CHILD).status_code == 200
 
@@ -344,7 +391,7 @@ def test_result_uses_start_snapshot_score_and_view_time(tmp_path):
         attempt_id = start_real(c).json()["attempt_id"]  # позиция 1 открыта в момент старта
 
         def call(path, **body):
-            r = c.post(path, json=body, headers=CHILD)
+            r = c.post(path, json={"attempt_id": attempt_id, **body}, headers=CHILD)
             assert r.status_code == 200, r.text
 
         # после старта родитель меняет ключ и баллы: на это прохождение они не влияют
@@ -383,3 +430,61 @@ def test_result_uses_start_snapshot_score_and_view_time(tmp_path):
         assert c.get(f"/tasks/{match}").status_code == 200
         # решение не открыто само: ответа в итоге нет
         assert "answer_key" not in json.dumps(done)
+
+
+def test_stale_tab_old_results_and_expired_start(tmp_path):
+    c, clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        a = start_real(c).json()["attempt_id"]
+        c.post("/exam/answer", json={"attempt_id": a, "position": 1, "answer": "Б"}, headers=CHILD)
+        done = {"attempt_id": a, "confirm": True}
+        assert c.post("/exam/submit", json=done, headers=CHILD).status_code == 200
+        assert c.get(f"/api/exam/results/{a}", headers=CHILD).status_code == 200
+        b = start_real(c).json()["attempt_id"]
+        assert b != a
+        # старая вкладка не меняет новый вариант; результаты старого скрыты, пока идёт новый
+        stale = c.post(
+            "/exam/answer", json={"attempt_id": a, "position": 1, "answer": "А"}, headers=CHILD
+        )
+        assert stale.status_code == 409
+        assert (
+            db(tmp_path)
+            .execute("SELECT answer FROM exam_item WHERE attempt_id = ? AND position = 1", (b,))
+            .fetchone()[0]
+            is None
+        )
+        assert c.get(f"/api/exam/results/{a}", headers=CHILD).status_code == 409
+        assert c.post("/exam/submit", json=done, headers=CHILD).status_code == 409
+        assert c.get("/api/exam", headers=CHILD).json()["history"] == []
+        # срок вышел, новый старт отклонён нехваткой: закрытие по времени сохранено
+        clock.advance(601)
+        c.post(
+            "/parent/exam",
+            data={**FORMAT, "count_single": "5", "material": [1]},
+            headers=PARENT,
+        )
+        r = c.post("/exam/start", json={"mode": "format"}, headers=CHILD)
+        assert r.status_code == 409 and r.json()["code"] == "shortage"
+        row = db(tmp_path).execute("SELECT status, end_reason FROM exam_attempt WHERE id = ?", (b,))
+        assert tuple(row.fetchone()) == ("submitted", "time")
+        assert c.get(f"/api/exam/results/{a}", headers=CHILD).status_code == 200
+
+
+def test_figure_comes_from_snapshot(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        fig = seed(tmp_path, key="5", number="1", options=NUM, figure=FIGURE)
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        start_real(c)
+        first = c.get("/exam/figure/1.png", headers=CHILD)
+        assert first.status_code == 200 and first.content[:4] == b"\x89PNG"
+        sql(
+            tmp_path,
+            "UPDATE task_item SET import_status = 'draft', figure = NULL WHERE id = ?",
+            fig,
+        )
+        assert c.get("/exam/figure/1.png", headers=CHILD).content == first.content
+        assert "/exam/figure/1.png" in json.dumps(current(c)[1])

@@ -46,6 +46,8 @@ CREATE TABLE exam_item (
     task_type TEXT NOT NULL CHECK (task_type IN ('single', 'multiple', 'match', 'numeric')),
     points REAL NOT NULL,
     snapshot TEXT NOT NULL CHECK (json_valid(snapshot)),
+    -- Рисунок условия на момент старта: правка задания его не меняет.
+    figure_png BLOB,
     answer TEXT CHECK (answer IS NULL OR json_valid(answer)),
     marked INTEGER NOT NULL DEFAULT 0 CHECK (marked IN (0, 1)),
     is_correct INTEGER CHECK (is_correct IS NULL OR is_correct IN (0, 1)),

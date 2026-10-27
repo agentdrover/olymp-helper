@@ -53,6 +53,7 @@ PUBLIC = {
     # имитация олимпиады (OH-K3a): страницы и JSON ребёнка за уведомлением, POST - свой источник
     ("GET", "/exam"),
     ("GET", "/exam/run"),
+    ("GET", "/exam/figure/{position}.png"),
     ("GET", "/exam/results/{attempt_id}"),
     ("GET", "/api/exam"),
     ("GET", "/api/exam/current"),

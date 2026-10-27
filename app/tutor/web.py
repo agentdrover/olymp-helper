@@ -96,9 +96,9 @@ def _is_fragment(request: Request) -> bool:
     return request.headers.get("hx-request") == "true"
 
 
-def _exam_block(request: Request, conn, task_id: int, *, page: bool = False):
+def _exam_block(request: Request, conn, task_id: int, *, page: bool = False, force=False):
     """Идёт олимпиада по этому заданию: 409 на любой маршрут задания (JSON, HTMX, страница)."""
-    if not exam.task_locked(conn, task_id, request.app.state.clock()):
+    if not force and not exam.task_locked(conn, task_id, request.app.state.clock()):
         return None
     message = exam.RUNNING_MESSAGE
     if page:
@@ -129,6 +129,8 @@ def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, not
 
 
 def _refused(request: Request, conn, task_id: int, exc: Refused):
+    if exc.code == "exam_running":  # в том числе отложенный отказ: полного вида с результатом нет
+        return _exam_block(request, conn, task_id, force=True)
     if _is_fragment(request):
         return _respond(request, conn, task_id, notice=exc.message)
     return JSONResponse(
@@ -163,6 +165,9 @@ def _act(name: str, cls=Flow):
                     {"ok": False, "code": "busy", "message": "Занято, попробуй ещё раз."},
                     status_code=503, headers={"Retry-After": "2"},
                 )  # fmt: skip
+            # олимпиада могла начаться, пока шёл запрос: результат действия не выдаётся
+            if (blocked := _exam_block(request, conn, task_id)) is not None:
+                return blocked
             return _respond(request, conn, task_id, flow)
 
         return fn

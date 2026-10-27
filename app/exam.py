@@ -48,6 +48,11 @@ def iso(moment: datetime) -> str:
     return moment.astimezone(UTC).isoformat()
 
 
+def _t(now) -> datetime:
+    """Момент времени: datetime или функция часов (читается внутри транзакции, после замка)."""
+    return now() if callable(now) else now
+
+
 def _parse(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
@@ -195,7 +200,7 @@ def _snapshot_item(task) -> dict:
     }
 
 
-def _create(conn, now, *, mode, title, fmt, picked, reduced) -> int:
+def _create(conn, now, *, mode, title, fmt, picked, reduced, read_figure=None) -> int:
     snap = {
         "stage": fmt["stage"], "stage_label": fmt["stage_label"], "grade": fmt["grade"],
         "minutes": fmt["minutes"], "points": fmt["points"], "reduced": reduced,
@@ -212,11 +217,13 @@ def _create(conn, now, *, mode, title, fmt, picked, reduced) -> int:
         raise ExamError(409, "already_running", "Вариант уже идёт.") from exc
     attempt_id = cur.lastrowid
     for position, task in enumerate(picked, 1):
+        figure = figure_of(task)
+        png = read_figure(figure["file"]) if figure and read_figure and figure.get("file") else None
         conn.execute(
             "INSERT INTO exam_item (attempt_id, position, task_item_id, task_type, points, "
-            "snapshot) VALUES (?, ?, ?, ?, ?, ?)",
+            "snapshot, figure_png) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (attempt_id, position, task["id"], task["type"], fmt["points"][task["type"]],
-             json.dumps(_snapshot_item(task), ensure_ascii=False)),
+             json.dumps(_snapshot_item(task), ensure_ascii=False), png),
         )  # fmt: skip
     _open_view(conn, attempt_id, 1, now)
     return attempt_id
@@ -233,9 +240,14 @@ def start(
     stage=None,
     accept_reduced: bool = False,
     rng=None,
+    read_figure=None,
 ) -> int:
     """Новое прохождение или уже идущее (повторный старт срок не сбрасывает)."""
+    active(
+        conn, _t(now)
+    )  # просроченное закрывается отдельной транзакцией: отказ сборки её не откатит
     with atomic(conn):
+        now = _t(now)
         running = active(conn, now)
         if running is not None:
             return running["id"]
@@ -243,13 +255,15 @@ def start(
         if fmt is None:
             raise ExamError(409, "no_format", NOT_SET)
         if mode == "real":
-            return _start_real(conn, now, fmt, material_id, section, variant, stage)
+            return _start_real(conn, now, fmt, material_id, section, variant, stage, read_figure)
         if mode == "format":
-            return _start_format(conn, now, fmt, accept_reduced, rng or random.Random())
+            return _start_format(
+                conn, now, fmt, accept_reduced, rng or random.Random(), read_figure
+            )
         raise ExamError(422, "bad_mode", "Выбери способ сборки.")
 
 
-def _start_real(conn, now, fmt, material_id, section, variant, stage) -> int:
+def _start_real(conn, now, fmt, material_id, section, variant, stage, read_figure) -> int:
     material = conn.execute(
         "SELECT * FROM material WHERE id = ? AND kind = 'tasks'", (material_id,)
     ).fetchone()
@@ -266,10 +280,19 @@ def _start_real(conn, now, fmt, material_id, section, variant, stage) -> int:
                         skipped=skipped, note=NOT_ADMITTED)  # fmt: skip
     parts = [p for p in (section, variant, stage) if p]
     title = material["file"] + (" · " + " · ".join(parts) if parts else "")
-    return _create(conn, now, mode="real", title=title, fmt=fmt, picked=picked, reduced=False)
+    return _create(
+        conn,
+        now,
+        mode="real",
+        title=title,
+        fmt=fmt,
+        picked=picked,
+        reduced=False,
+        read_figure=read_figure,
+    )
 
 
-def _start_format(conn, now, fmt, accept_reduced: bool, rng) -> int:
+def _start_format(conn, now, fmt, accept_reduced: bool, rng, read_figure) -> int:
     pool = {t: [] for t in TYPES}
     for mid in fmt["material_ids"]:
         for task in conn.execute(
@@ -294,7 +317,7 @@ def _start_format(conn, now, fmt, accept_reduced: bool, rng) -> int:
         picked += sorted(rng.sample(pool[t], taken[t]), key=lambda x: x["id"])
     title = f"По формату: {fmt['stage_label']} этап, {fmt['grade']} класс"
     return _create(conn, now, mode="format", title=title, fmt=fmt, picked=picked,
-                   reduced=bool(shortage))  # fmt: skip
+                   reduced=bool(shortage), read_figure=read_figure)  # fmt: skip
 
 
 # ------------------------------------------------------------------ прохождение
@@ -399,17 +422,21 @@ def _item(conn, attempt_id: int, position: int):
     return item
 
 
-def _mutate(conn, now, work):
-    """Сохранение атомарно со сроком: при времени >= срока изменение отклоняется, вариант
-    закрывается по времени."""
+def _mutate(conn, now, attempt_id: int, work):
+    """Сохранение атомарно со сроком: время читается после получения замка записи; при времени
+    >= срока изменение отклоняется, вариант закрывается по времени. Запрос от другого
+    (завершённого) прохождения отклоняется."""
     with atomic(conn):
+        t = _t(now)
         attempt = conn.execute("SELECT * FROM exam_attempt WHERE status = 'running'").fetchone()
-        if attempt is None:
-            raise ExamError(409, "not_running", "Вариант не идёт: он сдан или время вышло.")
-        if now >= _parse(attempt["deadline_at"]):
+        if attempt is None or attempt["id"] != attempt_id:
+            raise ExamError(
+                409, "not_running", "Этот вариант уже не идёт: он сдан или время вышло."
+            )
+        if t >= _parse(attempt["deadline_at"]):
             _finish(conn, attempt, "time", _parse(attempt["deadline_at"]))
             return "timeout"
-        work(attempt)
+        work(attempt, t)
     return "ok"
 
 
@@ -417,17 +444,17 @@ def _refuse_timeout() -> ExamError:
     return ExamError(409, "time_up", "Время вышло: вариант сдан.")
 
 
-def open_item(conn, now: datetime, position: int) -> None:
-    def work(attempt):
+def open_item(conn, now, attempt_id: int, position: int) -> None:
+    def work(attempt, t):
         _item(conn, attempt["id"], position)
-        _open_view(conn, attempt["id"], position, now)
+        _open_view(conn, attempt["id"], position, t)
 
-    if _mutate(conn, now, work) == "timeout":
+    if _mutate(conn, now, attempt_id, work) == "timeout":
         raise _refuse_timeout()
 
 
-def save_answer(conn, now: datetime, position: int, raw) -> None:
-    def work(attempt):
+def save_answer(conn, now, attempt_id: int, position: int, raw) -> None:
+    def work(attempt, t):
         item = _item(conn, attempt["id"], position)
         snap = json.loads(item["snapshot"])
         if raw is None or (isinstance(raw, str) and not raw.strip()):
@@ -443,25 +470,26 @@ def save_answer(conn, now: datetime, position: int, raw) -> None:
              attempt["id"], position),
         )  # fmt: skip
 
-    if _mutate(conn, now, work) == "timeout":
+    if _mutate(conn, now, attempt_id, work) == "timeout":
         raise _refuse_timeout()
 
 
-def set_mark(conn, now: datetime, position: int, marked: bool) -> None:
-    def work(attempt):
+def set_mark(conn, now, attempt_id: int, position: int, marked: bool) -> None:
+    def work(attempt, t):
         _item(conn, attempt["id"], position)
         conn.execute(
             "UPDATE exam_item SET marked = ? WHERE attempt_id = ? AND position = ?",
             (1 if marked else 0, attempt["id"], position),
         )
 
-    if _mutate(conn, now, work) == "timeout":
+    if _mutate(conn, now, attempt_id, work) == "timeout":
         raise _refuse_timeout()
 
 
-def submit(conn, now: datetime, attempt_id: int, confirm: bool = True) -> dict:
+def submit(conn, now, attempt_id: int, confirm: bool = True) -> dict:
     """Сдача идемпотентна: повторная возвращает тот же итог, ответы после сдачи не меняются."""
     with atomic(conn):
+        now = _t(now)
         attempt = conn.execute("SELECT * FROM exam_attempt WHERE id = ?", (attempt_id,)).fetchone()
         if attempt is None:
             raise ExamError(404, "no_attempt", "Такого прохождения нет.")
@@ -473,7 +501,7 @@ def submit(conn, now: datetime, attempt_id: int, confirm: bool = True) -> dict:
                 _finish(conn, attempt, "time", deadline)
             else:
                 _finish(conn, attempt, "manual", now)
-    return result(conn, attempt_id)
+    return result(conn, attempt_id, now)
 
 
 # ----------------------------------------------------------------------- показ
@@ -516,7 +544,7 @@ def running_view(conn, attempt) -> dict:
             "text": s["text"],
             "options": s["options"],
             "figure": None if figure is None else {
-                "url": f"/tasks/{item['task_item_id']}/figure.png", "alt": figure["alt"],
+                "url": f"/exam/figure/{item['position']}.png", "alt": figure["alt"],
             },
             "answer": None if item["answer"] is None else json.loads(item["answer"]),
             "marked": bool(item["marked"]),
@@ -535,12 +563,27 @@ def running_view(conn, attempt) -> dict:
     }
 
 
-def result(conn, attempt_id: int) -> dict:
+def _overlaps_running(conn, attempt_id: int, now: datetime) -> bool:
+    """Задания этого прохождения входят в идущее: их результаты пока скрыты."""
+    locked = locked_task_ids(conn, now)
+    if not locked:
+        return False
+    return any(
+        r[0] in locked
+        for r in conn.execute(
+            "SELECT task_item_id FROM exam_item WHERE attempt_id = ?", (attempt_id,)
+        )
+    )
+
+
+def result(conn, attempt_id: int, now: datetime) -> dict:
     """Итог сданного прохождения; идущее не показывается."""
     attempt = conn.execute("SELECT * FROM exam_attempt WHERE id = ?", (attempt_id,)).fetchone()
     if attempt is None:
         raise ExamError(404, "no_attempt", "Такого прохождения нет.")
     if attempt["status"] == "running":
+        raise ExamError(409, "exam_running", RUNNING_MESSAGE)
+    if _overlaps_running(conn, attempt_id, now):
         raise ExamError(409, "exam_running", RUNNING_MESSAGE)
     snap = json.loads(attempt["snapshot"])
     seconds = _view_seconds(conn, attempt_id)
@@ -584,7 +627,15 @@ def result(conn, attempt_id: int) -> dict:
     }
 
 
-def history(conn) -> list[dict]:
+def figure_png(conn, attempt_id: int, position: int) -> bytes | None:
+    row = conn.execute(
+        "SELECT figure_png FROM exam_item WHERE attempt_id = ? AND position = ?",
+        (attempt_id, position),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def history(conn, now: datetime) -> list[dict]:
     return [
         {
             "id": r["id"], "title": r["title"], "submitted_at": r["submitted_at"],
@@ -592,5 +643,6 @@ def history(conn) -> list[dict]:
         }
         for r in conn.execute(
             "SELECT * FROM exam_attempt WHERE status = 'submitted' ORDER BY id DESC LIMIT 20"
-        )
+        ).fetchall()
+        if not _overlaps_running(conn, r["id"], now)
     ]  # fmt: skip

@@ -3,7 +3,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from app import exam
@@ -40,6 +40,17 @@ def _error(exc: ExamError) -> JSONResponse:
     )
 
 
+def _reader(request: Request):
+    """Рисунок условия копируется в снимок при старте."""
+    ctx = request.app.state.ctx
+
+    def read(relative: str):
+        path = ctx.material_path(relative)
+        return path.read_bytes() if path.is_file() else None
+
+    return read
+
+
 def _state(conn, now) -> dict:
     running = exam.active(conn, now)
     fmt = exam.get_format(conn)
@@ -47,7 +58,7 @@ def _state(conn, now) -> dict:
         "format": fmt,
         "message": None if fmt else exam.NOT_SET,
         "running_id": running["id"] if running else None,
-        "history": exam.history(conn),
+        "history": exam.history(conn, now),
         "groups": [],
         "stock": {},
     }
@@ -79,10 +90,9 @@ def exam_state(request: Request, conn: Db):
 
 @child.post("/exam/start", dependencies=JSON_ACTION)
 def exam_start(request: Request, conn: Db, body: Body):
-    now = now_of(request)
     try:
         attempt_id = exam.start(
-            conn, now, mode=body.mode or "", material_id=body.material_id,
+            conn, lambda: now_of(request), read_figure=_reader(request), mode=body.mode or "", material_id=body.material_id,
             section=body.section, variant=body.variant, stage=body.stage,
             accept_reduced=body.accept_reduced,
         )  # fmt: skip
@@ -99,6 +109,16 @@ def exam_current(request: Request, conn: Db):
             {"ok": False, "code": "not_running", "message": "Вариант не идёт."}, status_code=404
         )
     return JSONResponse(exam.running_view(conn, attempt))
+
+
+@child.get("/exam/figure/{position}.png", dependencies=[Depends(child_notice_gate)])
+def exam_figure(position: int, request: Request, conn: Db):
+    """Рисунок условия из снимка идущего варианта."""
+    attempt = exam.active(conn, now_of(request))
+    png = exam.figure_png(conn, attempt["id"], position) if attempt else None
+    if png is None:
+        return HTMLResponse("Рисунка нет", status_code=404)
+    return Response(png, media_type="image/png")
 
 
 @child.get("/exam/run", response_class=HTMLResponse)
@@ -119,7 +139,9 @@ def _act(path: str):
         def route(request: Request, conn: Db, body: Body):
             now = now_of(request)
             try:
-                fn(conn, now, body)
+                if body.attempt_id is None:
+                    raise ExamError(422, "no_attempt", "Не указан вариант.")
+                fn(conn, lambda: now_of(request), body)
             except ExamError as exc:
                 return _error(exc)
             attempt = exam.active(conn, now)
@@ -139,17 +161,17 @@ def _position(body: Body) -> int:
 
 @_act("/exam/open")
 def _open(conn, now, body):
-    exam.open_item(conn, now, _position(body))
+    exam.open_item(conn, now, body.attempt_id, _position(body))
 
 
 @_act("/exam/answer")
 def _answer(conn, now, body):
-    exam.save_answer(conn, now, _position(body), body.answer)
+    exam.save_answer(conn, now, body.attempt_id, _position(body), body.answer)
 
 
 @_act("/exam/mark")
 def _mark(conn, now, body):
-    exam.set_mark(conn, now, _position(body), body.marked)
+    exam.set_mark(conn, now, body.attempt_id, _position(body), body.marked)
 
 
 @child.post("/exam/submit", dependencies=JSON_ACTION)
@@ -162,7 +184,7 @@ def exam_submit(request: Request, conn: Db, body: Body):
             return _error(ExamError(409, "not_running", "Вариант не идёт."))
         attempt_id = running["id"]
     try:
-        done = exam.submit(conn, now, attempt_id, confirm=body.confirm)
+        done = exam.submit(conn, lambda: now_of(request), attempt_id, confirm=body.confirm)
     except ExamError as exc:
         return _error(exc)
     return JSONResponse({"ok": True, "url": f"/exam/results/{done['id']}", "result": done})
@@ -172,7 +194,7 @@ def exam_submit(request: Request, conn: Db, body: Body):
 def result_json(attempt_id: int, request: Request, conn: Db):
     exam.expire_due(conn, now_of(request))
     try:
-        return JSONResponse(exam.result(conn, attempt_id))
+        return JSONResponse(exam.result(conn, attempt_id, now_of(request)))
     except ExamError as exc:
         return _error(exc)
 
@@ -183,7 +205,7 @@ def result_page(attempt_id: int, request: Request, conn: Db):
         return notice_redirect(f"/exam/results/{attempt_id}")
     exam.expire_due(conn, now_of(request))
     try:
-        data = exam.result(conn, attempt_id)
+        data = exam.result(conn, attempt_id, now_of(request))
     except ExamError as exc:
         if exc.code == "exam_running":
             return RedirectResponse("/exam/run", status_code=303)

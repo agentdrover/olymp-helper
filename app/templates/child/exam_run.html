@@ -51,12 +51,12 @@ function render() {
   $("exam-mark").textContent = it.marked ? "Снять «вернусь»" : "Вернусь";
 }
 async function refresh(j) { if (j && j.exam) { exam = j.exam; render(); } }
-async function open(p) { pos = p; await refresh(await call("/exam/open", {position: p})); }
+async function open(p) { pos = p; await refresh(await call("/exam/open", {attempt_id: exam.id, position: p})); }
 document.addEventListener("click", async e => {
   const t = e.target;
   if (t.dataset && t.dataset.p) open(+t.dataset.p);
-  if (t.id === "exam-save") refresh(await call("/exam/answer", {position: pos, answer: answerOf(exam.items[pos - 1])}));
-  if (t.id === "exam-mark") refresh(await call("/exam/mark", {position: pos, marked: !exam.items[pos - 1].marked}));
+  if (t.id === "exam-save") refresh(await call("/exam/answer", {attempt_id: exam.id, position: pos, answer: answerOf(exam.items[pos - 1])}));
+  if (t.id === "exam-mark") refresh(await call("/exam/mark", {attempt_id: exam.id, position: pos, marked: !exam.items[pos - 1].marked}));
   if (t.id === "exam-submit" && confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) {
     const j = await call("/exam/submit", {attempt_id: exam.id, confirm: true});
     if (j) location.href = j.url;
