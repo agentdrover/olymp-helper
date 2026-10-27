@@ -14,6 +14,7 @@ GENERATED = "generated"
 STATUSES = {
     "new": "не решал",
     "ok": "верно",
+    "model": "совпало с моделью",
     "hint": "с подсказкой",
     "wrong": "ошибся",
     "shown": "ответ показан",
@@ -31,7 +32,9 @@ def task_status(task, run) -> str:
         return "new"
     if run["state"] == "answer_shown":
         return "shown"
-    if run["state"] in ("solved", "solved_unknown") and not run["hints"]:
+    if run["state"] == "solved_unknown" and not run["hints"]:
+        return "model"  # без подтверждённого ключа слово «верно» не используется (SPEC 1.3, 2в)
+    if run["state"] == "solved" and not run["hints"]:
         return "ok"
     if run["hints"] or run["state"] == "hint3":
         return "hint"
@@ -42,10 +45,7 @@ def task_status(task, run) -> str:
 
 def _first_try(run) -> bool:
     return (
-        run is not None
-        and run["state"] in ("solved", "solved_unknown")
-        and run["hints"] == 0
-        and run["attempts"] == 1
+        run is not None and run["state"] == "solved" and run["hints"] == 0 and run["attempts"] == 1
     )
 
 
@@ -88,20 +88,22 @@ def _rows(conn):
 
 
 def _summary(rows) -> dict:
-    counts = {"ok": 0, "hint": 0, "wrong": 0}
+    counts = {"ok": 0, "hint": 0, "wrong": 0, "model": 0}
     done = first = 0
     for r in rows:
-        if r["status"] in ("ok", "hint", "wrong", "shown"):
+        if r["status"] in ("ok", "hint", "wrong", "shown", "model"):
             counts["wrong" if r["status"] == "shown" else r["status"]] += 1
         if r["run"] is not None and state.is_terminal(r["run"]):
             done += 1
         first += _first_try(r["run"])
     total = len(rows)
-    share = round(100 * first / done) if done else None
+    keyed_done = done - counts["model"]  # совпавшие с моделью в долю не входят
+    share = round(100 * first / keyed_done) if keyed_done else None
     return {
         "total": total,
         "done": done,
         "first_try": first,
+        "model": counts["model"],
         "first_share": share,
         "bar": {k: round(100 * v / total) if total else 0 for k, v in counts.items()},
     }

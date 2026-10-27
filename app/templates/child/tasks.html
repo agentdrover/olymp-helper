@@ -85,7 +85,7 @@
           <td><a href="/tasks/{{ t.id }}">Задание {{ t.number }}</a> <span class="hint">— {{ t.source }}</span><br><span class="hint">{{ t.snippet }}</span></td>
           <td>{{ t.topic or "—" }}</td>
           <td><span class="pill">{{ type_labels.get(t.type, t.type) }}</span></td>
-          <td><span class="pill status-{{ t.status }}">{{ t.status_label }}</span></td>
+          <td><span class="pill status-{{ t.status }}"{% if t.status == "model" %} title="не проверено"{% endif %}>{{ t.status_label }}</span></td>
         </tr>
       {% endfor %}
       </tbody>
@@ -105,8 +105,9 @@
       <h3><a href="/tasks?block={{ b.pos }}">{{ b.title }}</a></h3>
       <p class="hint">разобрано {{ b.done }} из {{ b.total }}</p>
       <p class="hint">с 1-й попытки: {% if b.first_share is none %}—{% else %}{{ b.first_share }}%{% endif %}</p>
-      <div class="bar" role="img" aria-label="верно {{ b.bar.ok }}%, с подсказкой {{ b.bar.hint }}%, ошибся {{ b.bar.wrong }}%">
-        <span class="bar-ok" style="width: {{ b.bar.ok }}%"></span><span class="bar-hint" style="width: {{ b.bar.hint }}%"></span><span class="bar-wrong" style="width: {{ b.bar.wrong }}%"></span>
+      {% if b.model %}<p class="hint" title="не проверено">совпало с моделью: {{ b.model }}</p>{% endif %}
+      <div class="bar" role="img" aria-label="верно {{ b.bar.ok }}%, с подсказкой {{ b.bar.hint }}%, ошибся {{ b.bar.wrong }}%, совпало с моделью {{ b.bar.model }}%">
+        <span class="bar-ok" style="width: {{ b.bar.ok }}%"></span><span class="bar-hint" style="width: {{ b.bar.hint }}%"></span><span class="bar-wrong" style="width: {{ b.bar.wrong }}%"></span><span class="bar-model" style="width: {{ b.bar.model }}%"></span>
       </div>
       {% if b.next_id %}<p><a href="/tasks/{{ b.next_id }}">Решать по теме</a></p>{% endif %}
     </article>

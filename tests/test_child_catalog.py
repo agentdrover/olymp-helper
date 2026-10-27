@@ -127,3 +127,22 @@ def test_search_and_filters_never_reveal_answers(tmp_path):
         assert draft not in ask("") and hidden not in ask("theme=021")
         # JSON-вход ребёнка не изменился: условия и номер, без ответов
         assert "answer_key" not in c.get("/api/tasks", headers=CHILD).text
+
+
+def test_a_model_matched_task_is_not_called_correct_and_not_in_the_first_try_share(tmp_path):
+    """SPEC 1.3, 2в: без подтверждённого ключа слова «верно» нет."""
+    c, _clock, _model = boot(tmp_path)
+    with c:
+        keyed = seed(tmp_path, key="Б")
+        guess = seed(tmp_path, key=None, model_answer="Б")
+        for t in (keyed, guess):
+            put(tmp_path, t, topic="b10")
+        attempt(c, keyed, "Б")
+        attempt(c, guess, "Б")
+        html = c.get("/tasks", headers=CHILD).text
+        b10 = card(html, "b10")
+        assert "разобрано 2 из 2" in b10 and "с 1-й попытки: 100%" in b10
+        assert "совпало с моделью: 1" in b10
+        page = c.get("/tasks?block=021", headers=CHILD).text
+        assert "совпало с моделью" in row(page, guess) and "верно" not in row(page, guess)
+        assert "верно" in row(page, keyed) and "совпало" not in row(page, keyed)
