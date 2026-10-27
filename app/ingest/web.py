@@ -3,6 +3,7 @@
 import functools
 import hashlib
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Annotated
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 from app.ingest import packs, review
 from app.ingest.figure_service import confirm_figure
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
+from app.ingest.progress import progress_text
 from app.ingest.publish import child_view, is_published
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
@@ -84,25 +86,113 @@ def start_page(request: Request):
 # --------------------------------------------------------------------- материалы
 
 
-@parent.get("/parent/materials", response_class=HTMLResponse)
-def materials_page(request: Request, conn: Db):
+FLASH = {
+    "queued": "Сборник принят, разбор идёт.",
+    "duplicate": "Файл уже загружен.",
+    "requeued": "Файл перезапущен, разбор идёт.",
+}
+
+
+def _accept_q(header: str) -> dict[str, float]:
+    """Accept -> {тип: q}; битый q читается как 0."""
+    out: dict[str, float] = {}
+    for part in header.split(","):
+        kind, *params = (piece.strip().lower() for piece in part.split(";"))
+        if not kind:
+            continue
+        q = 1.0
+        for param in params:
+            if param.startswith("q="):
+                try:
+                    q = float(param[2:])
+                except ValueError:
+                    q = 0.0
+                if not math.isfinite(q) or not 0.0 <= q <= 1.0:
+                    q = 0.0
+        out[kind] = q
+    return out
+
+
+def _wants_html(request: Request) -> bool:
+    """Страница, а не JSON. Правило: text/html (или text/*) назван явно с q>0, и его q не ниже q
+    для JSON (application/json, application/*, иначе */*). «*/*» сам по себе - JSON (curl, клиенты
+    API). Ничья между явно названными text/html и application/json - страница: сюда приходит
+    только форма (multipart), а её шлёт браузер."""
+    accept = _accept_q(request.headers.get("accept", ""))
+    html = accept.get("text/html", accept.get("text/*", 0.0))
+    if html <= 0:
+        return False
+    other = accept.get("application/json", accept.get("application/*", accept.get("*/*", 0.0)))
+    return html >= other
+
+
+def _materials_view(request: Request, conn, *, flash=None, error=None, status=200):
     rows = conn.execute(
         "SELECT m.*, (SELECT COUNT(*) FROM task_item t WHERE t.material_id = m.id) AS tasks "
         "FROM material m ORDER BY m.id DESC"
     ).fetchall()
-    return TEMPLATES.TemplateResponse(request, "parent/materials.html", {"materials": rows})
+    progress = ctx_of(request).progress
+    page = TEMPLATES.TemplateResponse(
+        request,
+        "parent/materials.html",
+        {
+            "materials": rows,
+            "progress": {
+                m["id"]: progress_text(
+                    progress.get(m["id"], m["run_id"]), m["import_status"] == "running"
+                )
+                for m in rows
+            },
+            "flash": flash,
+            "error": error,
+        },
+    )
+    page.status_code = status
+    return page
+
+
+@parent.get("/parent/materials", response_class=HTMLResponse)
+def materials_page(request: Request, conn: Db, msg: str = "", id: int = 0):
+    flash = FLASH.get(msg)
+    if msg in ("queued", "requeued"):  # «разбор идёт» - только пока он правда идёт
+        row = conn.execute("SELECT import_status FROM material WHERE id = ?", (id,)).fetchone()
+        if row is None or row["import_status"] not in ("queued", "running"):
+            flash = None
+    return _materials_view(request, conn, flash=flash)
 
 
 @parent.post("/parent/materials")
 def upload_material(
     request: Request,
     file: Annotated[UploadFile, File()],
+    conn: Db,
     kind: Annotated[str, Form()] = "tasks",
     variant: Annotated[str, Form()] = "",
     year: Annotated[str, Form()] = "",
     stage: Annotated[str, Form()] = "",
     olympiad: Annotated[str, Form()] = "",
 ):
+    answer = _store_upload(request, file, kind, variant, year, stage, olympiad)
+    if not _wants_html(request):
+        return answer
+    body = json.loads(answer.body)
+    if "error" in body:
+        return _materials_view(request, conn, error=body["error"], status=answer.status_code)
+    code = "requeued" if body.get("requeued") else "duplicate" if body["duplicate"] else "queued"
+    return RedirectResponse(
+        f"/parent/materials?msg={code}&id={body['material_id']}", status_code=303
+    )
+
+
+def _store_upload(
+    request: Request,
+    file: UploadFile,
+    kind: str,
+    variant: str,
+    year: str,
+    stage: str,
+    olympiad: str,
+) -> JSONResponse:
     ctx = ctx_of(request)
     if kind not in KINDS:
         return JSONResponse({"error": "Тип материала: задания, ключ или учебник."}, status_code=422)
@@ -174,16 +264,24 @@ def upload_material(
 
 
 @parent.get("/parent/materials/{material_id}")
-def material_status(material_id: int, conn: Db):
+def material_status(material_id: int, request: Request, conn: Db):
     row = conn.execute(
-        "SELECT id, kind, import_status, import_error, pages_total, "
+        "SELECT id, kind, import_status, import_error, pages_total, run_id, "
         "(SELECT COUNT(*) FROM task_item t WHERE t.material_id = material.id) AS tasks "
         "FROM material WHERE id = ?",
         (material_id,),
     ).fetchone()
     if row is None:
         raise HTTPException(404, "Материал не найден")
-    return dict(row)
+    out = dict(row)
+    out.pop("run_id")
+    running = row["import_status"] in ("queued", "running")
+    item = ctx_of(request).progress.get(material_id, row["run_id"]) if running else None
+    out["progress"] = item
+    out["progress_text"] = (
+        progress_text(item, row["import_status"] == "running") if running else None
+    )
+    return out
 
 
 def _material_file(request: Request, conn, material_id: int) -> Path:

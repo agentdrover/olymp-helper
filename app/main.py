@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,8 +14,9 @@ from app.account_web import public as account_public
 from app.db import connect, migrate, schema_version
 from app.ingest.context import AppContext, ExecutorModel
 from app.ingest.jobs import ImportJobs
-from app.ingest.limits import IMPORT_TIMEOUT_S
+from app.ingest.limits import IMPORT_MAX_BASE_S, IMPORT_MAX_PER_CHUNK_S, IMPORT_STALL_S
 from app.ingest.packs import fail_stale
+from app.ingest.progress import ImportProgress
 from app.ingest.render import PageCache
 from app.ingest.web import parent as parent_router
 from app.ingest.web import public as public_router
@@ -56,7 +58,11 @@ def create_app(
     model=None,
     data_dir: str | Path | None = None,
     sync_imports: bool = False,
-    import_timeout: float = IMPORT_TIMEOUT_S,
+    import_stall: float = IMPORT_STALL_S,
+    import_clock=None,
+    import_poll: float | None = None,
+    import_max_base: float = IMPORT_MAX_BASE_S,
+    import_max_per_chunk: float = IMPORT_MAX_PER_CHUNK_S,
     clock=None,
     voice: VoiceService | None = None,
     sync_steps: bool = False,
@@ -114,10 +120,24 @@ def create_app(
     app.state.inflight = Inflight()
     app.state.steps = StepRunner(app.state, sync=sync_steps)
     app.state.voice = voice or VoiceService.from_env()
-    ctx = AppContext(path, data, app.state, PageCache(data / "cache" / "pages"))
+    ctx = AppContext(
+        path,
+        data,
+        app.state,
+        PageCache(data / "cache" / "pages"),
+        progress=ImportProgress(import_clock or time.monotonic),
+    )
     app.state.ctx = ctx
     app.state.page_cache = ctx.page_cache
-    app.state.imports = ImportJobs(ctx, sync=sync_imports, timeout=import_timeout)
+    app.state.imports = ImportJobs(
+        ctx,
+        sync=sync_imports,
+        stall=import_stall,
+        clock=import_clock or time.monotonic,
+        poll=import_poll,
+        max_base=import_max_base,
+        max_per_chunk=import_max_per_chunk,
+    )
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(account_parent)
     app.include_router(account_public)
