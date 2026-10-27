@@ -189,3 +189,13 @@ dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max
 .voice-state { margin: 0; padding: 8px 12px; border-radius: 10px; background: #FCEFD8; color: #6E3F00; }
 .voice-state[data-voice-state="recognizing"] { background: #E4EAF6; color: var(--ink-2); font-weight: 600; }
 #voice-record.recording { background: var(--warn); color: #fff; }
+
+/* OH-K1a: карта блоков и поиск заданий */
+.search-form { padding: 16px; }
+.block-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.block-card h3 { margin: 0 0 6px; font-size: 16px; }
+.block-card p { margin: 4px 0; }
+.bar { display: flex; height: 10px; border-radius: 999px; background: var(--pill); overflow: hidden; }
+.bar-ok { background: var(--accent); }
+.bar-hint { background: #B8892B; }
+.bar-wrong { background: var(--warn); }

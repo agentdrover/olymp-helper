@@ -24,6 +24,7 @@ from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, csrf_token, current_role, require_csrf, require_parent
 from app.search import search
 from app.search.tasks import search_published_tasks
+from app.tutor import catalog
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 TEMPLATES.env.globals["csrf_token"] = csrf_token
@@ -504,19 +505,39 @@ def api_task(task_id: int, conn: Db):
 
 
 @public.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, conn: Db):
+def tasks_page(
+    request: Request,
+    conn: Db,
+    q: str = "",
+    block: str = "",
+    theme: str = "",
+    type: str = "",
+    source: str = "",
+    variant: str = "",
+    status: str = "",
+):
     if current_role(request) != PARENT and not notice_seen(conn):
         return notice_redirect("/tasks")
-    data = api_tasks(conn)
-    # Ребёнку — название темы из справочника, не код; список уже содержит только опубликованные.
-    topics = {
-        row["id"]: row["title"]
-        for row in conn.execute(
-            "SELECT t.id, c.title FROM task_item t JOIN topic c ON c.code = t.topic"
-        )
-    }
+    theme = theme or block
+    blocks = catalog.build_blocks(conn)
+    params = {"q": q, "theme": theme, "type": type, "source": source, "variant": variant,
+              "status": status}  # fmt: skip
+    active = any(v.strip() for v in params.values())
+    found = catalog.filter_tasks(conn, **params)
+    current = next((b for b in blocks if str(b["pos"]) == theme), None)
     return TEMPLATES.TemplateResponse(
-        request, "child/tasks.html", {**data, "topics": topics, "type_labels": TYPE_LABELS}
+        request,
+        "child/tasks.html",
+        {
+            "blocks": blocks,
+            "found": found,
+            "active": active,
+            "params": params,
+            "current": current,
+            "type_labels": TYPE_LABELS,
+            "statuses": catalog.STATUSES,
+            "generated": catalog.GENERATED,
+        },
     )
 
 
