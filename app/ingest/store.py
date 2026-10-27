@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.db import connect
+from app.tutor.seq import bump
 
 JSON_COLUMNS = {"options", "answer_key", "model_answer", "figure"}
 
@@ -65,7 +66,9 @@ def update_task(conn: sqlite3.Connection, task_id: int, **cols) -> None:
             value = json.dumps(value, ensure_ascii=False)
         values.append(value)
     sets = ", ".join(f"{name} = ?" for name in cols)
-    conn.execute(f"UPDATE task_item SET {sets} WHERE id = ?", (*values, task_id))
+    with atomic(conn):
+        conn.execute(f"UPDATE task_item SET {sets} WHERE id = ?", (*values, task_id))
+        bump(conn)  # правка родителя (ключ, ревизия, подтверждение, рисунок) меняет экран ребёнка
 
 
 def save_snapshot(conn: sqlite3.Connection, task_id: int) -> None:

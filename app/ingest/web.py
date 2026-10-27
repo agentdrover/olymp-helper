@@ -3,8 +3,10 @@
 import functools
 import hashlib
 import json
+import logging
 import math
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Annotated
 
@@ -20,6 +22,7 @@ from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
 from app.ingest.names import clean_original_name
 from app.ingest.progress import progress_text
 from app.ingest.publish import child_view, is_published
+from app.ingest.reparse import UNAVAILABLE, reset_material, touched_materials
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
 from app.ingest.topics import load_catalog
@@ -29,6 +32,7 @@ from app.search import search
 from app.search.tasks import search_published_tasks
 from app.tutor import catalog
 
+log = logging.getLogger("app.ingest")
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 TEMPLATES.env.globals["csrf_token"] = csrf_token
 KINDS = ("tasks", "key", "textbook")
@@ -40,6 +44,7 @@ TYPE_LABELS = {
     "numeric": "число",
 }
 
+REPARSE_LOCK = threading.Lock()
 parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)])
 public = APIRouter()
 
@@ -92,6 +97,7 @@ FLASH = {
     "queued": "Сборник принят, разбор идёт.",
     "duplicate": "Файл уже загружен.",
     "requeued": "Файл перезапущен, разбор идёт.",
+    "reparse": "Сборник разбирается заново.",
 }
 
 
@@ -134,6 +140,12 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
         "FROM material m ORDER BY m.id DESC"
     ).fetchall()
     progress = ctx_of(request).progress
+    touched = touched_materials(conn)
+    stuck = {  # queued без хода разбора: запуск потерян
+        m["id"]
+        for m in rows
+        if m["import_status"] == "queued" and progress.get(m["id"], m["run_id"]) is None
+    }
     page = TEMPLATES.TemplateResponse(
         request,
         "parent/materials.html",
@@ -145,6 +157,9 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
                 )
                 for m in rows
             },
+            "touched": touched,
+            "stuck": stuck,
+            "unavailable": UNAVAILABLE,
             "flash": flash,
             "error": error,
         },
@@ -156,7 +171,7 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
 @parent.get("/parent/materials", response_class=HTMLResponse)
 def materials_page(request: Request, conn: Db, msg: str = "", id: int = 0):
     flash = FLASH.get(msg)
-    if msg in ("queued", "requeued"):  # «разбор идёт» - только пока он правда идёт
+    if msg in ("queued", "requeued", "reparse"):  # «разбор идёт» - только пока он правда идёт
         row = conn.execute("SELECT import_status FROM material WHERE id = ?", (id,)).fetchone()
         if row is None or row["import_status"] not in ("queued", "running"):
             flash = None
@@ -184,6 +199,55 @@ def upload_material(
     return RedirectResponse(
         f"/parent/materials?msg={code}&id={body['material_id']}", status_code=303
     )
+
+
+class StartFailed(Exception):
+    """Разбор после сброса не запущен; материал уже помечен failed."""
+
+
+START_FAILED = "Не удалось запустить разбор. Нажмите «Разобрать заново» ещё раз."
+
+
+def _submit_or_fail(request: Request, material_id: int) -> None:
+    """Запуск после сброса: сбой не оставляет материал queued без задания - он становится
+    failed (отдельной короткой транзакцией), и та же кнопка повторяет разбор."""
+    try:
+        request.app.state.imports.submit(material_id)
+    except Exception:
+        log.exception("reparse %s: import not started", material_id)
+        conn = open_db(ctx_of(request).db_path)
+        try:
+            conn.execute(
+                "UPDATE material SET import_status = 'failed', import_error = ? "
+                "WHERE id = ? AND import_status IN ('queued', 'running')",
+                (START_FAILED, material_id),
+            )
+        finally:
+            conn.close()
+        raise StartFailed(START_FAILED) from None
+
+
+@parent.post("/parent/materials/{material_id}/reparse")
+def reparse_material(material_id: int, request: Request, conn: Db):
+    """«Разобрать заново»: только пока ни одно задание не тронуто (reparse.reset_material)."""
+    html = _wants_html(request)
+    try:
+        with REPARSE_LOCK:  # сброс и запуск - одно действие: второй щелчок видит ход разбора
+            started = reset_material(ctx_of(request), conn, material_id)
+            if started:
+                _submit_or_fail(request, material_id)
+    except Refusal as exc:
+        if html:
+            return _materials_view(request, conn, error=exc.message, status=exc.status)
+        return _refusal(exc)
+    except (sqlite3.Error, StartFailed):
+        message = "Не удалось начать разбор заново. Повторите позже."
+        if html:
+            return _materials_view(request, conn, error=message, status=500)
+        return JSONResponse({"error": message}, status_code=500)
+    if html:
+        return RedirectResponse(f"/parent/materials?msg=reparse&id={material_id}", status_code=303)
+    return JSONResponse({"material_id": material_id, "started": started}, status_code=202)
 
 
 def _store_upload(
