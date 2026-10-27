@@ -263,7 +263,10 @@ def confirm_figure(
         state = _tile_state(tile_state)
         edited = edited_page(figure, rect=rect, rect_px=rect_px, page=page)
         plan, lefts = tile_plan(doc, task, figure, regions, edited, state)
-        if state is not None and {t["id"] for t in state} != {t["id"] for t in plan["tiles"]}:
+        shown_ids = {t["id"] for t in plan["tiles"]}
+        if state is None:  # клиент плиток не показывал: сохраняется только то, что видел родитель
+            plan, shown_ids = {"tiles": [], "order": []}, set()
+        elif {t["id"] for t in state} != shown_ids:
             raise Refusal(
                 "Набор плиток изменился после предпросмотра: обновите карточку и проверьте "
                 "плитки ещё раз.",
@@ -315,6 +318,10 @@ def confirm_figure(
                 import_status="unsupported",
                 unsupported_reason=UNREADABLE,
             )
+            keep = set(tiles.figure_files(figure))
+            for stale in before_files:  # плитки, которых в новой записи нет, больше не нужны
+                if stale not in keep:
+                    ctx.material_path(stale).unlink(missing_ok=True)
             return {"status": "unsupported", "reason": UNREADABLE, "revision": revision}
         revision = task["revision"] + 1
         relative = f"figures/{task_id}-r{revision}.png"

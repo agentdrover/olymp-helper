@@ -193,7 +193,9 @@ def test_frame_edit_recomputes_only_its_page_and_keeps_labels():
     after = tiles.plan_tiles(pdf, saved, narrow, edited_page=2)
     assert [t["page"] for t in after["tiles"]].count(1) == 4
     assert after["tiles"][0]["rect"] == [1.0, 2.0, 3.0, 4.0]
-    assert [t["page"] for t in after["tiles"]].count(2) == 0  # одна картинка - плиток нет
+    # на странице 2 одна картинка: плиток нет, но область не пропадает - она плитка целиком
+    page2 = [t for t in after["tiles"] if t["page"] == 2]
+    assert len(page2) == 1 and page2[0]["rect"] == [0, 90, 280, 250]
 
 
 # ------------------------------------------------------------------ карточка v2 целиком
@@ -527,8 +529,7 @@ def test_old_records_and_cleanup(tmp_path):
             == 200
         )
         first = [tmp_path / "e" / t["file"] for t in stored_figure(tmp_path / "e", tid)["tiles"]]
-        again = figure_body(card, tiles=None)
-        again.pop("tiles")
+        again = figure_body(card)
         assert c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=again).status_code == 200
         assert not any(f.exists() for f in first)
         second = stored_figure(tmp_path / "e", tid)["tiles"]
@@ -615,6 +616,126 @@ def test_tile_route_keeps_the_publication_checks(tmp_path):
             c.get(f"/parent/tasks/{tid}/tile-preview/{first}.png", headers=CHILD).status_code == 403
         )
         assert c.get(f"/parent/tasks/{tid}/figure-tiles", headers=CHILD).status_code == 403
+
+
+def test_tile_ids_do_not_collide_and_regions_never_vanish(tmp_path):
+    # пара мест, у которой короткий хеш совпадал
+    one = tiles.tile_id(1, pymupdf.Rect(79, 391, 191, 440))
+    two = tiles.tile_id(1, pymupdf.Rect(263, 45, 304, 76))
+    assert one != two and len(one) > 40
+
+    # страница 1: два изображения, страница 2: одно. Ребёнок видит все три.
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    write_lines(page, [f"11. {TEXT}"], x=50, y=60)
+    put(page, pymupdf.Rect(60, 110, 200, 200), solid(COLORS[0]))
+    put(page, pymupdf.Rect(300, 110, 440, 200), solid(COLORS[1]))
+    page2 = doc.new_page(width=600, height=800)
+    write_lines(page2, ["Продолжение рисунка на второй странице."], x=50, y=60)
+    put(page2, pymupdf.Rect(60, 110, 200, 200), solid(COLORS[2]))
+    task = make_task(11, TEXT, figure=True, pages=(1, 2), options=None, type="numeric")
+    c, tid = boot(tmp_path, doc_bytes(doc), task=task)
+    with c:
+        card = card_of(c, tid)
+        assert [t["page"] for t in card["tiles"]] == [1, 1, 2]
+        set_key(c, tid, "7")
+        body = figure_body(card)
+        body.pop("rect_px")
+        assert c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=body).status_code == 200
+        assert c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={}).status_code == 200
+        shown = c.get(f"/tasks/{tid}", headers=CHILD).text
+        assert shown.count("data-tile-img") == 3
+        api = c.get(f"/api/tasks/{tid}", headers=CHILD).json()
+        assert len(api["figure"]["tiles"]) == 3
+
+
+def test_drawn_frame_without_stored_regions_is_previewed_and_checked(tmp_path):
+    c, tid = boot(tmp_path, grid_pdf())
+    with c:
+        conn = db(tmp_path)
+        conn.execute(
+            "UPDATE task_item SET figure = json_set(figure, '$.regions', json('[]'), '$.rect', NULL)"
+            " WHERE id = ?",
+            (tid,),
+        )
+        conn.close()
+        params = {"page": 1, "rect_px": ",".join(map(str, FRAME_PX)), "scale": 1.5}
+        listing = c.get(f"/parent/tasks/{tid}/figure-tiles", params=params, headers=PARENT)
+        assert listing.status_code == 200
+        ids = re.findall(r'data-tile-id="(\w+)"', listing.text)
+        assert len(ids) == 6 and "data-figure-img" not in listing.text
+        set_key(c, tid)
+        card = {"tiles": [{"id": i, "label": str(n)} for n, i in enumerate(ids, 1)]}
+        body = {
+            "alt": "Шесть ртов",
+            "no_answer_ack": True,
+            "rect_px": FRAME_PX,
+            "scale": 1.5,
+            "page": 1,
+        }
+        # клиент плиток не присылал: плитки, которых родитель не видел, не сохраняются
+        silent = c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=body)
+        assert silent.status_code == 200 and stored_figure(tmp_path, tid)["tiles"] == []
+        empty = c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json={**body, "tiles": []})
+        assert empty.status_code == 409
+        other = {**card, "tiles": card["tiles"][:5]}
+        assert (
+            c.post(
+                f"/parent/tasks/{tid}/figure", headers=PARENT, json={**body, **other}
+            ).status_code
+            == 409
+        )
+        ok = c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json={**body, **card})
+        assert ok.status_code == 200, ok.text
+        assert [t["id"] for t in stored_figure(tmp_path, tid)["tiles"]] == ids
+
+
+def test_failed_reconfirmation_cleans_the_png_of_removed_tiles(tmp_path):
+    doc = pymupdf.open()
+    page = grid_page(doc, captions=False)
+    write_lines(page, ["5 мелко"], x=320, y=410, size=2)  # подпись в плитке 6: нечитаема
+    c, tid = boot(tmp_path, doc_bytes(doc))
+    with c:
+        set_key(c, tid)
+        rows12 = [75, 150, 675, 525]  # плитки 1-4
+        card = {"tiles": []}
+        listing = c.get(
+            f"/parent/tasks/{tid}/figure-tiles",
+            params={"page": 1, "rect_px": ",".join(map(str, rows12)), "scale": 1.5},
+            headers=PARENT,
+        )
+        ids = re.findall(r'data-tile-id="(\w+)"', listing.text)
+        assert len(ids) == 4
+        card["tiles"] = [{"id": i, "label": str(n)} for n, i in enumerate(ids, 1)]
+        first = c.post(
+            f"/parent/tasks/{tid}/figure",
+            headers=PARENT,
+            json=figure_body(card, rect_px=rows12),
+        )
+        assert first.status_code == 200, first.text
+        old = [tmp_path / t["file"] for t in stored_figure(tmp_path, tid)["tiles"]]
+        assert len(old) == 4 and all(f.exists() for f in old)
+        rows23 = [75, 360, 675, 735]  # плитки 3-6: плитка 6 с мелкой подписью
+        again = c.get(
+            f"/parent/tasks/{tid}/figure-tiles",
+            params={"page": 1, "rect_px": ",".join(map(str, rows23)), "scale": 1.5},
+            headers=PARENT,
+        )
+        ids2 = re.findall(r'data-tile-id="(\w+)"', again.text)
+        assert set(ids2) != set(ids) and len(ids2) == 4
+        second = c.post(
+            f"/parent/tasks/{tid}/figure",
+            headers=PARENT,
+            json=figure_body(
+                {"tiles": [{"id": i, "label": None} for i in ids2]}, rect_px=rows23, tiles=None
+            )
+            | {"tiles": [{"id": i, "label": None} for i in ids2]},
+        )
+        assert second.status_code == 200 and second.json()["status"] == "unsupported"
+        figure = stored_figure(tmp_path, tid)
+        kept = {tmp_path / f for f in tiles.figure_files(figure)}
+        leftovers = {f for f in (tmp_path / "figures").iterdir()} - kept
+        assert leftovers == set()
 
 
 # ------------------------------------------------------------------------ подпись источника

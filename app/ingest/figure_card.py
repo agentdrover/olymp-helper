@@ -181,8 +181,10 @@ def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> di
         "SELECT file FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
     source = ctx.material_path(material["file"]) if material else None
-    if not (stored and source is not None and source.exists()):
+    drawn = frame.get("rect_px") is not None or frame.get("rect") is not None
+    if not ((stored or drawn) and source is not None and source.exists()):
         return area
+    area["has_regions"] = True
     with contextlib.closing(pymupdf.open(str(source))) as doc:
         regions = figure_regions(doc, figure, **frame)
         edited = edited_page(figure, **frame)

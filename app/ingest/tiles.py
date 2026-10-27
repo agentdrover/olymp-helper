@@ -25,9 +25,10 @@ OVERLAP_PT2 = 4.0  # пересечение плиток больше этого
 
 
 def tile_id(page_no: int, rect) -> str:
-    """Id из места изображения: тот же рисунок остаётся с тем же id при пересчёте."""
+    """Id из места изображения: тот же рисунок остаётся с тем же id при пересчёте. Хеш полный:
+    усечённый давал совпадения у разных изображений."""
     key = f"{page_no}:" + ",".join(str(round(v)) for v in rect)
-    return "t" + hashlib.sha1(key.encode()).hexdigest()[:8]
+    return "t" + hashlib.sha256(key.encode()).hexdigest()
 
 
 def _area(rect: pymupdf.Rect) -> float:
@@ -211,6 +212,20 @@ def plan_tiles(
         for tile in suggest_page_tiles(page, page_no, region["rect"]):
             tile["label"] = (old.get(tile["id"]) or {}).get("label")
             tiles.append(tile)
+    if tiles:  # ни одна область не пропадает: область без своих плиток - плитка целиком
+        for region in sorted(regions, key=lambda r: r["page"]):
+            if not any(t["page"] == region["page"] for t in tiles):
+                whole = [round(v, 2) for v in region["rect"]]
+                tiles.append(
+                    {
+                        "id": tile_id(region["page"], whole),
+                        "page": region["page"],
+                        "rect": whole,
+                        "file": None,
+                        "label": None,
+                    }
+                )
+        tiles.sort(key=lambda t: t["page"])  # порядок страниц, внутри страницы прежний (устойчиво)
     by_id = {t["id"]: t for t in tiles}
     order = [i for i in figure.get("tile_order") or [] if i in by_id]
     for item in state or []:

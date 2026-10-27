@@ -153,7 +153,7 @@
         alt: val("alt"), teacher_note: teacherNote(),
         no_answer_ack: leak.value === "none", teacher_note_ack: checked("note_ack"),
         leak_ack: checked("leak_ack"),
-        tiles: tiles.length ? tiles : null,
+        tiles,  // пустой список - карточка плиток не показывала: сервер сверяет с этим
       },
     };
     const buttons = Array.from(feed.querySelectorAll("button"));
