@@ -9,6 +9,7 @@
     <div class="mode">режим родителя</div>
     <a href="/parent/review"{% if path.startswith("/parent/review") or path.startswith("/parent/tasks") %} aria-current="page"{% endif %}>Проверка заданий</a>
     <a href="/parent/materials"{% if path.startswith("/parent/materials") %} aria-current="page"{% endif %}>Материалы и модель</a>
+    <a href="/parent/summaries"{% if path.startswith("/parent/summaries") or path.startswith("/parent/sessions") %} aria-current="page"{% endif %}>Итоги занятий</a>
     <a href="/parent/conversations"{% if path.startswith("/parent/conversations") %} aria-current="page"{% endif %}>Переписка</a>
     <a href="/parent/settings"{% if path.startswith("/parent/settings") %} aria-current="page"{% endif %}>Настройки</a>
     <div class="spacer"></div>

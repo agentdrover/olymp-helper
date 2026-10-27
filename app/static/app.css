@@ -189,3 +189,10 @@ dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max
 .voice-state { margin: 0; padding: 8px 12px; border-radius: 10px; background: #FCEFD8; color: #6E3F00; }
 .voice-state[data-voice-state="recognizing"] { background: #E4EAF6; color: var(--ink-2); font-weight: 600; }
 #voice-record.recording { background: var(--warn); color: #fff; }
+
+/* итоги занятий */
+.facts { padding-left: 20px; margin: 8px 0 16px; }
+.facts li { margin: 4px 0; }
+.summary .conclusion { margin: 16px 0 0; }
+.journal { padding-left: 20px; }
+.journal li { margin: 6px 0; }

@@ -8,8 +8,10 @@
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from app import summary
 
 RETENTION_DAYS = 180
 MESSAGE_TYPES = ("chat", "voice")
@@ -50,7 +52,11 @@ def session_exists(conn: sqlite3.Connection, session_id: int) -> bool:
     )
 
 
-def delete_messages(conn: sqlite3.Connection, session_id: int | None = None) -> int:
+def delete_messages(
+    conn: sqlite3.Connection, session_id: int | None = None, now: datetime | None = None
+) -> int:
+    # Итоги, которых ещё нет, строятся до удаления: число сообщений берётся из событий.
+    summary.ensure(conn, now or datetime.now(UTC))
     sql = f"DELETE FROM event WHERE type IN ({_IN})"
     args: list = list(MESSAGE_TYPES)
     if session_id is not None:
@@ -61,6 +67,7 @@ def delete_messages(conn: sqlite3.Connection, session_id: int | None = None) -> 
 
 def cleanup_retention(conn: sqlite3.Connection, now: datetime) -> int:
     """Сообщения старше 180 дней удаляются; занятия, итоги и прочие события остаются."""
+    summary.ensure(conn, now)
     cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
     return conn.execute(
         f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?", (*MESSAGE_TYPES, cutoff)
