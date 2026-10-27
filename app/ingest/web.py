@@ -570,6 +570,13 @@ def task_confirm(task_id: int, request: Request, conn: Db, body: ConfirmBody | N
     return _advance(request, conn, task_id, stay_if_open=True)
 
 
+@parent.post("/parent/tasks/{task_id}/crosscheck-seen")
+@_action
+def task_crosscheck_seen(task_id: int, request: Request, conn: Db):
+    review.view_crosscheck(conn, task_id)
+    return _advance(request, conn, task_id, stay_if_open=True)
+
+
 @parent.post("/parent/tasks/{task_id}/skip")
 @_action
 def task_skip(task_id: int, request: Request, conn: Db):

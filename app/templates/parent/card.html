@@ -29,6 +29,15 @@
       {% if card.key %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }})</p>{% endif %}
       {% if card.model_answer %}<p>Ответ модели (не проверен): <b>{{ card.model_answer }}</b></p>{% endif %}
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
+      {% if card.crosscheck %}
+      <div class="crosscheck" data-status="{{ card.crosscheck.status }}">
+        <p><span class="badge">{{ card.crosscheck.label }}</span></p>
+        {% if card.crosscheck.status == "disagrees" %}
+        <p class="err" role="alert">{% if card.crosscheck.invalid %}Вторая модель считает вопрос некорректным.{% else %}Ответ второй модели: <b>{{ card.crosscheck.answer }}</b>.{% endif %}</p>
+        <p class="hint">Довод: {{ card.crosscheck.reasoning }}</p>
+        {% elif card.crosscheck.warning %}<p class="err">{{ card.crosscheck.warning }}</p>{% endif %}
+      </div>
+      {% endif %}
       <p class="hint">{{ card.hint }}</p>
       {% if card.note %}<p class="err">Обратите внимание: {{ card.note }}.</p>{% endif %}
       {% if card.warning %}<p class="err" role="alert">{{ card.warning }}</p>{% endif %}
@@ -36,6 +45,14 @@
 
       {% if card.kind in ("confirm", "child_dispute") %}
         <button class="primary" data-action="confirm">{{ card.button or "Ключ прав — оставить" }}</button>
+      {% elif card.kind == "crosscheck" %}
+        {% if card.crosscheck.seen %}
+        <button class="primary" data-action="confirm">Всё равно подтвердить{% if card.key %} (ключ {{ card.key }}){% endif %}</button>
+        <label>Мой ответ <input id="answer" size="8"></label>
+        <button data-action="confirm">Подтвердить с моим ответом</button>
+        {% else %}
+        <button class="primary" data-action="crosscheck-seen">Довод просмотрен</button>
+        {% endif %}
       {% elif card.kind == "no_key" %}
         <p><label>Ответ <input id="answer" size="8"></label></p>
         <button class="primary" data-action="confirm">Подтвердить с моим ответом</button>

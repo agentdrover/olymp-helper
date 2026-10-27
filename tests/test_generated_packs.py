@@ -72,12 +72,12 @@ class PackModel:
         return ModelResult(None, self.pack, "claude", "stub", 1, None)
 
 
-def make_bank(tmp_path, pack, texts=BANK, draft=DRAFT_ONLY, topic=TOPIC):
+def make_bank(tmp_path, pack, texts=BANK, draft=DRAFT_ONLY, topic=TOPIC, factory=PackModel):
     """App whose bank holds `texts` confirmed tasks of `topic` and one unconfirmed task."""
     tasks = [make_task(n, t, topic=topic) for n, t in enumerate(texts, 1)]
     if draft:
         tasks.append(make_task(len(texts) + 1, draft, topic=topic))
-    model = PackModel(tasks, pack)
+    model = factory(tasks, pack)
     c = TestClient(build_app(tmp_path, model))
     c.__enter__()
     upload(c, text_pdf([[f"{n}. вопрос" for n in range(1, len(tasks) + 1)]]))
@@ -339,7 +339,9 @@ def test_the_migration_upgrades_a_v9_database_keeping_the_data(tmp_path):
 
     assert migrate(conn) == SCHEMA_VERSION >= 10  # later migrations (0011_auth, ...) stack on top
     after = conn.execute("SELECT * FROM task_item").fetchall()
-    assert [tuple(r) for r in after] == [(*before[0], None)]  # every old column kept, pack_id empty
+    assert [tuple(r) for r in after] == [
+        (*before[0], None, None, 0)
+    ]  # old columns kept, pack_id and crosscheck empty
     assert conn.execute("SELECT COUNT(*) FROM task_revision").fetchone()[0] == 1
     conn.execute(
         "INSERT INTO question_pack(created_at, topic, task_type, requested_count) VALUES ('t', 'b10', 'single', 3)"

@@ -9,6 +9,7 @@ import json
 import logging
 import re
 
+from app.ingest import crosscheck
 from app.ingest.answers import display, key_json, normalize_answer
 from app.ingest.importer import FIGURE_WORDS
 from app.ingest.leaks import condition_leaks, norm
@@ -321,12 +322,13 @@ def _finish_failed(conn, pack_id: int, message: str, channel=None) -> None:
     )
 
 
-def _write(conn, pack_id: int, topic: str, payload, kind: str, count: int, channel) -> None:
+def _write(conn, pack_id: int, topic: str, payload, kind: str, count: int, channel) -> list[int]:
     """Проверка повторов и запись - одна транзакция: задание, появившееся за время запроса
     к модели (другая пачка), видно проверке."""
     with atomic(conn):
         existing = [r[0] for r in conn.execute("SELECT text FROM task_item WHERE excluded = 0")]
         accepted, rejected = sort_out(payload, kind, count, existing)
+        ids = []
         for number, task in enumerate(accepted, 1):
             cur = conn.execute(
                 "INSERT INTO task_item (material_id, source_number, type, text, options, topic, "
@@ -347,11 +349,22 @@ def _write(conn, pack_id: int, topic: str, payload, kind: str, count: int, chann
                 ),
             )
             save_snapshot(conn, cur.lastrowid)
+            ids.append(cur.lastrowid)
         conn.execute(
             "UPDATE question_pack SET status = 'done', error = NULL, accepted_count = ?, "
             "rejected = ?, channel = ? WHERE id = ?",
             (len(accepted), json.dumps(rejected, ensure_ascii=False), channel, pack_id),
         )
+    return ids
+
+
+def _cross_check(ctx, conn, ids: list[int], channel) -> None:
+    """Сверка второй моделью (G3). Сбой сверки не отменяет пачку: у заданий нет пометки, что
+    для родителя значит «не сверено»."""
+    try:
+        crosscheck.run(ctx, conn, ids, channel)
+    except Exception:
+        log.exception("crosscheck failed for %s", ids)
 
 
 def generate_pack(ctx, conn, topic: str, kind: str, count: int) -> int:
@@ -384,11 +397,13 @@ def generate_pack(ctx, conn, topic: str, kind: str, count: int) -> int:
             _finish_failed(conn, pack_id, _failure_message(result), channel)
             return pack_id
         try:
-            _write(conn, pack_id, topic, result.json, kind, count, channel)
+            ids = _write(conn, pack_id, topic, result.json, kind, count, channel)
         except InvalidStructure as exc:
             _finish_failed(
                 conn, pack_id, f"Модель вернула неверную структуру: {exc}. Повторите.", channel
             )
+        else:
+            _cross_check(ctx, conn, ids, channel)
     except Exception:
         log.exception("pack %s failed", pack_id)
         _finish_failed(conn, pack_id, "Не удалось составить пачку. Повторите позже.")

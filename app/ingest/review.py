@@ -2,6 +2,7 @@
 
 import json
 
+from app.ingest import crosscheck
 from app.ingest.answers import display, key_json, key_value, normalize_answer
 from app.ingest.keys import candidate
 from app.ingest.model_answer import compute_model_answer, model_value
@@ -22,6 +23,7 @@ from app.tutor.state import discrepancies
 LABELS = {
     "no_key": "ключа нет",
     "discrepancy": "расхождение",
+    "crosscheck": "расхождение со второй моделью",
     "needs_figure": "нужен рисунок",
     "open_exclude": "открытый — исключить",
     "child_dispute": "от ребёнка",
@@ -224,6 +226,8 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     blocked = leak_notice(task)
     if blocked:
         raise Refusal(blocked)
+    if crosscheck.blocks_confirm(task):
+        raise Refusal("Вторая модель не согласна с ответом: сначала просмотрите её довод.")
     figure = figure_of(task)
     if figure is not None and not figure.get("confirmed"):
         raise Refusal("Сначала подтвердите рисунок.")
@@ -266,6 +270,15 @@ def resolve(ctx, conn, task_id: int, choice: str, answer=None) -> None:
     resolve_discrepancies(conn, task_id)
 
 
+def view_crosscheck(conn, task_id: int) -> None:
+    """Родитель открыл довод второй модели: подтверждение расхождения разрешено."""
+    task = _task(conn, task_id)
+    record = crosscheck.of(task)
+    if record is None or record["status"] != "disagrees":
+        raise Refusal("У задания нет расхождения со второй моделью.", 409)
+    update_task(conn, task_id, crosscheck_seen=1)
+
+
 def retry_model(ctx, conn, task_id: int) -> bool:
     task = _task(conn, task_id)
     if figure_of(task) is not None:
@@ -293,6 +306,35 @@ def _discrepancy(task, key, model) -> bool:
     if key is None or model is None or key == model:
         return False
     return task["discrepancy_ack"] != json.dumps(model, ensure_ascii=False)
+
+
+def _crosscheck_open(task) -> bool:
+    record = crosscheck.of(task)
+    return bool(record and record["status"] == "disagrees")
+
+
+def _crosscheck_view(task) -> dict | None:
+    """Пометка сверки для карточки: согласна / расхождение / не сверено (только генерация)."""
+    if task["key_source"] != "generated":
+        return None
+    record = crosscheck.of(task) or {"status": "unchecked", "channel": None}
+    shown = {
+        "agrees": "вторая модель согласна",
+        "disagrees": "расхождение со второй моделью",
+        "unchecked": "не сверено",
+    }[record["status"]]
+    return {
+        "status": record["status"],
+        "label": shown,
+        "channel": record["channel"],
+        "answer": record.get("answer"),
+        "reasoning": record.get("reasoning") or "",
+        "invalid": bool(record.get("invalid")),
+        "seen": bool(task["crosscheck_seen"]),
+        "warning": "Второй канал недоступен: ответ не сверен, проверьте его сами."
+        if record["status"] == "unchecked"
+        else None,
+    }
 
 
 def build_card(ctx, conn, task) -> dict | None:
@@ -327,6 +369,14 @@ def build_card(ctx, conn, task) -> dict | None:
             if figure is not None
             else "Ключа нет: впишите ответ (источник — вы) или подтвердите без ключа — "
             "тогда эталоном будет ответ модели."
+        )
+    elif status == "draft" and _crosscheck_open(task):
+        kind, hint = (
+            "crosscheck",
+            (
+                "Вторая модель решила вопрос без ключа и ответила иначе, либо считает вопрос "
+                "некорректным. Прочитайте довод: без этого подтвердить задание нельзя."
+            ),
         )
     elif _discrepancy(task, key, model):
         kind, hint = "discrepancy", "Ответ ключа и ответ модели расходятся."
@@ -384,6 +434,7 @@ def build_card(ctx, conn, task) -> dict | None:
         "model_agrees": agrees,
         "figure": figure,
         "revision": task["revision"],
+        "crosscheck": _crosscheck_view(task),
     }
 
 
@@ -432,7 +483,8 @@ def task_detail(ctx, conn, task_id: int) -> dict:
 
 def queue(ctx, conn) -> list[dict]:
     rows = conn.execute("SELECT * FROM task_item WHERE excluded = 0 ORDER BY id").fetchall()
-    return [c for r in rows if (c := build_card(ctx, conn, r))]
+    cards = [c for r in rows if (c := build_card(ctx, conn, r))]
+    return sorted(cards, key=lambda c: c["kind"] != "crosscheck")  # расхождения - наверху
 
 
 def open_feed(ctx, conn) -> dict:

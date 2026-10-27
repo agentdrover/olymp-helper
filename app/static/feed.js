@@ -49,6 +49,7 @@
     confirm: () => post("confirm", { answer: val("answer") || null }),
     "confirm-no-key": () => post("confirm", {}),
     skip: () => post("skip"),
+    "crosscheck-seen": () => post("crosscheck-seen"),
     exclude: () => post("exclude"),
     retry: async () => { await post("retry-model"); return { next: { task_id: Number(taskId()) }, counter: card().dataset.counter }; },
     resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: val("answer") || null }),
