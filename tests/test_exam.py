@@ -226,6 +226,7 @@ def test_running_variant_blocks_every_route_and_hides_key(tmp_path):
             ("POST", f"/tasks/{task}/show-answer", {"confirm": True}),
             ("POST", f"/tasks/{task}/repeat", {}),
             ("POST", f"/tasks/{task}/dispute", {}),
+            ("POST", f"/tasks/{task}/voice", {"audio": "AAAA", "mime": "audio/webm"}),
             ("GET", f"/api/tasks/{task}/tutor", None),
             ("GET", f"/tasks/{task}/tutor", None),
             ("GET", f"/tasks/{task}", None),
@@ -416,7 +417,10 @@ def test_result_uses_start_snapshot_score_and_view_time(tmp_path):
         clock.advance(7)
         assert nav(c, 4).status_code == 303
         assert act(c, "save", n="28,0").status_code == 303  # число в другой записи
-        assert db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 4").fetchone()[0] == '"28"'
+        assert (
+            db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 4").fetchone()[0]
+            == '"28"'
+        )
         clock.advance(3)
         done = submit(c)
         assert done["score"] == 1 + 4 and done["max_score"] == 1 + 2 + 3 + 4
@@ -868,3 +872,149 @@ def test_parent_preview_is_not_reachable_for_the_child(tmp_path):
             r = c.get(f"/tasks/{task}?{query}", headers=CHILD)
             assert r.status_code == 200 and 'data-act="attempt"' in r.text, query
             assert r.text.count("disabled") == plain.text.count("disabled"), query
+
+
+def test_start_during_assembly_is_caught_by_the_fresh_check(tmp_path, monkeypatch):
+    """Старт зафиксирован, пока собирался ответ (внутри снимка, который его не видит): свежее
+    чтение после сборки отдаёт 409, а не экран с данными задания варианта."""
+    from app.tutor import web
+
+    c, clock, _ = boot(tmp_path)
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        assert attempt(c, task, "Б", "sure").status_code == 200
+        real = web.build_view
+        urls = (f"/api/tasks/{task}/tutor", f"/tasks/{task}/tutor", f"/tasks/{task}")
+        for url in urls:
+            sql(tmp_path, "UPDATE exam_attempt SET status = 'submitted', end_reason = 'manual'")
+            fired = []
+
+            def racing(*a, _fired=fired, **kw):
+                view = real(*a, **kw)
+                if not _fired:
+                    _fired.append(1)
+                    other = open_db(tmp_path / "olymp.db")
+                    try:
+                        exam.start(other, clock(), mode="real", material_id=1)
+                    finally:
+                        other.close()
+                return view
+
+            monkeypatch.setattr(web, "build_view", racing)
+            r = c.get(url, headers={**CHILD, "HX-Request": "true"})
+            assert fired and r.status_code == 409 and "идёт олимпиада" in r.text, url
+            assert "Решение" not in r.text and "верно" not in r.text.lower(), url
+            monkeypatch.undo()
+
+
+def test_blank_is_plain_forms_with_revision_and_origin_check(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        a = start_real(c).json()["attempt_id"]
+        page = c.get("/exam/run", headers=CHILD).text
+        assert "fetch(" not in page and "hx-" not in page and 'method="post"' in page
+        views = lambda: db(tmp_path).execute("SELECT COUNT(*) FROM exam_view").fetchone()[0]
+        # успех - 303 на страницу; повтор того же действия не применяется второй раз
+        form = form_of(c)
+        first = act(c, "open:2", form, **keep(c))
+        assert first.status_code == 303 and first.headers["location"] == "/exam/run"
+        n = views()
+        again = act(c, "open:2", form)
+        assert again.status_code == 303 and views() == n
+        assert int(form_of(c)["rev"]) == int(form["rev"]) + 1
+        # вторая вкладка с прежней ревизией: данные и интервал не меняются, ввод показан
+        stale = act(c, "save", {**form, "action_id": "tab2"}, a="В")
+        assert stale.status_code == 409 and "В" in stale.text and "не сохранён" in stale.text
+        assert views() == n and current(c)[1]["items"][1]["answer"] is None
+        # выбор восстанавливается по token, «28,0» сохраняется как 28
+        at(c, 2, "save", a=["А", "В"])
+        html = c.get("/exam/run", headers=CHILD).text
+        assert 'value="А" checked' in html and 'value="В" checked' in html
+        assert 'value="Б" checked' not in html
+        at(c, 3, "save", **{"m.1": "А"})  # частичное соответствие сохраняется как есть
+        assert 'value="А" selected' in c.get("/exam/run", headers=CHILD).text
+        at(c, 4, "save", n="28,0")
+        assert current(c)[1]["items"][3]["answer"] == "28"
+        # невалидное число: страница с ошибкой и исходным вводом, действие не выполнено
+        rev = form_of(c)["rev"]
+        bad = act(c, "save", n="двадцать")
+        assert bad.status_code == 422 and 'value="двадцать"' in bad.text
+        assert form_of(c)["rev"] == rev and current(c)[1]["items"][3]["answer"] == "28"
+        # сдача не блокируется; пустое и частичное оценены как 0 по §1.1
+        done = submit(c)
+        assert done["id"] == a and done["score"] == 2 + 4
+        assert {i["position"]: i["points"] for i in done["items"]}[3] == 0
+
+
+def test_form_post_needs_its_own_origin(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        data = {**form_of(c), "action": "save", "a": "Б"}
+        for headers in (
+            {"Origin": "http://evil.example"},
+            {"Referer": "http://evil.example/x"},
+            {"Origin": "null"},
+            {},
+        ):
+            r = c.post("/exam/act", data=data, headers={**CHILD, **headers}, follow_redirects=False)
+            assert r.status_code == 403, headers
+        assert current(c)[1]["items"][0]["answer"] is None
+        for headers in ({"Origin": "http://testserver"}, {"Referer": "http://testserver/exam/run"}):
+            data = {**form_of(c), "action": "save", "a": "Б"}
+            r = c.post("/exam/act", data=data, headers={**CHILD, **headers}, follow_redirects=False)
+            assert r.status_code == 303, headers
+
+
+def test_every_child_route_is_classified(tmp_path):
+    """Таблица детских маршрутов (метод, путь) -> класс; новый маршрут без класса роняет тест."""
+    from fastapi.routing import APIRoute
+
+    from tests.test_auth import flat_routes
+
+    blocked, filtered, safe, exam_own, neutral = "blocked", "filtered", "safe", "exam", "neutral"
+    classes = {
+        # задания варианта закрыты 409 «идёт олимпиада»
+        **{("POST", f"/tasks/{{task_id}}/{x}"): blocked for x in (
+            "attempt", "hint", "explain", "chat", "show-answer", "repeat", "dispute", "voice")},
+        ("GET", "/api/tasks/{task_id}/tutor"): blocked,
+        ("GET", "/tasks/{task_id}/tutor"): blocked,
+        ("GET", "/tasks/{task_id}"): blocked,
+        # выдача с фильтрацией заданий идущего варианта
+        ("GET", "/my"): filtered, ("GET", "/api/my"): filtered,
+        ("GET", "/api/my/sessions/{session_id}"): filtered, ("GET", "/today"): filtered,
+        ("GET", "/tasks"): filtered, ("POST", "/session/finish"): filtered,
+        ("GET", "/exam"): filtered, ("GET", "/api/exam"): filtered,
+        ("GET", "/exam/results/{attempt_id}"): filtered,
+        ("GET", "/api/exam/results/{attempt_id}"): filtered,
+        # безопасная выдача условия: без ключа и признака верности
+        ("GET", "/api/tasks"): safe, ("GET", "/api/tasks/{task_id}"): safe,
+        ("GET", "/api/search"): safe, ("GET", "/tasks/{task_id}/figure.png"): safe,
+        ("GET", "/exam/figure/{position}.png"): safe,
+        # бланк: собственные ответы ребёнка текущего прохождения
+        ("GET", "/exam/run"): exam_own, ("POST", "/exam/act"): exam_own,
+        ("POST", "/exam/start"): exam_own, ("GET", "/api/exam/current"): exam_own,
+        # служебные: данных заданий нет
+        ("GET", "/"): neutral, ("GET", "/healthz"): neutral, ("GET", "/how"): neutral,
+        ("GET", "/notice"): neutral, ("POST", "/notice/ack"): neutral,
+        ("POST", "/my/sessions/{session_id}/show-parent"): neutral,
+    }  # fmt: skip
+    parent_only = {
+        ("GET", "/materials/{material_id}/pdf"), ("GET", "/materials/{material_id}/pages/{page}.png"),
+    }  # fmt: skip
+    c, _clock, _ = boot(tmp_path)
+    seen = set()
+    for route in flat_routes(c.app.routes):
+        if not isinstance(route, APIRoute) or route.path.startswith("/parent"):
+            continue
+        for method in route.methods - {"HEAD", "OPTIONS"}:
+            if (method, route.path) not in parent_only:
+                seen.add((method, route.path))
+    assert seen - set(classes) == set(), f"маршрут без класса: {sorted(seen - set(classes))}"
+    assert set(classes) - seen == set(), "в таблице есть несуществующий маршрут"

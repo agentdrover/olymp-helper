@@ -168,9 +168,7 @@ def _entered(task_type: str, form) -> tuple[Any, dict, str]:
         text = str(form.get("n", ""))
         return text, {"n": text}, text
     if task_type == "match":
-        pairs = {
-            k[2:]: str(form.get(k, "")) for k in form.keys() if k.startswith("m.")
-        }  # fmt: skip
+        pairs = {k[2:]: str(form.get(k, "")) for k in form if k.startswith("m.")}
         chosen = {k: v for k, v in pairs.items() if v}
         return chosen, {"m": pairs}, "; ".join(f"{k} → {v}" for k, v in chosen.items())
     chosen = [str(v) for v in form.getlist("a")]
