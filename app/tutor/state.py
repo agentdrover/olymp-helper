@@ -14,6 +14,7 @@ from app.ingest.model_answer import model_value
 from app.ingest.publish import assist_mode
 from app.ingest.store import atomic, get_task, options_of
 from app.sessions import IDLE_TIMEOUT
+from app.tutor import steps
 from app.tutor.check import BadAnswer, parse_answer
 from app.tutor.guard import leaks_note, render_markdown, strip_claims
 from app.tutor.outcomes import outcome_label
@@ -293,10 +294,12 @@ def _remember(conn, run_id: int, html: str) -> None:
 
 
 def store_hint(
-    conn, run_id: int, level: int, html: str, generic: bool, uncertainty: str, now, reason=None
-):
+    conn, run_id: int, level: int, html: str, generic: bool, uncertainty: str, now, reason=None,
+    step_id=None,
+):  # fmt: skip
     """Записать подсказку 1 или 2, если прогон не ушёл вперёд за время запроса к модели."""
     with atomic(conn):
+        steps.hold(conn, step_id)
         run = get_run(conn, run_id)
         if is_terminal(run) or run["hints"] != level - 1:
             return False
@@ -397,8 +400,9 @@ def update_run_json(conn, run_id: int, column: str, value) -> None:
     )
 
 
-def merge_solution(conn, run_id: int, **fields) -> None:
+def merge_solution(conn, run_id: int, step_id=None, **fields) -> None:
     with atomic(conn):
+        steps.hold(conn, step_id)
         run = get_run(conn, run_id)
         if run["solution_json"] is None:
             return
@@ -408,10 +412,12 @@ def merge_solution(conn, run_id: int, **fields) -> None:
 
 
 def store_analysis(
-    conn, run_id: int, attempts: int, html: str, generic: bool, uncertainty: str, reason=None
-):
+    conn, run_id: int, attempts: int, html: str, generic: bool, uncertainty: str, reason=None,
+    step_id=None,
+):  # fmt: skip
     """Разбор ошибки; пишется, только если с тех пор не было новой попытки."""
     with atomic(conn):
+        steps.hold(conn, step_id)
         run = get_run(conn, run_id)
         if is_terminal(run) or run["attempts"] != attempts:
             return
@@ -422,8 +428,11 @@ def store_analysis(
         )  # fmt: skip
 
 
-def add_explain(conn, run_id: int, mode: str, label: str, html: str, uncertainty: str, now):
+def add_explain(
+    conn, run_id: int, mode: str, label: str, html: str, uncertainty: str, now, step_id=None
+):
     with atomic(conn):
+        steps.hold(conn, step_id)
         run = get_run(conn, run_id)
         items = json.loads(run["explains_json"])
         items.append({"mode": mode, "label": label, "html": html})
@@ -434,10 +443,11 @@ def add_explain(conn, run_id: int, mode: str, label: str, html: str, uncertainty
         })  # fmt: skip
 
 
-def record_discrepancy(conn, task, run_id: int, out, now) -> None:
+def record_discrepancy(conn, task, run_id: int, out, now, step_id=None) -> None:
     """Ответ модели расходится с ключом: запись родителю (ребёнок её не видит)."""
     answer = json.dumps(out.value, ensure_ascii=False)
     with atomic(conn):
+        steps.hold(conn, step_id)
         same = conn.execute(
             "SELECT 1 FROM tutor_discrepancy WHERE task_item_id = ? AND revision = ? "
             "AND key_version = ? AND model_answer = ?",

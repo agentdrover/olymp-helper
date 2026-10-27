@@ -61,16 +61,21 @@ class Flow:
 
     def _begin(self, task, kind: str = "step") -> bool:
         """Весь шаг (генерация, судья, перегенерация) - один запрос в работе на задание."""
+        if self.inflight.since(task["id"]) is not None:
+            self.panel_state = "thinking"
+            return False
         last = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM event").fetchone()[0]
-        if not self.inflight.acquire(task["id"], last):
+        step_id = steps.start(self.conn, task["id"], kind, self.now)
+        if not self.inflight.acquire(task["id"], last, step_id):  # замок и шаг - одной операцией
+            steps.discard(self.conn, step_id)
             self.panel_state = "thinking"
             return False
         try:
-            self.step_id = steps.start(self.conn, task["id"], kind, self.now)
+            steps.activate(self.conn, step_id)
         except BaseException:
-            self.inflight.release(task["id"])
+            self.inflight.release(task["id"], step_id)
             raise
-        self.inflight.bind(task["id"], self.step_id)
+        self.step_id = step_id
         return True
 
     def _end(self, task, error: str | None = None) -> None:
@@ -150,7 +155,9 @@ class Flow:
         """С ключом: ответ модели расходится с ключом -> запись родителю, True."""
         ref, keyed = state.reference(task)
         if keyed and out.value != ref:
-            state.record_discrepancy(self.conn, task, run["id"], out, self.now)
+            state.record_discrepancy(
+                self.conn, task, run["id"], out, self.now, step_id=self.step_id
+            )
             return True
         return False
 
@@ -272,22 +279,33 @@ class Flow:
         else:
             html, reason, unc = self._vet(task, run, "mistake", out, own)
         state.store_analysis(
-            self.conn, run["id"], run["attempts"], html, reason is not None, unc, reason
+            self.conn,
+            run["id"],
+            run["attempts"],
+            html,
+            reason is not None,
+            unc,
+            reason,
+            step_id=self.step_id,
         )
 
     def _explain_solution(self, task, run) -> None:
         """Объяснение решения при ключе: независимое решение модели сверяется с ключом."""
         if state.is_disputed(self.conn, task):
-            state.merge_solution(self.conn, run["id"], disputed=True)
+            state.merge_solution(self.conn, run["id"], self.step_id, disputed=True)
             return
         out = self._ask(task, run, "solution")
         if out is None:
             return
         if self._discrepant(task, run, out):
-            state.merge_solution(self.conn, run["id"], disputed=True, explanation_html=None)
+            state.merge_solution(
+                self.conn, run["id"], self.step_id, disputed=True, explanation_html=None
+            )
             return
         html, reason = self._safe(task, out.explanation, "explain", reveal=True)
-        state.merge_solution(self.conn, run["id"], explanation_html=None if reason else html)
+        state.merge_solution(
+            self.conn, run["id"], self.step_id, explanation_html=None if reason else html
+        )
 
     def hint(self, task_id: int, level, confirm: bool) -> None:
         task = get_task(self.conn, task_id)
@@ -324,7 +342,15 @@ class Flow:
         else:
             html, reason, unc = self._vet(task, run, f"hint{level}", out)
         state.store_hint(
-            self.conn, run["id"], level, html, reason is not None, unc, self.now, reason
+            self.conn,
+            run["id"],
+            level,
+            html,
+            reason is not None,
+            unc,
+            self.now,
+            reason,
+            step_id=self.step_id,
         )
 
     def explain(self, task_id: int, mode) -> None:
@@ -361,7 +387,9 @@ class Flow:
             return
         # свежее объяснение расходится с ключом: родителю, не ребёнку
         if self._discrepant(task, run, out):
-            state.merge_solution(self.conn, run["id"], disputed=True, explanation_html=None)
+            state.merge_solution(
+                self.conn, run["id"], self.step_id, disputed=True, explanation_html=None
+            )
             self.notice = DISPUTED[0].upper() + DISPUTED[1:] + "."
             return
         html, reason = self._safe(task, out.explanation, "explain", reveal=True)
@@ -375,7 +403,9 @@ class Flow:
         if reason:
             self.notice = "Объяснение не получилось, попробуй другой способ."
             return
-        state.add_explain(self.conn, run["id"], mode, label, html, out.uncertainty, self.now)
+        state.add_explain(
+            self.conn, run["id"], mode, label, html, out.uncertainty, self.now, self.step_id
+        )
 
     def show_answer(self, task_id: int, confirm: bool) -> None:
         state.show_answer(self.conn, task_id, confirm, self.now)

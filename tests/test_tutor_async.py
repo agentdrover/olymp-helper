@@ -4,16 +4,20 @@
 """
 
 import re
+import threading
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.tutor.panel import LONG_WAIT_S
+from app.tutor import state as tutor_state
+from app.tutor import steps
+from app.tutor.panel import LONG_WAIT_S, Inflight
 from app.tutor.steps import STEP_TIMEOUT_S
-from tests.bank_helpers import CHILD, build_app
+from tests.bank_helpers import CHILD, build_app, db
 from tests.chat_helpers import chat_reply, say
-from tests.tutor_helpers import Blocking, Clock, attempt, post, seed, view
+from tests.tutor_helpers import Blocking, Clock, Scripted, attempt, out, post, seed, view
 
 STATIC = Path(__file__).parent.parent / "app" / "static" / "tutor.js"
 
@@ -156,3 +160,282 @@ def test_a_chat_question_runs_in_the_background(tmp_path):
         done = view(c, tid)
         assert done["panel"]["state"] == "idle" and len(done["chat"]) == 1
         assert c.app.state.inflight.since(tid) is None
+
+
+# ---------------------------------------------------------------- опоздавший шаг (Codex P1/P2)
+
+
+class Gated(Scripted):
+    """Вызов модели с номером из `blocked` стоит на своём событии; остальные идут сразу."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.started = 0
+        self._lock = threading.Lock()
+        self._gates = {}
+        self._entered = {}
+        self.blocked = set()
+
+    def _slot(self, table, k):
+        with self._lock:
+            return table.setdefault(k, threading.Event())
+
+    def gate(self, k):
+        return self._slot(self._gates, k)
+
+    def entered(self, k):
+        return self._slot(self._entered, k)
+
+    def complete(self, *a, **kw):
+        with self._lock:
+            k = self.started
+            self.started += 1
+        self.entered(k).set()
+        if k in self.blocked:
+            assert self.gate(k).wait(20)
+        return super().complete(*a, **kw)
+
+
+def expire_blocked(c, model, clock, tid, trigger):
+    """Запустить шаг, который встанет в модели, и снять его по сроку. (номер вызова, шаг)."""
+    k = model.started
+    model.blocked.add(k)
+    trigger()
+    assert model.entered(k).wait(10)
+    step = view(c, tid)["panel"]["step"]
+    clock.advance(STEP_TIMEOUT_S + 1)
+    assert view(c, tid)["panel"]["state"] == "step_failed"
+    assert c.app.state.inflight.since(tid) is None
+    return k, step
+
+
+def release_late(c, model, k, step):
+    model.gate(k).set()
+    c.app.state.steps.join_step(step)
+
+
+def rows(tmp_path, sql):
+    conn = db(tmp_path)
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
+def normal_wrong(c, tid):
+    attempt(c, tid, "А")
+    c.app.state.steps.join()
+
+
+def test_a_late_hint_publishes_nothing(tmp_path):
+    model = Gated()
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        normal_wrong(c, tid)
+        k, step = expire_blocked(c, model, clock, tid, lambda: post(c, tid, "hint", level=1))
+        release_late(c, model, k, step)
+        v = view(c, tid)
+        assert v["hints"] == 0 and v["hints_list"] == []
+        assert events_of(tmp_path, "hint") == 0
+
+
+def test_a_late_mistake_analysis_publishes_nothing(tmp_path):
+    model = Gated()
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        k, step = expire_blocked(c, model, clock, tid, lambda: attempt(c, tid, "А"))
+        release_late(c, model, k, step)
+        assert view(c, tid)["analysis"] is None
+        other = seed(tmp_path, key="Б")  # контроль: без опоздания разбор есть
+        normal_wrong(c, other)
+        assert view(c, other)["analysis"]
+
+
+def test_a_late_solution_explanation_publishes_nothing(tmp_path):
+    model = Gated()
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        k, step = expire_blocked(c, model, clock, tid, lambda: attempt(c, tid, "Б"))
+        release_late(c, model, k, step)
+        assert view(c, tid)["solution"]["explanation"] is None
+        other = seed(tmp_path, key="Б")
+        attempt(c, other, "Б")
+        c.app.state.steps.join()
+        assert view(c, other)["solution"]["explanation"]
+
+
+def test_a_late_explain_publishes_nothing(tmp_path):
+    model = Gated()
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        attempt(c, tid, "Б")
+        c.app.state.steps.join()
+        k, step = expire_blocked(
+            c, model, clock, tid, lambda: post(c, tid, "explain", mode="simpler")
+        )
+        release_late(c, model, k, step)
+        assert view(c, tid)["explains"] == []
+        assert events_of(tmp_path, "explain") == 0
+        other = seed(tmp_path, key="Б")
+        attempt(c, other, "Б")
+        c.app.state.steps.join()
+        post(c, other, "explain", mode="simpler")
+        c.app.state.steps.join()
+        assert len(view(c, other)["explains"]) == 1
+
+
+def test_a_late_step_records_no_discrepancy(tmp_path):
+    # ответ модели расходится с ключом Б; разбор и подсказка называют разное: запись подсказки не
+    # схлопывается с уже лежащей записью разбора
+    model = Gated(reply=lambda kind, _c: out("Г") if kind == "mistake" else out("В"))
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        normal_wrong(c, tid)
+        before = len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy"))
+        k, step = expire_blocked(c, model, clock, tid, lambda: post(c, tid, "hint", level=1))
+        release_late(c, model, k, step)
+        assert len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy")) == before
+        assert view(c, tid)["hints"] == 0
+        other = seed(tmp_path, key="Б")  # контроль: без опоздания расхождение записано
+        normal_wrong(c, other)
+        mid = len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy"))
+        post(c, other, "hint", level=1)
+        c.app.state.steps.join()
+        assert len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy")) == mid + 1
+
+
+def test_two_chats_late_one_is_not_published_beside_the_other(tmp_path):
+    model = Gated(default=chat_reply("Ответ."))
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        k, step = expire_blocked(c, model, clock, tid, lambda: say(c, tid, "Исключи А и В"))
+        say(c, tid, "Исключи Г")  # замена идёт и записывается
+        c.app.state.steps.join_step(rows(tmp_path, "SELECT MAX(id) FROM tutor_step")[0][0])
+        assert [m["question"] for m in view(c, tid)["chat"]] == ["Исключи Г"]
+        release_late(c, model, k, step)
+        assert [m["question"] for m in view(c, tid)["chat"]] == ["Исключи Г"]
+        assert events_of(tmp_path, "chat") == 1
+
+
+def test_the_panel_never_shows_idle_with_a_stale_run(tmp_path, monkeypatch):
+    model = Gated()
+    c, _clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        normal_wrong(c, tid)
+        k = model.started
+        model.blocked.add(k)
+        post(c, tid, "hint", level=1)
+        assert model.entered(k).wait(10)
+        step = view(c, tid)["panel"]["step"]
+        real = tutor_state.active_run
+        armed = [True]
+
+        def spy(*a, **kw):
+            run = real(*a, **kw)  # прогон прочитан ДО конца шага...
+            if armed and not threading.current_thread().name.startswith("step-"):
+                armed.clear()
+                release_late(c, model, k, step)  # ...шаг заканчивается между чтениями
+            return run
+
+        monkeypatch.setattr(tutor_state, "active_run", spy)
+        v = view(c, tid)
+        monkeypatch.undo()
+        assert not armed, "шаг должен был закончиться посреди чтения"
+        assert v["panel"]["busy"] and v["panel"]["step"] == step  # опрос продолжится
+        done = c.get(f"/api/tasks/{tid}/tutor?step={step}", headers=CHILD).json()
+        assert done["panel"]["state"] == "idle" and done["hints"] == 1
+
+
+def test_a_late_worker_cannot_release_the_next_steps_lock(tmp_path):
+    model = Gated()
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        normal_wrong(c, tid)
+        k, step = expire_blocked(c, model, clock, tid, lambda: post(c, tid, "hint", level=1))
+        model.blocked.add(model.started)  # замена тоже встанет
+        k2 = model.started
+        post(c, tid, "hint", level=1)
+        assert model.entered(k2).wait(10)
+        holder = c.app.state.inflight.step_of(tid)
+        assert holder is not None and holder != step
+        release_late(c, model, k, step)
+        assert c.app.state.inflight.step_of(tid) == holder  # опоздавший замок не снял
+        started = c.app.state.steps.started
+        assert post(c, tid, "hint", level=1).json()["panel"]["state"] == "thinking"
+        assert c.app.state.steps.started == started, "третий шаг не должен стартовать"
+        model.gate(k2).set()
+        c.app.state.steps.join()
+        assert view(c, tid)["hints"] == 1
+
+
+def test_inflight_lock_always_has_an_owner_step():
+    lock = Inflight()
+    with pytest.raises(TypeError):
+        lock.acquire(1, 0)  # без номера шага замок не берётся
+    assert lock.acquire(1, 0, 7)
+    assert not lock.acquire(1, 0, 8)
+    with pytest.raises(TypeError):
+        lock.release(1)  # снять без номера шага нельзя
+    lock.release(1, 3)  # чужой шаг
+    assert lock.step_of(1) == 7
+    lock.release(1, 7)
+    assert lock.since(1) is None and lock.acquire(1, 0, 9)
+
+
+def events_of(tmp_path, kind):
+    return len(rows(tmp_path, f"SELECT 1 FROM event WHERE type = '{kind}'"))
+
+
+def expire_after_discrepancy(c, clock, monkeypatch):
+    """Шаг снимается по сроку сразу после записи расхождения - между двумя записями одного шага."""
+    real = tutor_state.record_discrepancy
+
+    def wrapped(conn, task, run_id, out, now, step_id=None):
+        real(conn, task, run_id, out, now, step_id=step_id)
+        side = db(Path(conn.execute("PRAGMA database_list").fetchone()[2]).parent)
+        try:
+            steps.finish(side, step_id, "failed", clock(), error="timeout")
+        finally:
+            side.close()
+
+    monkeypatch.setattr(tutor_state, "record_discrepancy", wrapped)
+
+
+def test_a_step_expired_between_its_writes_does_not_mark_the_solution_disputed(
+    tmp_path, monkeypatch
+):
+    model = Gated(default=out("В"))  # решение модели расходится с ключом
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        expire_after_discrepancy(c, clock, monkeypatch)
+        tid = seed(tmp_path, key="Б")
+        attempt(c, tid, "Б")
+        c.app.state.steps.join()
+        assert len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy")) == 1
+        assert view(c, tid)["solution"]["disputed"] is False
+        assert [r[0] for r in rows(tmp_path, "SELECT error FROM tutor_step")][-1] == "timeout"
+
+
+def test_an_explain_step_expired_between_its_writes_does_not_mark_the_solution_disputed(
+    tmp_path, monkeypatch
+):
+    model = Gated(reply=lambda kind, _c: out("В") if kind.startswith("explain_") else out("Б"))
+    c, clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        attempt(c, tid, "Б")
+        c.app.state.steps.join()
+        expire_after_discrepancy(c, clock, monkeypatch)
+        post(c, tid, "explain", mode="simpler")
+        c.app.state.steps.join()
+        assert len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy")) == 1
+        assert view(c, tid)["solution"]["disputed"] is False
+        assert [r[0] for r in rows(tmp_path, "SELECT error FROM tutor_step")][-1] == "timeout"

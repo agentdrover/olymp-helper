@@ -21,7 +21,7 @@ from app.tutor import state, steps
 from app.tutor.flow import Flow
 from app.tutor.state import Refused
 from app.tutor.today import build_today
-from app.tutor.view import build_view
+from app.tutor.view import build_view, snapshot_live
 from app.voice.service import VOICE_STATES
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
@@ -112,6 +112,7 @@ def _view_of(
     его итог (отказ модели, пояснение) показывается один раз."""
     app = request.app
     task, material = _published(conn, task_id)
+    live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # сначала: идёт ли
     run = state.active_run(conn, task)
     shown, note = _step_result(conn, task_id, step)
     if flow is not None:
@@ -119,7 +120,7 @@ def _view_of(
         note = note or flow.notice
     return build_view(
         conn, task, material, run, app.state.clock(),
-        inflight=app.state.inflight, panel_state=shown, notice=notice or note,
+        inflight=app.state.inflight, panel_state=shown, notice=notice or note, live=live,
     )  # fmt: skip
 
 
@@ -244,11 +245,12 @@ def task_page(task_id: int, request: Request, conn: Db):
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
     app = request.app
+    live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # до чтения прогона
     with atomic(conn):  # экран открыт: с этого момента идут 60 секунд до подсказки 1
         state.ensure_run(conn, task_id, app.state.clock())
     view = build_view(
         conn, task, material, state.active_run(conn, task), app.state.clock(),
-        inflight=app.state.inflight,
+        inflight=app.state.inflight, live=live,
     )  # fmt: skip
     return TEMPLATES.TemplateResponse(request, "child/task.html", {"v": view, "task": view["task"]})
 

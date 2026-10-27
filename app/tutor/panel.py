@@ -43,24 +43,20 @@ class Inflight:
         self._lock = threading.Lock()
         self._items: dict = {}
 
-    def acquire(self, key, since_event: int) -> bool:
+    def acquire(self, key, since_event: int, step_id: int) -> bool:
+        """Замок и номер шага берутся одной операцией: у замка нет момента без владельца."""
         with self._lock:
             if key in self._items:
                 return False
-            self._items[key] = [since_event, None]
+            self._items[key] = [since_event, step_id]
             return True
 
-    def bind(self, key, step_id: int) -> None:
-        with self._lock:
-            if key in self._items:
-                self._items[key][1] = step_id
-
-    def release(self, key, step_id: int | None = None) -> None:
-        """С номером шага снимает замок только если он этого шага: опоздавший поток не снимет
-        замок следующего шага."""
+    def release(self, key, step_id: int) -> None:
+        """Снимает замок только если им владеет именно этот шаг: опоздавший поток не снимет
+        замок следующего шага. Снять замок без номера шага нельзя."""
         with self._lock:
             item = self._items.get(key)
-            if item is not None and (step_id is None or item[1] in (None, step_id)):
+            if item is not None and item[1] == step_id:
                 del self._items[key]
 
     def since(self, key) -> int | None:

@@ -24,11 +24,39 @@ STEP_TIMEOUT_S = 2 * REQUEST_TIMEOUT_S * STEP_CALLS
 FAILED_TEXT = "Помощник не ответил вовремя"
 
 
+class StepExpired(Exception):
+    """Шаг снят по сроку или потерял замок: его результат нельзя публиковать."""
+
+
 def start(conn, task_id: int, kind: str, now: datetime) -> int:
+    """Строка шага в состоянии pending: идущим (running) он становится, когда взял замок."""
     return conn.execute(
         "INSERT INTO tutor_step (task_item_id, kind, started_at) VALUES (?, ?, ?)",
         (task_id, kind, now.isoformat()),
     ).lastrowid
+
+
+def activate(conn, step_id: int) -> None:
+    conn.execute("UPDATE tutor_step SET status = 'running' WHERE id = ?", (step_id,))
+
+
+def discard(conn, step_id: int) -> None:
+    conn.execute("DELETE FROM tutor_step WHERE id = ? AND status = 'pending'", (step_id,))
+
+
+def hold(conn, step_id: int | None) -> None:
+    """Сравнить-и-держать: вызывается ВНУТРИ транзакции записи результата. Шаг ещё идёт - строка
+    шага залочена этой же транзакцией, снять шаг по сроку одновременно нельзя; не идёт -
+    StepExpired, транзакция откатывается и ничего не публикуется. Все писатели результата
+    (подсказка, разбор ошибки, объяснение, чат, расхождение) проходят через эту функцию."""
+    if step_id is None:
+        return
+    done = conn.execute(
+        "UPDATE tutor_step SET finished_at = finished_at WHERE id = ? AND status = 'running'",
+        (step_id,),
+    )
+    if done.rowcount != 1:
+        raise StepExpired(f"шаг {step_id} уже снят")
 
 
 def finish(
@@ -105,6 +133,11 @@ class StepRunner:
         finally:
             if conn is not None:
                 conn.close()
+
+    def join_step(self, step_id: int, timeout: float = 20) -> None:
+        for worker in list(self._threads):
+            if worker.name == f"step-{step_id}":
+                worker.join(timeout)
 
     def join(self, timeout: float = 20) -> None:
         """Подождать рабочие потоки (тесты)."""

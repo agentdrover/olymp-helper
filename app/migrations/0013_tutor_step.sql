@@ -6,7 +6,7 @@ CREATE TABLE tutor_step (
     kind TEXT NOT NULL,
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'done', 'failed')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'done', 'failed')),
     -- Что показать в панели по окончании: down, limit, no_hints... (done) и пояснение ребёнку.
     panel_state TEXT,
     notice TEXT,

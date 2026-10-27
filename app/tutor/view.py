@@ -30,9 +30,17 @@ def _solution(run) -> dict | None:
     }
 
 
+def snapshot_live(conn, inflight: Inflight, task_id: int, now: datetime) -> str:
+    """Идёт ли шаг. Читать ПЕРВЫМ, до прогона и итога шага: закончившийся между чтениями шаг
+    тогда виден как «думаю» (опрос продолжится), а не как «пусто» при устаревшем прогоне."""
+    steps.expire(conn, inflight, task_id, now)  # зависший шаг не держит панель вечно
+    return live_state(conn, inflight, task_id)
+
+
 def build_view(
-    conn, task, material, run, now: datetime, *, inflight: Inflight, panel_state=None, notice=None
-) -> dict:
+    conn, task, material, run, now: datetime, *, inflight: Inflight, panel_state=None, notice=None,
+    live=None,
+) -> dict:  # fmt: skip
     keyed = has_key(task)
     assist = assist_mode(task)
     terminal = run is not None and state.is_terminal(run)
@@ -50,16 +58,19 @@ def build_view(
     analysis = None
     if run and not terminal and run["analysis_json"]:
         analysis = json.loads(run["analysis_json"])["html"]
-    steps.expire(conn, inflight, task["id"], now)  # зависший шаг не держит панель вечно
-    live = live_state(conn, inflight, task["id"])
+    if live is None:
+        live = snapshot_live(conn, inflight, task["id"], now)
     shown = panel_state if panel_state and panel_state != "idle" else live
-    running = steps.get(conn, inflight.step_of(task["id"])) if shown in BUSY else None
+    # шаг мог закончиться после снимка «идёт»: его номер всё равно отдаём, чтобы опрос забрал итог
+    running = None
+    if shown in BUSY:
+        running = steps.get(conn, inflight.step_of(task["id"])) or steps.latest(conn, task["id"])
     if running is None and shown not in BUSY and not notice:
         last_step = steps.latest(conn, task["id"])
         if shown == "idle" and last_step and last_step["status"] == "failed":
             shown = "step_failed"  # шаг не закончился (сбой, срок, перезапуск): не «думаю» вечно
     extra = {}
-    if running is not None and running["status"] == "running":
+    if running is not None:
         extra = {
             "step": running["id"],
             "started_at": running["started_at"],
