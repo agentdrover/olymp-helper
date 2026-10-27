@@ -15,8 +15,9 @@ from app.tutor.seq import bump
 
 __all__ = ["DEFAULT_MODELS", "LIMIT_MESSAGE", "ModelService", "model_family"]
 
-# Модель задаётся явно у обоих каналов: семейства закреплены и разные (family).
-DEFAULT_MODELS = {"claude": "sonnet", "cursor": "gpt-5"}
+# claude закреплён; cursor - auto (gpt-5 через cursor-agent на k8 падает): без закреплённой
+# модели family(cursor) None, автопубликация невозможна - осознанное ограничение.
+DEFAULT_MODELS = {"claude": "sonnet", "cursor": "auto"}
 _FAMILIES = (
     (re.compile(r"(claude|sonnet|opus|haiku)([-.:\d]|$)"), "anthropic"),
     (re.compile(r"(gpt|o[134]|codex)([-.:\d]|$)"), "openai"),

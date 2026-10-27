@@ -11,7 +11,7 @@ from app.db import connect, migrate
 from app.model.client import ExecutorChannel
 from app.model.executor_server import handle_request
 from app.model.images import MAX_IMAGE_BYTES, MAX_IMAGES, UNTRUSTED_IMAGE_RULE
-from app.model.service import ModelService, model_family
+from app.model.service import DEFAULT_MODELS, ModelService, model_family
 from app.model.types import ModelResult
 
 
@@ -142,9 +142,10 @@ def test_family_is_pinned_and_no_fallback(tmp_path):
     migrate(conn)
     down, spare = Down("claude"), Down("cursor")
     svc = ModelService(conn, {"claude": down, "cursor": spare})
-    # по умолчанию модели явные и семейства разные
+    # по умолчанию claude закреплён, cursor - auto (на k8 gpt-5 через cursor-agent падает)
+    assert DEFAULT_MODELS["cursor"] == "auto"
     assert svc.family("claude") == "anthropic"
-    assert svc.family("cursor") == "openai"
+    assert svc.family("cursor") is None
     conn.execute(
         "UPDATE settings SET claude_model='claude-sonnet-4-5', cursor_model='gemini-2.5-pro'"
     )

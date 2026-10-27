@@ -79,6 +79,28 @@ def _unfence(text: str) -> str:
     return match.group(1) if match else text
 
 
+_NOTHING = object()
+_FENCE = re.compile(r"```(?:json)?[ \t]*\n?(.*?)```", re.DOTALL)
+
+
+def _extract_json(text: str):
+    """JSON из ответа со вступлением: последний блок кода, иначе первый разбираемый {...}."""
+    for block in reversed(_FENCE.findall(text)):
+        try:
+            return json.loads(block.strip())
+        except ValueError:
+            continue
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch == "{":
+            try:
+                obj, _ = decoder.raw_decode(text, i)
+            except ValueError:
+                continue
+            return obj
+    return _NOTHING
+
+
 def _result_event(stdout: str):
     """Поток stream-json: по строке на событие; ответ - последнее событие type=result."""
     found = None
@@ -120,7 +142,11 @@ def parse_cli_json(stdout: str, schema: dict | None) -> Parsed:
     try:
         return Parsed(None, json.loads(_unfence(result)), usage)
     except ValueError:
-        raise ChannelError("bad_schema_json") from None
+        pass
+    found = _extract_json(result)
+    if found is _NOTHING:
+        raise ChannelError("bad_schema_json")
+    return Parsed(None, found, usage)
 
 
 class ClaudeAdapter:
