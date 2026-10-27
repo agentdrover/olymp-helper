@@ -4,11 +4,13 @@
 без подтверждённого рисунка и без единой попытки ребёнка. Иначе разбор заново стёр бы работу."""
 
 import json
+import logging
 import sqlite3
 
 from app.ingest.review import Refusal
 from app.ingest.store import atomic
 
+log = logging.getLogger("app.ingest")
 TOUCHED = (
     "SELECT DISTINCT t.material_id FROM task_item t WHERE t.material_id {scope} AND ("
     "t.import_status = 'checked' OR t.revision > 1 OR t.excluded = 1 "
@@ -48,7 +50,8 @@ def reset_material(ctx, conn: sqlite3.Connection, material_id: int) -> bool:
     Отказ - Refusal 409 (ничего не удалено)."""
     with atomic(conn):
         row = conn.execute(
-            "SELECT kind, import_status, deleted_at FROM material WHERE id = ?", (material_id,)
+            "SELECT kind, import_status, run_id, deleted_at FROM material WHERE id = ?",
+            (material_id,),
         ).fetchone()
         if row is None:
             raise Refusal("Материал не найден", 404)
@@ -56,8 +59,12 @@ def reset_material(ctx, conn: sqlite3.Connection, material_id: int) -> bool:
             raise Refusal("Файл материала удалён: разобрать заново нельзя.", 409)
         if row["kind"] != "tasks":
             raise Refusal("Разобрать заново можно только сборник заданий.", 409)
-        if row["import_status"] in ("queued", "running"):
-            return False
+        if row["import_status"] == "running" or (
+            row["import_status"] == "queued"
+            and ctx.progress.get(material_id, row["run_id"]) is not None
+        ):
+            return False  # разбор идёт
+        # queued без записи хода - зависший материал (запуск потерян): запускаем снова
         if touched_materials(conn, material_id):
             raise Refusal(UNAVAILABLE + ".", 409)
         ids = [
@@ -73,5 +80,8 @@ def reset_material(ctx, conn: sqlite3.Connection, material_id: int) -> bool:
             (material_id,),
         )
     for path in files:  # файлы - после фиксации: откат транзакции не должен их терять
-        path.unlink(missing_ok=True)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:  # уборка файлов не должна блокировать разбор
+            log.warning("reparse: figure file %s not removed: %s", path, exc)
     return True

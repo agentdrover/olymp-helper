@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Annotated
 
@@ -40,6 +41,7 @@ TYPE_LABELS = {
     "numeric": "число",
 }
 
+REPARSE_LOCK = threading.Lock()
 parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)])
 public = APIRouter()
 
@@ -195,7 +197,10 @@ def reparse_material(material_id: int, request: Request, conn: Db):
     """«Разобрать заново»: только пока ни одно задание не тронуто (reparse.reset_material)."""
     html = _wants_html(request)
     try:
-        started = reset_material(ctx_of(request), conn, material_id)
+        with REPARSE_LOCK:  # сброс и запуск - одно действие: второй щелчок видит ход разбора
+            started = reset_material(ctx_of(request), conn, material_id)
+            if started:
+                request.app.state.imports.submit(material_id)
     except Refusal as exc:
         if html:
             return _materials_view(request, conn, error=exc.message, status=exc.status)
@@ -205,8 +210,6 @@ def reparse_material(material_id: int, request: Request, conn: Db):
         if html:
             return _materials_view(request, conn, error=message, status=500)
         return JSONResponse({"error": message}, status_code=500)
-    if started:
-        request.app.state.imports.submit(material_id)
     if html:
         return RedirectResponse(f"/parent/materials?msg=reparse&id={material_id}", status_code=303)
     return JSONResponse({"material_id": material_id, "started": started}, status_code=202)

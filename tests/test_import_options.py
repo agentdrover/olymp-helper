@@ -271,3 +271,54 @@ def test_reparse_refused_when_parent_touched_material(tmp_path, kind):
         assert _count(tmp_path, "task_item") == 2
         assert _status(tmp_path) == ("done", None)
         assert len(model.calls) == calls
+
+
+def test_unicode_digit_labels_are_skipped_with_a_reason(tmp_path):
+    tasks = [
+        make_task(1, "Первое условие", options=["١) первый", "٢) второй"]),
+        make_task(2, "Второе условие", options=["1) первый", "2) второй"]),
+    ]
+    model = StubModel(split=lambda content: reply(*tasks))
+    with TestClient(build_app(tmp_path, model)) as c:
+        assert upload(c, text_pdf([["1. вопрос"]])).status_code == 202
+        assert set(_stored(tmp_path)) == {"2"}
+        conn = db(tmp_path)
+        note = conn.execute("SELECT import_error FROM material").fetchone()[0]
+        conn.close()
+        assert "задание 1" in note and "без обозначения" in note
+
+
+def test_reparse_survives_a_file_that_cannot_be_removed(tmp_path, monkeypatch):
+    client, _ = _start(tmp_path)
+    with client as c:
+        assert upload(c, text_pdf([["1. вопрос"]])).status_code == 202
+        stray = Path(tmp_path / "figures" / "2-r1.png")
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_bytes(b"png")
+        original = Path.unlink
+
+        def deny(self, *args, **kwargs):
+            if self.name.endswith(".png"):
+                raise PermissionError("denied")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", deny)
+        got = c.post("/parent/materials/1/reparse", headers=API)
+        assert got.status_code == 202, got.text
+        assert _status(tmp_path) == ("done", None)
+        assert _count(tmp_path, "task_item") == 2
+
+
+def test_reparse_resubmits_a_queued_material_without_a_running_job(tmp_path):
+    client, model = _start(tmp_path)
+    with client as c:
+        assert upload(c, text_pdf([["1. вопрос"]])).status_code == 202
+        conn = db(tmp_path)
+        conn.execute("DELETE FROM task_item")
+        conn.execute("UPDATE material SET import_status = 'queued'")  # stuck: no job runs
+        conn.close()
+        calls = len(model.calls)
+        got = c.post("/parent/materials/1/reparse", headers=API)
+        assert got.status_code == 202 and got.json()["started"] is True
+        assert len(model.calls) == calls + 1
+        assert _status(tmp_path) == ("done", None)

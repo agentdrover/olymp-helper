@@ -13,7 +13,7 @@ MAX_ANSWER_TEXT = 4000
 NUMBER = re.compile(r"^\d{1,4}(\.\d{1,3})?[A-Za-zА-Яа-я]?$")
 # Вариант строкой: «А) текст», «А. текст», «а) текст», «1) текст», «A) текст». Обозначение -
 # одна буква или 1-2 цифры, затем «)» или «.» с пробелом. Порядок вариантов обозначением не служит.
-STRING_OPTION = re.compile(r"^\s*(\d{1,2}|[A-Za-zА-Яа-яЁё])(?:\)\s*|\.\s+)(\S.*)$", re.DOTALL)
+STRING_OPTION = re.compile(r"^\s*([0-9]{1,2}|[A-Za-zА-Яа-яЁё])(?:\)\s*|\.\s+)(\S.*)$", re.DOTALL)
 
 
 class InvalidStructure(Exception):
