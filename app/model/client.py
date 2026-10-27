@@ -6,8 +6,9 @@ import os
 import urllib.error
 import urllib.request
 
+from app.model.images import encode_images
 from app.model.redaction import redact
-from app.model.types import ERROR_MESSAGE, ModelResult
+from app.model.types import ERROR_MESSAGE, ChannelError, ModelResult
 
 log = logging.getLogger("app.model")
 # Исполнитель сам ждёт CLI 120 с; запас на сеть и разбор.
@@ -16,6 +17,8 @@ REQUEST_TIMEOUT_S = 130
 
 # Исполнитель отказывает от запроса больше 1 000 000 байт; запас на канал, модель и заголовки.
 MAX_REQUEST_BYTES = 900_000
+# Запрос с изображениями: исполнитель принимает до 3 000 000 байт тела; тот же запас.
+MAX_IMAGE_REQUEST_BYTES = 2_500_000
 
 
 def encode_payload(payload: dict) -> bytes:
@@ -23,19 +26,18 @@ def encode_payload(payload: dict) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 
-def request_size(system: str, messages: list, schema: dict | None) -> int:
+def request_size(system: str, messages: list, schema: dict | None, images=()) -> int:
     """Байт в теле запроса (кириллица в JSON занимает по 6 байт на знак): мерить только так."""
-    return len(
-        encode_payload(
-            {
-                "channel": "claude",
-                "model": "",
-                "system": system,
-                "messages": messages,
-                "schema": schema,
-            }
-        )
-    )
+    payload = {
+        "channel": "claude",
+        "model": "",
+        "system": system,
+        "messages": messages,
+        "schema": schema,
+    }
+    if images:
+        payload["images"] = encode_images(list(images))
+    return len(encode_payload(payload))
 
 
 def http_post(url: str, payload: dict, timeout: float, headers: dict | None = None) -> dict:
@@ -68,7 +70,7 @@ class ExecutorChannel:
         # Общий ключ приложения и исполнителя; в окружение CLI он не попадает.
         self.key = key if key is not None else os.environ.get("EXECUTOR_SHARED_KEY", "")
 
-    def complete(self, system, messages, schema=None, *, model=None) -> ModelResult:
+    def complete(self, system, messages, schema=None, *, model=None, images=()) -> ModelResult:
         model = model or ""
         payload = {
             "channel": self.channel,
@@ -78,6 +80,14 @@ class ExecutorChannel:
             "schema": schema,
         }
         try:
+            if images:
+                # Предел по числу, байтам, пикселям и полному размеру запроса - до обращения к сети.
+                try:
+                    payload["images"] = encode_images(list(images))
+                    if len(encode_payload(payload)) > MAX_IMAGE_REQUEST_BYTES:
+                        raise ChannelError("request_too_large")
+                except ChannelError as exc:
+                    return ModelResult.failure(self.channel, model, exc.kind)
             body = self.post(self.url, payload, self.timeout, headers={"X-Executor-Key": self.key})
             if not isinstance(body, dict):
                 raise TypeError("not an object")

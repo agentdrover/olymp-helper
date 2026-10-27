@@ -1,10 +1,12 @@
 """Адаптеры CLI: сборка команды, окружения и разбор JSON-ответа (SPEC-1.0 1.4)."""
 
+import base64
 import html
 import json
 import re
 from dataclasses import dataclass
 
+from app.model.images import UNTRUSTED_IMAGE_RULE
 from app.model.types import ChannelError
 
 TOKEN_VARS = {"claude": "CLAUDE_CODE_OAUTH_TOKEN", "cursor": "CURSOR_API_KEY"}
@@ -49,6 +51,10 @@ def render_conversation(messages: list[dict]) -> str:
             f'<message role="{role}">\n{html.escape(str(m["content"]), quote=False)}\n</message>'
         )
     return "<conversation>\n" + "\n".join(parts) + "\n</conversation>"
+
+
+def image_names(count: int) -> list[str]:
+    return [f"image-{i}.png" for i in range(1, count + 1)]
 
 
 def _schema_note(schema: dict | None) -> str:
@@ -105,12 +111,15 @@ def parse_cli_json(stdout: str, schema: dict | None) -> Parsed:
 class ClaudeAdapter:
     channel = "claude"
 
-    def build(self, model: str, system: str, schema: dict | None) -> list[str]:
+    def build(self, model: str, system: str, schema: dict | None, images=()) -> list[str]:
+        if images:
+            system += UNTRUSTED_IMAGE_RULE
         return [
             "claude",
             "-p",
             "--output-format",
             "json",
+            *(("--input-format", "stream-json") if images else ()),
             "--model",
             _check_model(model),
             "--tools",
@@ -126,8 +135,24 @@ class ClaudeAdapter:
             system + _schema_note(schema),
         ]
 
-    def stdin(self, system: str, messages: list[dict], schema: dict | None) -> str:
-        return render_conversation(messages)
+    def stdin(self, system: str, messages: list[dict], schema: dict | None, images=()) -> str:
+        if not images:
+            return render_conversation(messages)
+        # Claude CLI принимает изображение блоком base64 в сообщении формата stream-json.
+        blocks = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": base64.b64encode(data).decode("ascii"),
+                },
+            }
+            for data in images
+        ]
+        blocks.append({"type": "text", "text": render_conversation(messages)})
+        line = {"type": "user", "message": {"role": "user", "content": blocks}}
+        return json.dumps(line, ensure_ascii=False) + "\n"
 
     parse = staticmethod(parse_cli_json)
 
@@ -135,7 +160,7 @@ class ClaudeAdapter:
 class CursorAdapter:
     channel = "cursor"
 
-    def build(self, model: str, system: str, schema: dict | None) -> list[str]:
+    def build(self, model: str, system: str, schema: dict | None, images=()) -> list[str]:
         # Режим ask - только чтение; запрет shell и web флагами не подтверждён (см. отчёт OH-T03),
         # поэтому опора на изоляцию контейнера. --trust (решение владельца 25.10) доверяет только
         # пустому каталогу запуска и shell не включает: в -p без него CLI отказывается работать.
@@ -152,9 +177,14 @@ class CursorAdapter:
             "--trust",
         ]
 
-    def stdin(self, system: str, messages: list[dict], schema: dict | None) -> str:
+    def stdin(self, system: str, messages: list[dict], schema: dict | None, images=()) -> str:
         # У cursor-agent нет флага system-промпта: правила идут первым блоком запроса.
-        return system + _schema_note(schema) + "\n\n" + render_conversation(messages)
+        # Изображения у него - файлы в каталоге запуска (см. image_names), модель читает их по пути.
+        text = system + (UNTRUSTED_IMAGE_RULE if images else "") + _schema_note(schema)
+        if images:
+            files = "\n".join(f"./{n}" for n in image_names(len(images)))
+            text += "\n\nПрикреплённые изображения (файлы PNG в рабочем каталоге):\n" + files
+        return text + "\n\n" + render_conversation(messages)
 
     parse = staticmethod(parse_cli_json)
 

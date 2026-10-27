@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sqlite3
 from datetime import UTC, datetime
 
@@ -9,9 +10,27 @@ from app.model.ledger import Ledger
 from app.model.redaction import redact
 from app.model.types import CHANNELS, LIMIT_MESSAGE, ModelChannel, ModelResult
 
-__all__ = ["DEFAULT_MODELS", "LIMIT_MESSAGE", "ModelService"]
+__all__ = ["DEFAULT_MODELS", "LIMIT_MESSAGE", "ModelService", "model_family"]
 
-DEFAULT_MODELS = {"claude": "sonnet", "cursor": "auto"}
+# Модель задаётся явно у обоих каналов: семейства закреплены и разные (family).
+DEFAULT_MODELS = {"claude": "sonnet", "cursor": "gpt-5"}
+_FAMILIES = (
+    (re.compile(r"(claude|sonnet|opus|haiku)([-.:\d]|$)"), "anthropic"),
+    (re.compile(r"(gpt|o[134]|codex)([-.:\d]|$)"), "openai"),
+    (re.compile(r"gemini([-.:\d]|$)"), "google"),
+    (re.compile(r"grok([-.:\d]|$)"), "xai"),
+)
+
+
+def model_family(model: str | None) -> str | None:
+    """Семейство по имени модели; auto, пустое и неизвестное имя - None."""
+    name = (model or "").strip().lower().rsplit("/", 1)[-1]
+    for pattern, family in _FAMILIES:
+        if pattern.match(name):
+            return family
+    return None
+
+
 log = logging.getLogger("app.model")
 
 
@@ -51,11 +70,22 @@ class ModelService:
         messages: list[dict],
         schema: dict | None = None,
         session_id: int | None = None,
+        images: list[bytes] | None = None,
     ) -> ModelResult:
         """Запрос к ОДНОМУ названному каналу, без запасного: так работает независимый судья.
         Запуск учитывается в общем дневном лимите, как любой другой."""
         models = self._models()
-        return self._attempt(channel, models[channel], system, messages, schema, fallback=False)
+        if channel not in models:
+            return ModelResult.failure(str(channel), "", "bad_channel")
+        return self._attempt(
+            channel, models[channel], system, messages, schema, fallback=False, images=images
+        )
+
+    def family(self, channel: str) -> str | None:
+        """Семейство модели канала по настройкам; auto или неизвестная модель - None."""
+        if channel not in CHANNELS:
+            return None
+        return model_family(self._models()[channel])
 
     def _models(self) -> dict:
         claude_model, cursor_model = self.conn.execute(
@@ -66,12 +96,13 @@ class ModelService:
             "cursor": cursor_model or DEFAULT_MODELS["cursor"],
         }
 
-    def _attempt(self, name, model, system, messages, schema, fallback) -> ModelResult:
+    def _attempt(self, name, model, system, messages, schema, fallback, images=None) -> ModelResult:
         run_id = self.ledger.reserve(name, model, fallback)
         if run_id is None:
             return ModelResult.failure(name, model, "limit", message=LIMIT_MESSAGE)
         try:
-            res = self.channels[name].complete(system, messages, schema, model=model)
+            extra = {"images": images} if images else {}
+            res = self.channels[name].complete(system, messages, schema, model=model, **extra)
         except Exception as exc:  # noqa: BLE001
             log.warning("channel %s raised %s", name, type(exc).__name__)
             res = ModelResult.failure(name, model, "exception")
