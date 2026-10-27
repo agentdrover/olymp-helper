@@ -248,3 +248,49 @@ def test_the_inflight_lock_bumps_the_version_after_it_changes(tmp_path):
         lock.release(1, 7, conn)
         assert seq.current(conn) > v1
         conn.close()
+
+
+def _locked_pair(tmp_path):
+    """(соединение с короткой паузой ожидания, соединение, держащее запись)."""
+    conn = db(tmp_path)
+    conn.execute("PRAGMA busy_timeout = 100")
+    holder = db(tmp_path)
+    holder.execute("BEGIN IMMEDIATE")
+    return conn, holder
+
+
+def test_a_failed_version_bump_does_not_leave_the_lock_held(tmp_path):
+    import sqlite3
+
+    import pytest
+
+    from app.tutor.flow import Flow
+    from app.tutor.panel import Inflight
+
+    c, clock, model = boot(tmp_path)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        conn, holder = _locked_pair(tmp_path)
+        lock = Inflight()
+        with pytest.raises(sqlite3.OperationalError):
+            lock.acquire(tid, 0, 7, conn)
+        assert lock.since(tid) is None and lock.step_of(tid) is None  # замок свободен
+        # release: сбой роста версии не возвращает замок
+        holder.execute("ROLLBACK")
+        assert lock.acquire(tid, 0, 8, conn)
+        holder.execute("BEGIN IMMEDIATE")
+        lock.release(tid, 8, conn)  # не бросает
+        assert lock.since(tid) is None
+        holder.execute("ROLLBACK")
+        # следующий _begin() проходит
+        flow = Flow(conn, model, lock, clock)
+        task = conn.execute("SELECT * FROM task_item WHERE id = ?", (tid,)).fetchone()
+        holder.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError):
+            flow._begin(task)
+        assert lock.since(tid) is None
+        holder.execute("ROLLBACK")
+        assert flow._begin(task) is True
+        assert lock.since(tid) is not None
+        conn.close()
+        holder.close()

@@ -66,9 +66,15 @@ class Flow:
             return False
         last = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM event").fetchone()[0]
         step_id = steps.start(self.conn, task["id"], kind, self.now)
-        if not self.inflight.acquire(
-            task["id"], last, step_id, self.conn
-        ):  # замок и шаг - одной операцией
+        try:
+            got = self.inflight.acquire(task["id"], last, step_id, self.conn)  # замок и шаг вместе
+        except BaseException:
+            try:
+                steps.discard(self.conn, step_id)  # строка pending не остаётся висеть
+            except Exception:  # noqa: BLE001 - база занята: строка pending панель не меняет
+                log.warning("не удалось снять строку шага %s", step_id)
+            raise
+        if not got:
             steps.discard(self.conn, step_id)
             self.panel_state = "thinking"
             return False

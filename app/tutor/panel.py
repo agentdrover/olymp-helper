@@ -5,9 +5,12 @@ T06 делает панель и состояния; T07 (чат, голос) и
 пока он в работе, второй не уходит (`Inflight`).
 """
 
+import logging
 import threading
 
 from app.tutor.seq import bump_now
+
+log = logging.getLogger(__name__)
 
 LONG_WAIT_S = 60  # после этого срока вместо секунд - «Модель отвечает долго, жду…»
 
@@ -53,7 +56,16 @@ class Inflight:
                 return False
             self._items[key] = [since_event, step_id]
         if conn is not None:
-            bump_now(conn)
+            try:
+                bump_now(conn)
+            except BaseException:
+                # Версию вырастить не удалось (база занята): замок не остаётся владельцем навсегда,
+                # вызывающий видит исключение как неудавшийся шаг.
+                with self._lock:
+                    item = self._items.get(key)
+                    if item is not None and item[1] == step_id:
+                        del self._items[key]
+                raise
         return True
 
     def release(self, key, step_id: int, conn=None) -> None:
@@ -66,7 +78,10 @@ class Inflight:
                 return
             del self._items[key]
         if conn is not None:
-            bump_now(conn)
+            try:
+                bump_now(conn)
+            except Exception:  # noqa: BLE001 - замок уже снят и остаётся снятым
+                log.warning("версия панели не выросла после снятия замка задания %s", key)
 
     def since(self, key) -> int | None:
         with self._lock:
