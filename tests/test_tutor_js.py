@@ -16,6 +16,8 @@ SCENARIOS = [
     "post_failure_without_step_returns_to_idle",
     "stale_poll_does_not_overwrite_newer_step",
     "lost_retry_reply_keeps_recovery_polling",
+    "failed_posts_extend_polling_deadline",
+    "loop_survives_failed_and_stale_polls_while_older_post_pends",
 ]
 
 

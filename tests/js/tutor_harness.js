@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "..", "app", "static", "tutor.js"), "utf8");
+const SRC = fs.readFileSync(process.env.TUTOR_JS || path.join(__dirname, "..", "..", "app", "static", "tutor.js"), "utf8");
 
 function parse(html) {
   const els = [];
@@ -60,7 +60,7 @@ function matchOne(el, part) {
   return true;
 }
 
-const page = { els: [], focused: null, timers: [], now: 0, fetches: [], handlers: {}, posts: [], postq: [], getFn: null };
+const page = { els: [], focused: null, timers: [], now: 0, fetches: [], handlers: {}, posts: [], postq: [], getq: [], getFn: null };
 
 const root = {
   getAttribute(k) { return k === "data-url" ? "/tasks/1" : null; },
@@ -84,6 +84,7 @@ const sandbox = {
   clearTimeout(id) { page.timers = page.timers.filter((t) => t.id !== id); },
   fetch(url, opts) { page.posts.push({ url, method: (opts && opts.method) || "GET" }); const post = opts && opts.method === "POST";
     if (post && page.postq.length) return page.postq.shift()(url, opts);
+    if (!post && page.getq.length) return page.getq.shift()(url, opts);
     if (!post && page.getFn) return page.getFn(url, opts);
     return page.fetches.shift()(url, opts);
   },
@@ -166,17 +167,17 @@ const scenarios = {
     await advance(2600);
     if (get(".helper-status").attrs["data-panel"] !== "idle" || get("button").disabled) throw new Error("not idle/enabled");
   },
-  // Опоздавший ответ опроса не затирает экран после новой отправки (поколение запросов).
+  // Версия сервера - единственное правило устаревания: опоздавший ответ (опрос) старее применённого не рисуется.
   async stale_poll_does_not_overwrite_newer_step() {
-    boot(screen("thinking", ' data-step="3"'));
+    boot(screen("thinking", ' data-step="3" data-version="3.2"'));
     const slow = deferred();
     page.fetches.push(() => slow.p);
     await advance(2600);  // опрос ушёл и висит
-    page.fetches.push(ok(screen("thinking", ' data-step="5"')));
+    page.fetches.push(ok(screen("thinking", ' data-step="5" data-version="5.2"')));
     page.handlers.click[0]({ target: { closest: () => get("button") } });
     await settle();
     if (get(".helper-status").attrs["data-step"] !== "5") throw new Error("new step not shown");
-    slow.res({ text: () => Promise.resolve(screen("idle")), headers: { get: () => null } });
+    slow.res({ text: () => Promise.resolve(screen("idle", ' data-version="4.3"')), headers: { get: () => null } });
     await settle();
     if (get(".helper-status").attrs["data-step"] !== "5") throw new Error("stale poll overwrote the newer step");
   },
@@ -199,6 +200,42 @@ const scenarios = {
     await settle();
     for (let i = 0; i < 3; i++) await advance(2600);
     if (get(".helper-status").attrs["data-panel"] !== "thinking") throw new Error("started step never shown: " + get(".helper-status").attrs["data-panel"]);
+  },
+  // Codex 1: оба POST оборваны, сервер принял шаг позже срока от старта: опрос продлевается от сбоя.
+  async failed_posts_extend_polling_deadline() {
+    boot(screen("idle", ' data-version="0.0"'));
+    let server = screen("idle", ' data-version="0.0"');
+    page.getFn = ok_(() => server);
+    const retry = deferred();
+    page.postq.push(fail, () => retry.p);
+    const click = () => page.handlers.click[0]({ target: { closest: () => get("button") } });
+    click();
+    await settle();
+    click();  // кнопка включена после первого сбоя
+    await settle();
+    for (let i = 0; i < 19; i++) await advance(2600);  // ~49 с, опрос возвращает покой
+    retry.res(Promise.reject(new TypeError("network")));
+    retry.p.catch(() => {});
+    await settle();
+    for (let i = 0; i < 6; i++) await advance(2600);  // ~65 с: срок от старта вышел, от сбоя - нет
+    server = screen("thinking", ' data-step="1" data-version="1.2"');  // сервер начал шаг позже
+    for (let i = 0; i < 3; i++) await advance(2600);
+    if (get(".helper-status").attrs["data-panel"] !== "thinking") throw new Error("late step never shown: " + get(".helper-status").attrs["data-panel"]);
+  },
+  // Codex 2: ранний POST ещё в пути, поздний уже ответил; сбой и опоздавший ответ опроса цикл не рвут.
+  async loop_survives_failed_and_stale_polls_while_older_post_pends() {
+    boot(screen("idle", ' data-version="4.3"'));
+    const older = deferred();
+    page.postq.push(() => older.p, ok(screen("thinking", ' data-step="6" data-version="6.2"')));
+    page.getq.push(fail, ok(screen("thinking", ' data-step="5" data-version="5.3"')), ok(screen("idle", ' data-version="6.3"')));
+    const click = () => page.handlers.click[0]({ target: { closest: () => get("button") } });
+    click();  // старый POST: ответ задержан
+    await settle();
+    click();  // новый POST отвечает "думаю"
+    await settle();
+    if (get(".helper-status").attrs["data-version"] !== "6.2") throw new Error("newer POST not applied");
+    for (let i = 0; i < 3; i++) await advance(2600);
+    if (get(".helper-status").attrs["data-version"] !== "6.3") throw new Error("loop died: " + get(".helper-status").attrs["data-version"]);
   },
 };
 

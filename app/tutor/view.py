@@ -119,7 +119,7 @@ def build_view(
             "needs_confirm": nxt == 3,
         },
         "can_show_answer": assist == "key_only" and not terminal and attempts >= state.BASE_CHECKS,
-        "panel": panel(shown, **extra),
+        "panel": {**panel(shown, **extra), "version": steps.version(conn, task["id"])},
         "notice": notice,
         "task": child_view(task, material),
     }

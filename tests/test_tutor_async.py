@@ -133,8 +133,8 @@ def test_a_reloaded_page_shows_the_running_step_with_elapsed_time(tmp_path):
         clock.advance(LONG_WAIT_S)
         assert "Модель отвечает долго, жду…" in fragment(c, tid)
         js = STATIC.read_text(encoding="utf-8")
-        assert "setTimeout(refresh" in js and "setInterval" not in js
-        assert "if (polling || pending) return;" in js  # запросы опроса не накладываются
+        assert "setTimeout(pollTick" in js and "setInterval" not in js
+        assert "if (fetching) return;" in js  # запросы опроса не накладываются
         assert "5–15" not in js and "5–15" not in page
         model.release.set()
         c.app.state.steps.join()
@@ -522,14 +522,39 @@ def test_an_older_steps_result_never_hides_a_newer_running_step(tmp_path):
         assert stale["panel"]["state"] == "idle"
 
 
-def test_the_client_discards_a_late_response_from_an_older_request():
+def test_every_panel_response_carries_a_version_that_grows_with_the_step(tmp_path):
+    model = Blocking()
+    c, _clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        wrong_attempt(c, tid, model)
+
+        def ver(html):
+            m = re.search(r'data-version="(\d+)\.(\d+)"', html)
+            assert m, "ответ панели без версии"
+            return int(m[1]), int(m[2])
+
+        before = ver(fragment(c, tid))
+        assert ver(c.get(f"/tasks/{tid}", headers=CHILD).text) == before  # страница задания
+        r = c.post(
+            f"/tasks/{tid}/hint", json={"level": 1}, headers={**CHILD, "HX-Request": "true"}
+        )  # POST отвечает фрагментом
+        running = ver(r.text)
+        assert running > before and running[1] == 2  # шаг идёт
+        assert ver(fragment(c, tid)) == running  # опрос видит ту же версию
+        model.release.set()
+        c.app.state.steps.join()
+        done = ver(fragment(c, tid))
+        assert done > running and done[0] == running[0] and done[1] == 3  # шаг окончен
+        assert c.get(f"/api/tasks/{tid}/tutor", headers=CHILD).json()["panel"]["version"] == (
+            f"{done[0]}.{done[1]}"
+        )
+
+
+def test_the_client_orders_responses_by_server_version_and_keeps_one_poll_chain():
     js = STATIC.read_text(encoding="utf-8")
-    assert "var gen = 0;" in js and "mine !== gen" in js  # поколение запросов
-    assert js.count("++gen") == 2  # send() и sendQuestion() начинают новое поколение
-    assert "var mine = gen;" in js  # опрос запоминает поколение при старте
-    assert (
-        "if (pending || stale(mine, html)) return schedule();" in js
-    )  # опрос: устаревший ответ не рисуется
-    assert "if (!stale(mine, html)) swap(html);" in js  # send
-    assert "if (stale(mine, html)) return;" in js  # sendQuestion
-    assert "parseInt(m[1], 10) < now" in js  # шаг старее показанного отбрасывается
+    assert "function isOld(html)" in js and "if (!isOld(html)) swap(html, true);" in js  # опрос
+    assert "if (!isOld(html)) swap(html);" in js  # send
+    assert "if (isOld(html)) return extend();" in js  # sendQuestion
+    assert "var gen" not in js and "pending" not in js and "recovering" not in js
+    assert "clearTimeout(timer);" in js and "var done = function () { fetching = false; plan(); };" in js

@@ -80,6 +80,22 @@ def latest(conn, task_id: int):
     ).fetchone()
 
 
+RANK = {"pending": 1, "running": 2, "done": 3, "failed": 3}
+
+
+def version(conn, task_id: int) -> str:
+    """Версия экрана «<номер последнего шага>.<ранг>»: растёт монотонно за жизнь шага и между шагами
+    (идёт < окончен); экран без шагов - «0.0». Клиент применяет ответ, только если версия не меньше
+    уже применённой, поэтому опоздавший ответ (POST или опрос) не откатывает экран. Строка
+    «pending» живёт внутри одного запроса и может исчезнуть (discard), поэтому в версию не входит."""
+    row = conn.execute(
+        "SELECT id, status FROM tutor_step WHERE task_item_id = ? AND status != 'pending' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return "0.0" if row is None else f"{row['id']}.{RANK.get(row['status'], 3)}"
+
+
 def elapsed(row, now: datetime) -> int:
     return max(0, int((now - datetime.fromisoformat(row["started_at"])).total_seconds()))
 
