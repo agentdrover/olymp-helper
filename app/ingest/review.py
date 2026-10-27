@@ -239,7 +239,7 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     task = _task(conn, task_id)
     if task["import_status"] == "unsupported":  # новый ключ вернул рисунок на проверку
         raise Refusal(task["unsupported_reason"])
-    update_task(conn, task_id, import_status="checked")
+    update_task(conn, task_id, import_status="checked", auto_checked=0)
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
     task = get_task(conn, task_id)

@@ -8,6 +8,8 @@ from app.ingest.leaks import condition_leaks
 from app.ingest.store import figure_of, options_of
 
 PUBLISHED_STATUS = "checked"
+# Решение владельца 27.10: без родителя публикуется только то, что прошло двух моделей и код.
+AUTO_CHECKED_MARK = "составлено помощником, проверено двумя моделями"
 
 
 def has_key(task) -> bool:
@@ -128,7 +130,11 @@ def child_view(task, material) -> dict:
 
 def _source_label(task, material) -> str:
     if material is None:  # сгенерированное задание: сборника и страницы нет
-        return "составлено помощником, проверено родителем"
+        return (
+            AUTO_CHECKED_MARK
+            if task["auto_checked"]
+            else "составлено помощником, проверено родителем"
+        )
     year = material["year"]
     year_text = f"{year}/{str(year + 1)[-2:]}" if year else "без года"
     page = task["page_from"]
