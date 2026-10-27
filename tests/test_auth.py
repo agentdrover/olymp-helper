@@ -40,6 +40,9 @@ PUBLIC = {
     ("POST", "/tasks/{task_id}/show-answer"),
     ("POST", "/tasks/{task_id}/repeat"),
     ("POST", "/tasks/{task_id}/dispute"),
+    # чат и голос (OH-T07): те же замки ребёнка - свой источник, JSON, уведомление прочитано
+    ("POST", "/tasks/{task_id}/chat"),
+    ("POST", "/tasks/{task_id}/voice"),
 }
 FRAMEWORK = {"/static"}  # the API description is switched off: no /docs, /redoc, /openapi.json
 

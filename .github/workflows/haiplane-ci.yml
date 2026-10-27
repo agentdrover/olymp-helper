@@ -49,6 +49,10 @@ jobs:
           # that comparison.
           fetch-depth: 0
 
+      # ffmpeg for the one voice test that converts a real WebM recording (OH-T07, test_ac4).
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       # Required steps of this repository (OH-T02, #2012). Any failing step, and
       # a run that collects no tests at all (pytest exits 5), turns this job red.
       - name: Install uv

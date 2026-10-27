@@ -90,7 +90,7 @@ class Scripted:
 
 
 MODES = (
-    "hint1", "hint2", "mistake", "solution", "judge",
+    "hint1", "hint2", "mistake", "solution", "judge", "chat", "formulate",
     "explain_simpler", "explain_table", "explain_example", "explain_olympiad", "explain_check",
 )  # fmt: skip
 
