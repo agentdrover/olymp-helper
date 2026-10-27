@@ -53,10 +53,30 @@ def png_size(data: bytes) -> tuple[int, int]:
         raise ChannelError("bad_image")
     if kinds[-1] != b"IEND" or len(chunks[-1][1]) != 0:
         raise ChannelError("bad_image")
+    _check_structure(chunks)
     width, height = struct.unpack(">II", data[16:24])
     if width <= 0 or height <= 0:
         raise ChannelError("bad_image")
     return width, height
+
+
+def _check_structure(chunks) -> None:
+    """Порядок и уникальность кусков: IHDR первым, IEND последним, IDAT подряд, PLTE по типу цвета."""
+    kinds = [kind for kind, _ in chunks]
+    color = chunks[0][1][9]
+    for once in (b"IHDR", b"IEND", b"PLTE"):
+        if kinds.count(once) > 1:
+            raise ChannelError("bad_image")
+    first = kinds.index(b"IDAT")
+    last = len(kinds) - 1 - kinds[::-1].index(b"IDAT")
+    if any(k != b"IDAT" for k in kinds[first : last + 1]):  # IDAT идут одной непрерывной серией
+        raise ChannelError("bad_image")
+    if b"PLTE" in kinds:
+        plte = kinds.index(b"PLTE")
+        if color in (0, 4) or plte > first or len(chunks[plte][1]) % 3 or not chunks[plte][1]:
+            raise ChannelError("bad_image")
+    elif color == 3:  # индексированному изображению палитра обязательна
+        raise ChannelError("bad_image")
 
 
 _CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}

@@ -257,3 +257,28 @@ def test_valid_interlaced_png_passes_and_short_pixel_data_fails():
         assert run("claude", [bad], seen)["error_kind"] == "bad_image" and not seen
     ok = _png(8, 8, 8, 2, 0, (b"\x04" + b"\0" * 24) * 8)
     assert check_images([ok]) == [ok]
+
+
+def test_png_chunk_structure_is_validated():
+    from app.model.images import check_images
+
+    def chunk(k, b):
+        return struct.pack(">I", len(b)) + k + b + struct.pack(">I", zlib.crc32(k + b))
+
+    def build(color, depth, row, order=("PLTE", "IDAT")):
+        ihdr = struct.pack(">IIBBBBB", 2, 2, depth, color, 0, 0, 0)
+        idat = chunk(b"IDAT", zlib.compress((b"\0" + row) * 2))
+        parts = {"PLTE": chunk(b"PLTE", b"\0" * 6), "IDAT": idat}
+        body = b"".join(parts[o] for o in order if o in parts)
+        return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + body + chunk(b"IEND", b"")
+
+    ok = build(3, 8, b"\0\1")
+    assert check_images([ok]) == [ok]
+    for bad in (
+        build(3, 8, b"\0\1", order=("IDAT",)),  # индексированному нужна палитра
+        build(3, 8, b"\0\1", order=("IDAT", "PLTE")),  # палитра после данных
+        build(0, 8, b"\0\1", order=("PLTE", "IDAT")),  # палитра при серых запрещена
+    ):
+        seen = []
+        res = run("claude", [bad], seen)
+        assert res["error_kind"] == "bad_image" and not seen
