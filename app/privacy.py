@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app import summary
 from app.ingest.store import atomic
+from app.tutor.seq import bump
 
 RETENTION_DAYS = 180
 MESSAGE_TYPES = ("chat", "voice")
@@ -59,14 +60,17 @@ def delete_messages(
     # Итоги, которых ещё нет, строятся до удаления: число сообщений берётся из событий.
     now = now or datetime.now(UTC)
     summary.ensure(conn, now)
-    sql = f"DELETE FROM event WHERE type IN ({_IN})"
+    where = f"type IN ({_IN})"
     args: list = list(MESSAGE_TYPES)
     if session_id is not None:
-        sql += " AND session_id = ?"
+        where += " AND session_id = ?"
         args.append(session_id)
-    with atomic(conn):  # счёт и удаление - одна транзакция: сообщение между ними не теряется
+    with atomic(
+        conn
+    ):  # счёт, версия и удаление - одна транзакция: сообщение между ними не теряется
         summary.preserve_message_counts(conn, session_id)
-        return conn.execute(sql, args).rowcount
+        bump(conn)  # сообщения исчезают с экрана: версия растёт, а не падает
+        return conn.execute(f"DELETE FROM event WHERE {where}", args).rowcount
 
 
 def cleanup_retention(conn: sqlite3.Connection, now: datetime) -> int:
@@ -75,6 +79,7 @@ def cleanup_retention(conn: sqlite3.Connection, now: datetime) -> int:
     cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
     with atomic(conn):
         summary.preserve_message_counts(conn, before=cutoff)
+        bump(conn)
         return conn.execute(
             f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?",
             (*MESSAGE_TYPES, cutoff),

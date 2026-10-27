@@ -5,9 +5,11 @@ import logging
 import sqlite3
 from datetime import UTC, datetime
 
+from app.ingest.store import atomic
 from app.model.ledger import Ledger
 from app.model.redaction import redact
 from app.model.types import CHANNELS, LIMIT_MESSAGE, ModelChannel, ModelResult
+from app.tutor.seq import bump
 
 __all__ = ["DEFAULT_MODELS", "LIMIT_MESSAGE", "ModelService"]
 
@@ -85,11 +87,14 @@ class ModelService:
     def _fallback_event(self, session_id, src, dst, reason) -> None:
         if session_id is None:
             return
-        self.conn.execute(
-            "INSERT INTO event (session_id, type, data, created_at) VALUES (?, 'fallback', ?, ?)",
-            (
-                session_id,
-                json.dumps({"from": src, "to": dst, "reason": reason}),
-                self.clock().isoformat(),
-            ),
-        )
+        with atomic(self.conn):  # переход на второй канал меняет панель («пробую второй»)
+            self.conn.execute(
+                "INSERT INTO event (session_id, type, data, created_at) "
+                "VALUES (?, 'fallback', ?, ?)",
+                (
+                    session_id,
+                    json.dumps({"from": src, "to": dst, "reason": reason}),
+                    self.clock().isoformat(),
+                ),
+            )
+            bump(self.conn)
