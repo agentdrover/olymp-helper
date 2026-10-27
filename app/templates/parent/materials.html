@@ -29,11 +29,11 @@
   </div>
 </form>
 <div class="panel"><table>
-  <thead><tr><th scope="col">№</th><th scope="col">Тип</th><th scope="col">Год</th><th scope="col">Вариант</th><th scope="col">Статус</th><th scope="col">Заданий</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
+  <thead><tr><th scope="col">№</th><th scope="col">Файл</th><th scope="col">Тип</th><th scope="col">Год</th><th scope="col">Вариант</th><th scope="col">Статус</th><th scope="col">Заданий</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
   {% for m in materials %}
   {% set live = m.import_status in ("queued", "running") and not m.deleted_at %}
   <tr data-material-id="{{ m.id }}" data-live="{{ 1 if live else 0 }}">
-    <td>{{ m.id }}</td><td>{{ m.kind }}</td><td>{{ m.year or "" }}</td><td>{{ m.variant or "" }}</td>
+    <td>{{ m.id }}</td><td>{{ m.original_name or "" }}</td><td>{{ m.kind }}</td><td>{{ m.year or "" }}</td><td>{{ m.variant or "" }}</td>
     <td><span class="js-status">{% if m.deleted_at %}файл удалён{% else %}{{ m.import_status }}{% endif %}</span>{% if live %}<p class="hint js-progress" aria-live="polite">{{ progress.get(m.id) }}</p>{% endif %}{% if m.import_error %}{% if m.import_status == "done" %}<p class="warn-note">{{ m.import_error }}</p>{% else %}: <span class="err">{{ m.import_error }}</span>{% endif %}{% endif %}</td>
     <td class="js-tasks">{{ m.tasks }}</td>
     <td>{% if not live %}<a href="/parent/materials/{{ m.id }}/delete">Удалить</a>{% endif %}</td>
