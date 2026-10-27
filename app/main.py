@@ -26,6 +26,7 @@ from app.sessions import utcnow
 from app.summary_web import child as summary_child
 from app.summary_web import parent as summary_parent
 from app.tutor.panel import Inflight
+from app.tutor.web import ExamBusy
 from app.tutor.web import router as tutor_router
 from app.voice.service import VoiceService
 from app.voice.web import router as voice_router
@@ -113,6 +114,7 @@ def create_app(
         title="olymp-helper", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
     app.state.clock = clock
+    app.add_exception_handler(ExamBusy, lambda request, exc: exc.response)
     app.state.model = model or ExecutorModel(path)
     # Часы одни на всё приложение (clock выше): тест подменяет их, и 60 секунд до подсказки,
     # простой занятия и сессия родителя идут по одному времени.

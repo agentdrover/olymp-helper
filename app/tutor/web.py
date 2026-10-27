@@ -50,6 +50,17 @@ class Body(BaseModel):
     message: str | None = None
 
 
+async def read_body(request: Request) -> Body:
+    """Тело читается после exam_gate: при идущей олимпиаде 409 важнее 422."""
+    raw = await request.body()
+    if not raw.strip():
+        return Body()
+    try:
+        return Body.model_validate_json(raw)
+    except ValueError as exc:
+        raise HTTPException(422, "Неверное тело запроса") from exc
+
+
 def _published(conn, task_id: int):
     task = get_task(conn, task_id)
     if task is None or not is_published(task):
@@ -128,6 +139,22 @@ def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, not
     return JSONResponse(view)
 
 
+class ExamBusy(Exception):
+    """Идёт олимпиада: ответ 409 готов и отдаётся раньше любых других ошибок маршрута."""
+
+    def __init__(self, response):
+        self.response = response
+
+
+def exam_gate(task_id: int, request: Request, conn: Db) -> None:
+    """Первая зависимость каждого маршрута задания: приоритет над 404 (задание правили во время
+    варианта) и над 422 (тело запроса)."""
+    page = request.method == "GET" and request.url.path == f"/tasks/{task_id}"
+    blocked = _exam_block(request, conn, task_id, page=page)
+    if blocked is not None:
+        raise ExamBusy(blocked)
+
+
 def _refused(request: Request, conn, task_id: int, exc: Refused):
     if (blocked := _exam_block(request, conn, task_id)) is not None:
         return blocked  # олимпиада началась, пока шёл запрос: ни отказа, ни вида задания
@@ -149,15 +176,21 @@ def _act(name: str, cls=Flow):
     def decorate(fn):
         @router.post(
             "/tasks/{task_id}/" + name,
-            dependencies=[Depends(child_same_origin), Depends(child_notice_gate)],
+            dependencies=[
+                Depends(exam_gate),
+                Depends(child_same_origin),
+                Depends(child_notice_gate),
+            ],
         )
-        def route(task_id: int, request: Request, conn: Db, body: Body | None = None):
+        def route(
+            task_id: int, request: Request, conn: Db, body: Annotated[Body, Depends(read_body)]
+        ):
             _published(conn, task_id)
             if (blocked := _exam_block(request, conn, task_id)) is not None:
                 return blocked
             flow = _flow(request, conn, cls)
             try:
-                fn(flow, task_id, body or Body(), request)
+                fn(flow, task_id, body, request)
             except Refused as exc:
                 return _refused(request, conn, task_id, exc)
             except sqlite3.OperationalError as exc:
@@ -219,7 +252,9 @@ def dispute(flow: Flow, task_id, body, request):
     flow.dispute(task_id)
 
 
-@router.get("/api/tasks/{task_id}/tutor", dependencies=[Depends(child_notice_gate)])
+@router.get(
+    "/api/tasks/{task_id}/tutor", dependencies=[Depends(exam_gate), Depends(child_notice_gate)]
+)
 def tutor_json(task_id: int, request: Request, conn: Db):
     _published(conn, task_id)
     if (blocked := _exam_block(request, conn, task_id)) is not None:
@@ -237,7 +272,9 @@ def _respond_json(request, conn, task_id):
     return JSONResponse(view)
 
 
-@router.get("/tasks/{task_id}/tutor", response_class=HTMLResponse)
+@router.get(
+    "/tasks/{task_id}/tutor", response_class=HTMLResponse, dependencies=[Depends(exam_gate)]
+)
 def tutor_fragment(task_id: int, request: Request, conn: Db):
     task, material = _published(conn, task_id)
     if (blocked := _exam_block(request, conn, task_id)) is not None:
@@ -254,7 +291,7 @@ def tutor_fragment(task_id: int, request: Request, conn: Db):
     )
 
 
-@router.get("/tasks/{task_id}", response_class=HTMLResponse)
+@router.get("/tasks/{task_id}", response_class=HTMLResponse, dependencies=[Depends(exam_gate)])
 def task_page(task_id: int, request: Request, conn: Db):
     task, material = _published(conn, task_id)
     if (blocked := _exam_block(request, conn, task_id, page=True)) is not None:

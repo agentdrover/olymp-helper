@@ -53,8 +53,24 @@ function render() {
   $("exam-task").innerHTML = body + `<p><button class="btn" type="button" id="exam-save">Сохранить ответ</button></p>`;
   $("exam-mark").textContent = it.marked ? "Снять «вернусь»" : "Вернусь";
 }
-async function refresh(j) { if (j && j.exam) { exam = j.exam; render(); } }
+let offset = 0, checking = false;  // сдвиг серверных часов относительно браузера
+function sync(v) { if (v && v.server_now) offset = new Date(v.server_now) - Date.now(); }
+async function refresh(j) { if (j && j.exam) { sync(j.exam); exam = j.exam; render(); } }
+// Несохранённый ввод на показанном задании сохраняется перед переходом, отметкой и сдачей.
+async function saveCurrent() {
+  if (!exam || !shown) return true;
+  const it = exam.items[shown - 1];
+  const now = JSON.stringify(answerOf(it) ?? null);
+  const had = JSON.stringify(it.answer ?? null);
+  const empty = ["null", "[]", "{}", '""'];
+  if (now === had || (empty.includes(now) && empty.includes(had))) return true;
+  const j = await call("/exam/answer", {attempt_id: exam.id, position: shown, answer: answerOf(it)});
+  if (!j) return false;
+  exam = j.exam; sync(exam);
+  return true;
+}
 async function open(p) {
+  if (!(await saveCurrent())) return;
   const j = await call("/exam/open", {attempt_id: exam.id, position: p});
   if (j) { pos = p; await refresh(j); }
 }
@@ -62,22 +78,30 @@ document.addEventListener("click", async e => {
   const t = e.target;
   if (t.dataset && t.dataset.p) open(+t.dataset.p);
   if (t.id === "exam-save") refresh(await call("/exam/answer", {attempt_id: exam.id, position: shown, answer: answerOf(exam.items[shown - 1])}));
-  if (t.id === "exam-mark") refresh(await call("/exam/mark", {attempt_id: exam.id, position: shown, marked: !exam.items[shown - 1].marked}));
-  if (t.id === "exam-submit" && confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) {
+  if (t.id === "exam-mark" && await saveCurrent()) refresh(await call("/exam/mark", {attempt_id: exam.id, position: shown, marked: !exam.items[shown - 1].marked}));
+  if (t.id === "exam-submit" && confirm("Сдать вариант? После сдачи ответы изменить нельзя.") && await saveCurrent()) {
     const j = await call("/exam/submit", {attempt_id: exam.id, confirm: true});
     if (j) location.href = j.url;
   }
 });
-setInterval(() => {
+setInterval(async () => {
   if (!exam) return;
-  const s = Math.max(0, Math.round((new Date(exam.deadline_at) - Date.now()) / 1000));
+  const s = Math.max(0, Math.round((new Date(exam.deadline_at) - (Date.now() + offset)) / 1000));
   $("exam-left").textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  if (s === 0) location.href = "/exam";
+  if (s === 0 && !checking) {  // истечение подтверждает сервер, а не часы браузера
+    checking = true;
+    const r = await fetch("/api/exam/current");
+    if (!r.ok) { location.href = "/exam"; return; }
+    sync(await r.json());
+    setTimeout(() => { checking = false; }, 2000);
+  }
 }, 1000);
 (async () => {
   const r = await fetch("/api/exam/current");
   if (!r.ok) { location.href = "/exam"; return; }
-  exam = await r.json(); pos = exam.current; await open(pos);
+  exam = await r.json(); sync(exam); pos = exam.current;
+  const j = await call("/exam/open", {attempt_id: exam.id, position: pos});
+  if (j) await refresh(j);
 })();
 </script>
 {% endblock %}

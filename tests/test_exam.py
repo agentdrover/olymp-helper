@@ -509,3 +509,28 @@ def test_empty_collection_clears_answer(tmp_path):
         save(3, {})
         items = current(c)[1]["items"]
         assert items[1]["answer"] is None and items[2]["answer"] is None
+
+
+def test_lock_wins_over_404_and_422_and_skips_list_everything(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        task, *_ = four(tmp_path)
+        extra = seed(tmp_path, key="А", number="8")
+        sql(tmp_path, "UPDATE task_item SET excluded = 1 WHERE id = ?", extra)
+        weird = seed(tmp_path, key="А", number="9")
+        sql(tmp_path, "UPDATE task_item SET import_status = 'unsupported' WHERE id = ?", weird)
+        save_format(c, tmp_path)
+        group = c.get("/api/exam", headers=CHILD).json()["groups"][0]
+        assert sorted(group["skipped"]) == ["8", "9"]
+        assert start_real(c).status_code == 200
+        # родитель правит условие во время варианта: задание уже не опубликовано
+        sql(tmp_path, "UPDATE task_item SET import_status = 'draft' WHERE id = ?", task)
+        assert c.get(f"/tasks/{task}", headers=CHILD).status_code == 409
+        assert c.get(f"/api/tasks/{task}/tutor", headers=CHILD).status_code == 409
+        r = c.post(f"/tasks/{task}/hint", json={"level": "не число"}, headers=CHILD)
+        assert r.status_code == 409
+        r = c.post(
+            f"/tasks/{task}/attempt", content=b"{bad", headers={"content-type": "application/json"}
+        )
+        assert r.status_code == 409
+        assert "server_now" in current(c)[1]

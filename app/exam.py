@@ -141,8 +141,6 @@ def groups(conn) -> list[dict]:
         for task in conn.execute(
             "SELECT * FROM task_item WHERE material_id = ? ORDER BY id", (material["id"],)
         ):
-            if task["excluded"] or task["import_status"] == "unsupported":
-                continue
             key = (task["section"], task["variant"], task["stage"])
             entry = found.setdefault(key, {"admitted": 0, "skipped": []})
             if admitted(task):
@@ -271,10 +269,7 @@ def _start_real(conn, now, fmt, material_id, section, variant, stage, read_figur
         raise ExamError(404, "no_material", "Такого сборника нет.")
     tasks = _group_tasks(conn, material_id, section, variant, stage)
     picked = [t for t in tasks if admitted(t)]
-    skipped = [
-        _label(t) for t in tasks
-        if not admitted(t) and not t["excluded"] and t["import_status"] != "unsupported"
-    ]  # fmt: skip
+    skipped = [_label(t) for t in tasks if not admitted(t)]
     if not picked:
         raise ExamError(422, "empty", "В этой группе нет заданий с подтверждённым ключом.",
                         skipped=skipped, note=NOT_ADMITTED)  # fmt: skip
@@ -527,7 +522,7 @@ def _current_position(conn, attempt_id: int) -> int:
     return row[0] if row else 1
 
 
-def running_view(conn, attempt) -> dict:
+def running_view(conn, attempt, now=None) -> dict:
     """Что видит ребёнок, пока вариант идёт: условия, свои ответы и отметки. Ни ключа, ни
     признака верности."""
     snap = json.loads(attempt["snapshot"])
@@ -552,6 +547,7 @@ def running_view(conn, attempt) -> dict:
     return {
         "id": attempt["id"],
         "status": "running",
+        "server_now": iso(_t(now)) if now is not None else None,
         "title": attempt["title"],
         "stage": snap["stage_label"],
         "grade": snap["grade"],

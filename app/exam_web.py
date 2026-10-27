@@ -108,7 +108,7 @@ def exam_current(request: Request, conn: Db):
         return JSONResponse(
             {"ok": False, "code": "not_running", "message": "Вариант не идёт."}, status_code=404
         )
-    return JSONResponse(exam.running_view(conn, attempt))
+    return JSONResponse(exam.running_view(conn, attempt, now_of(request)))
 
 
 @child.get("/exam/figure/{position}.png", dependencies=[Depends(child_notice_gate)])
@@ -145,7 +145,7 @@ def _act(path: str):
             except ExamError as exc:
                 return _error(exc)
             attempt = exam.active(conn, now)
-            view = exam.running_view(conn, attempt) if attempt else None
+            view = exam.running_view(conn, attempt, now_of(request)) if attempt else None
             return JSONResponse({"ok": True, "exam": view})
 
         return fn
