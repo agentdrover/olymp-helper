@@ -113,7 +113,8 @@ def _list(request: Request, conn, selected_id: int | None):
     sessions = summary.list_sessions(conn, now)
     messages = {r["id"]: r["messages"] for r in privacy.conversations(conn)}
     selected = None
-    if selected_id is not None:
+    running_selected = any(s["id"] == selected_id and s["running"] for s in sessions)
+    if selected_id is not None and not running_selected:
         selected = summary.get_summary(conn, selected_id, now)
         if selected is None:
             raise HTTPException(404, "Итога этого занятия нет")
@@ -122,7 +123,8 @@ def _list(request: Request, conn, selected_id: int | None):
         request,
         "parent/summaries.html",
         {"sessions": sessions, "messages": messages, "selected": selected,
-         "selected_id": selected_id},
+         "selected_id": selected_id,
+         "running_selected": running_selected},
     )  # fmt: skip
 
 

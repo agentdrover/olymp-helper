@@ -7,7 +7,7 @@
   <thead><tr><th scope="col">Занятие</th><th scope="col">Начало</th><th scope="col">Попыток</th><th scope="col">Вывод</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
   {% for s in sessions %}
   <tr{% if s.id == selected_id %} aria-current="true"{% endif %}>
-    <td><a href="/parent/summaries/{{ s.id }}">№{{ s.id }}</a>{% if s.running %} <span class="pill">идёт</span>{% endif %}</td>
+    <td>{% if s.running %}№{{ s.id }} <span class="pill">идёт</span>{% else %}<a href="/parent/summaries/{{ s.id }}">№{{ s.id }}</a>{% endif %}</td>
     <td>{{ s.started_at[:16].replace("T", " ") }}</td>
     <td>{{ s.summary.attempts if s.summary else "—" }}</td>
     <td>{{ s.summary.conclusion if s.summary else "занятие идёт" }}</td>
@@ -17,5 +17,6 @@
   <tr><td colspan="5">Занятий пока нет.</td></tr>
   {% endfor %}
 </table></div>
+{% if running_selected %}<p class="hint">Занятие ещё идёт, итог появится после окончания.</p>{% endif %}
 {% if selected %}{% with s = selected %}{% include "_summary.html" %}{% endwith %}{% endif %}
 {% endblock %}

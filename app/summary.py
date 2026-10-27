@@ -266,23 +266,27 @@ def _store(conn: sqlite3.Connection, session_id: int) -> dict:
     return summary
 
 
-def ensure(conn: sqlite3.Connection, now: datetime) -> None:
+def ensure(conn: sqlite3.Connection, now: datetime) -> list[int]:
     """Закрыть простоявшие 30 минут занятия (конец = последнее событие) и построить итоги всем
     закрытым занятиям, у которых его ещё нет. Вкладку могли закрыть: событий больше нет, а
-    закрывать занятие некому."""
+    закрывать занятие некому. Возвращает номера занятий, закрытых этим вызовом по простою."""
     conn.row_factory = sqlite3.Row
     with atomic(conn):
-        conn.execute(
-            "UPDATE study_session SET ended_at = last_activity_at, end_reason = 'idle' "
-            "WHERE ended_at IS NULL AND last_activity_at <= ?",
-            (iso(now - IDLE_TIMEOUT),),
-        )
+        closed = [
+            r[0]
+            for r in conn.execute(
+                "UPDATE study_session SET ended_at = last_activity_at, end_reason = 'idle' "
+                "WHERE ended_at IS NULL AND last_activity_at <= ? RETURNING id",
+                (iso(now - IDLE_TIMEOUT),),
+            ).fetchall()
+        ]
         for (sid,) in conn.execute(
             "SELECT id FROM study_session WHERE ended_at IS NOT NULL AND (summary IS NULL "
             "OR json_extract(summary, '$.partial') = 1 OR json_extract(summary, '$.v') IS NOT ?)",
             (FORMAT,),
         ).fetchall():
             _store(conn, sid)
+    return closed
 
 
 def running_session(conn: sqlite3.Connection, now: datetime) -> int | None:
@@ -296,10 +300,12 @@ def running_session(conn: sqlite3.Connection, now: datetime) -> int | None:
 
 def finish(conn: sqlite3.Connection, now: datetime) -> dict | None:
     """«Закончить»: идущее занятие закрывается сейчас, итог строится сразу. Нет идущего - None."""
-    ensure(conn, now)
+    closed = ensure(conn, now)
     with atomic(conn):
         sid = running_session(conn, now)
         if sid is None:
+            if closed:  # занятие простояло дольше лимита: его только что закрыл ensure
+                return get_summary(conn, max(closed), now)
             return None
         conn.execute(
             "UPDATE study_session SET ended_at = ?, end_reason = 'explicit' "
