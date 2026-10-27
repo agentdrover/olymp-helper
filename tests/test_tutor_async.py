@@ -439,3 +439,43 @@ def test_an_explain_step_expired_between_its_writes_does_not_mark_the_solution_d
         assert len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy")) == 1
         assert view(c, tid)["solution"]["disputed"] is False
         assert [r[0] for r in rows(tmp_path, "SELECT error FROM tutor_step")][-1] == "timeout"
+
+
+def test_a_finished_step_never_reports_a_stale_run(tmp_path, monkeypatch):
+    """Перегенерация не удалась: шаг пишет общую подсказку и кончается с «помощник не отвечает».
+    Ответ, который сообщает об окончании шага, обязан показывать эту подсказку."""
+    seen = {"hint1": 0}
+
+    def reply(kind, _content):
+        if kind == "hint1":
+            seen["hint1"] += 1
+            return None if seen["hint1"] > 1 else out()  # первая попытка есть, вторая падает
+        return out()
+
+    model = Gated(reply=reply, judge=lambda _c: {"reveals": True, "reason": "раскрывает"})
+    c, _clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        normal_wrong(c, tid)
+        k = model.started
+        model.blocked.add(k)
+        post(c, tid, "hint", level=1)
+        assert model.entered(k).wait(10)
+        step = view(c, tid)["panel"]["step"]
+        real = tutor_state.active_run
+        armed = [True]
+
+        def spy(*a, **kw):
+            run = real(*a, **kw)  # прогон прочитан до конца шага
+            if armed and not threading.current_thread().name.startswith("step-"):
+                armed.clear()
+                release_late(c, model, k, step)
+            return run
+
+        monkeypatch.setattr(tutor_state, "active_run", spy)
+        mid = c.get(f"/api/tasks/{tid}/tutor?step={step}", headers=CHILD).json()
+        monkeypatch.undo()
+        assert not armed
+        assert mid["panel"]["busy"] or mid["hints"] == 1, "итог шага при устаревшем прогоне"
+        done = c.get(f"/api/tasks/{tid}/tutor?step={step}", headers=CHILD).json()
+        assert done["panel"]["state"] == "down" and done["hints"] == 1

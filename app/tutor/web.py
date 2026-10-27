@@ -113,8 +113,10 @@ def _view_of(
     app = request.app
     task, material = _published(conn, task_id)
     live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # сначала: идёт ли
-    run = state.active_run(conn, task)
+    # Итог шага - ДО прогона: если шаг найден оконченным, прогон читается после его записи, и ответ
+    # с итогом (например «помощник не ответил») не прячет подсказку, которую шаг уже записал.
     shown, note = _step_result(conn, task_id, step)
+    run = state.active_run(conn, task)
     if flow is not None:
         shown = shown or flow.panel_state
         note = note or flow.notice
