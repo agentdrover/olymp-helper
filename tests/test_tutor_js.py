@@ -19,6 +19,8 @@ SCENARIOS = [
     "failed_posts_extend_polling_deadline",
     "loop_survives_failed_and_stale_polls_while_older_post_pends",
     "older_run_response_does_not_replace_new_run_form",
+    "hint_response_keeps_unsent_answer",
+    "attempt_response_resets_the_form",
 ]
 
 

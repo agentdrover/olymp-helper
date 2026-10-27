@@ -342,6 +342,7 @@ def open_hint3(conn, task_id: int, run_id: int, now):
         )
         add_event(conn, now, "hint", task_id, {
             "level": 3, "confirmed": True, "run": run_id, "repeat": bool(run["is_repeat"]),
+            "keyed": keyed,
         })  # fmt: skip
 
 

@@ -525,7 +525,7 @@ def test_an_older_steps_result_never_hides_a_newer_running_step(tmp_path):
 def test_the_client_orders_responses_by_server_version_and_keeps_one_poll_chain():
     js = STATIC.read_text(encoding="utf-8")
     assert "function isOld(html)" in js and "if (!isOld(html)) swap(html, true);" in js  # опрос
-    assert "if (!isOld(html)) swap(html);" in js  # send
+    assert 'if (!isOld(html)) swap(html, act !== "attempt");' in js  # send
     assert "if (isOld(html)) return extend();" in js  # sendQuestion
     assert "var gen" not in js and "pending" not in js and "recovering" not in js
     assert (

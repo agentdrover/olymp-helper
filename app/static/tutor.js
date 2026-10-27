@@ -166,7 +166,7 @@
       headers: { "Content-Type": "application/json", "HX-Request": "true" },
       body: JSON.stringify(body || {}),
     }).then(function (r) { return r.text(); }).then(function (html) {
-      if (!isOld(html)) swap(html);
+      if (!isOld(html)) swap(html, act !== "attempt");  // форму сбрасывает только отправка самой формы
       extend();
     }).catch(lostReply);
   }
@@ -214,7 +214,7 @@
       var sent = started || html.indexOf('data-panel="idle"') !== -1;
       if (sent && mode === "chat") draft = "";
       else if (field()) draft = field().value;
-      swap(html);
+      swap(html, true);  // вопрос не стирает ответ, который ещё не отправлен
       if (sent && mode === "chat" && field()) field().value = "";
       extend();
     }).catch(lostReply);

@@ -8,9 +8,10 @@
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from app import summary
 from app.ingest.store import atomic
 from app.tutor.seq import bump
 
@@ -53,21 +54,31 @@ def session_exists(conn: sqlite3.Connection, session_id: int) -> bool:
     )
 
 
-def delete_messages(conn: sqlite3.Connection, session_id: int | None = None) -> int:
+def delete_messages(
+    conn: sqlite3.Connection, session_id: int | None = None, now: datetime | None = None
+) -> int:
+    # Итоги, которых ещё нет, строятся до удаления: число сообщений берётся из событий.
+    now = now or datetime.now(UTC)
+    summary.ensure(conn, now)
     where = f"type IN ({_IN})"
     args: list = list(MESSAGE_TYPES)
     if session_id is not None:
         where += " AND session_id = ?"
         args.append(session_id)
-    with atomic(conn):  # версия и удаление - одна транзакция
+    with atomic(
+        conn
+    ):  # счёт, версия и удаление - одна транзакция: сообщение между ними не теряется
+        summary.preserve_message_counts(conn, session_id)
         bump(conn)  # сообщения исчезают с экрана: версия растёт, а не падает
         return conn.execute(f"DELETE FROM event WHERE {where}", args).rowcount
 
 
 def cleanup_retention(conn: sqlite3.Connection, now: datetime) -> int:
     """Сообщения старше 180 дней удаляются; занятия, итоги и прочие события остаются."""
+    summary.ensure(conn, now)
     cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
     with atomic(conn):
+        summary.preserve_message_counts(conn, before=cutoff)
         bump(conn)
         return conn.execute(
             f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?",

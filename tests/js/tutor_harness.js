@@ -254,6 +254,28 @@ const scenarios = {
     if (get(".helper-status").attrs["data-version"] !== "11") throw new Error("old run response replaced the screen");
     if (checkedOf("answer").join() !== "Б") throw new Error("selected answer lost");
   },
+  // Ответ на подсказку/вопрос (равная версия) не стирает ответ, который ребёнок ещё не отправил.
+  async hint_response_keeps_unsent_answer() {
+    boot(screen("idle", ' data-version="5"'));
+    page.els.find((e) => e.attrs.value === "Б").checked = true;
+    page.els.find((e) => e.attrs.name === "num").value = "42";
+    page.postq.push(ok(screen("idle", ' data-version="5"')));
+    page.handlers.click[0]({ target: { closest: () => get("button") } });  // data-act="hint"
+    await settle();
+    if (page.posts.length !== 1 || page.posts[0].method !== "POST") throw new Error("hint POST not sent");
+    if (checkedOf("answer").join() !== "Б") throw new Error("option wiped by the hint response");
+    if (page.els.find((e) => e.attrs.name === "num").value !== "42") throw new Error("number wiped");
+  },
+  // Ответ на отправку самой формы (attempt) форму сбрасывает, как раньше.
+  async attempt_response_resets_the_form() {
+    boot(screen("idle", ' data-version="5"'));
+    page.els.find((e) => e.attrs.value === "Б").checked = true;
+    page.postq.push(ok(screen("idle", ' data-version="6"')));
+    const form = { getAttribute: (k) => (k === "data-act" ? "attempt" : "single"), querySelector: () => ({ value: "Б" }), querySelectorAll: () => [], preventDefault() {} };
+    page.handlers.submit[0]({ target: form, preventDefault() {} });
+    await settle();
+    if (checkedOf("answer").length) throw new Error("form not reset after attempt");
+  },
 };
 
 const name = process.argv[2];
