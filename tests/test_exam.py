@@ -1090,3 +1090,49 @@ def test_stable_refuses_an_unchecked_snapshot(tmp_path, monkeypatch):
         with pytest.raises(HTTPException) as err:
             exam.stable(conn, lambda hidden: hidden)
         assert err.value.status_code == 503
+
+
+def test_reused_action_id_with_another_action_is_a_conflict_not_a_replay(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        form = form_of(c)
+        assert act(c, "save", form, a="Б").status_code == 303
+        same = act(c, "save", form, a="Б")  # точный повтор
+        assert same.status_code == 303
+        other = act(c, "save", form, a="А")  # тот же id, другой ввод
+        assert other.status_code == 409 and "не сохранён" in other.text
+        sub = act(c, "submit", form)  # тот же id, другое действие
+        assert sub.status_code == 409
+        assert current(c)[1]["items"][0]["answer"] == "Б"
+        assert db(tmp_path).execute("SELECT status FROM exam_attempt").fetchone()[0] == "running"
+
+
+def test_blank_view_is_rechecked_after_assembly(tmp_path, monkeypatch):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        a = start_real(c).json()["attempt_id"]
+        at(c, 1, "save", a="Б")
+        real, fired = exam.active, []
+
+        def racing(conn, now):
+            got = real(conn, now)
+            if not fired:
+                fired.append(1)
+                other = open_db(tmp_path / "olymp.db")
+                try:
+                    cur = other.execute("SELECT * FROM exam_attempt WHERE status = 'running'")
+                    exam._finish(other, cur.fetchone(), "manual", now)
+                    exam.start(other, now, mode="real", material_id=1)
+                finally:
+                    other.close()
+            return got
+
+        monkeypatch.setattr(exam, "active", racing)
+        code, view = current(c)
+        assert fired and code == 200 and view["id"] != a
+        assert all(i["answer"] is None for i in view["items"])

@@ -452,6 +452,7 @@ def _answer_value(item, raw):
         raise ExamError(422, "bad_answer", str(exc)) from exc
 
 
+STALE_MESSAGE = "Страница устарела: вариант изменился в другой вкладке. Твой ввод не сохранён."
 ACTIONS = ("save", "open", "mark", "submit")
 
 
@@ -473,9 +474,13 @@ def act(
         if attempt is None:
             raise ExamError(404, "no_attempt", "Такого прохождения нет.")
         done = conn.execute(
-            "SELECT outcome FROM exam_action WHERE attempt_id = ? AND action_id = ?",
+            "SELECT outcome, digest FROM exam_action WHERE attempt_id = ? AND action_id = ?",
             (attempt_id, action_id),
         ).fetchone()
+        digest = json.dumps([action, target, shown, raw], ensure_ascii=False, sort_keys=True)
+        reused = done is not None and done["digest"] != digest  # тот же id, другое действие
+        if reused:
+            raise ExamError(409, "stale", STALE_MESSAGE)
         if attempt["status"] != "running":
             if action == "submit" or done is not None:
                 return "submitted"  # сдача идемпотентна: ответы после неё не меняются
@@ -489,10 +494,7 @@ def act(
         if done is not None:  # принятый идентификатор: тот же результат, действие не повторяется
             return done[0]
         if rev != attempt["rev"] or shown != _current_position(conn, attempt_id):
-            raise ExamError(
-                409, "stale",
-                "Страница устарела: вариант изменился в другой вкладке. Твой ввод не сохранён.",
-            )  # fmt: skip
+            raise ExamError(409, "stale", STALE_MESSAGE)
         item = _item(conn, attempt_id, shown)
         value = _answer_value(item, raw)
         if action == "open":
@@ -511,8 +513,8 @@ def act(
             outcome = "submitted"
         conn.execute("UPDATE exam_attempt SET rev = rev + 1 WHERE id = ?", (attempt_id,))
         conn.execute(
-            "INSERT INTO exam_action (attempt_id, action_id, outcome) VALUES (?, ?, ?)",
-            (attempt_id, action_id, outcome),
+            "INSERT INTO exam_action (attempt_id, action_id, outcome, digest) VALUES (?, ?, ?, ?)",
+            (attempt_id, action_id, outcome, digest),
         )
     return outcome
 
@@ -548,6 +550,24 @@ def _with_keys(options):
     if isinstance(options, dict):
         return {side: _with_keys(rows) for side, rows in options.items()}
     return options
+
+
+def current_view(conn, now) -> dict | None:
+    """Бланк идущего прохождения, собранный в одном снимке чтения; перед возвратом идентичность
+    активного прохождения проверяется заново (сдано и заменено новым - сборка повторяется)."""
+    for _ in range(5):
+        attempt = active(conn, now)
+        if attempt is None:
+            return None
+        with seq.read_snapshot(conn):
+            row = conn.execute(
+                "SELECT * FROM exam_attempt WHERE id = ? AND status = 'running'", (attempt["id"],)
+            ).fetchone()
+            view = None if row is None else running_view(conn, row, now)
+        fresh = conn.execute("SELECT id FROM exam_attempt WHERE status = 'running'").fetchone()
+        if view is not None and fresh is not None and fresh["id"] == attempt["id"]:
+            return view
+    raise HTTPException(503, "Занято, попробуй ещё раз.", headers={"Retry-After": "1"})
 
 
 def running_view(conn, attempt, now=None) -> dict:

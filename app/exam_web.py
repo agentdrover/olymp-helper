@@ -99,12 +99,12 @@ def exam_start(request: Request, conn: Db, body: Body):
 
 @child.get("/api/exam/current", dependencies=[Depends(child_notice_gate)])
 def exam_current(request: Request, conn: Db):
-    attempt = exam.active(conn, now_of(request))
-    if attempt is None:
+    view = exam.current_view(conn, now_of(request))
+    if view is None:
         return JSONResponse(
             {"ok": False, "code": "not_running", "message": "Вариант не идёт."}, status_code=404
         )
-    return JSONResponse(exam.running_view(conn, attempt, now_of(request)))
+    return JSONResponse(view)
 
 
 @child.get("/exam/figure/{position}.png", dependencies=[Depends(child_notice_gate)])
@@ -140,10 +140,9 @@ def _blank(
 ):  # fmt: skip
     """Бланк: обычная страница, каждое действие - отправка формы (POST) и 303 на эту страницу."""
     now = now_of(request)
-    attempt = exam.active(conn, now)
-    if attempt is None:
+    view = exam.current_view(conn, now)
+    if view is None:
         return RedirectResponse("/exam", status_code=303)
-    view = exam.running_view(conn, attempt, now)
     item = view["items"][view["current"] - 1]
     page = TEMPLATES.TemplateResponse(
         request,

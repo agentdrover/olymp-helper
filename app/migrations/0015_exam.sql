@@ -73,5 +73,6 @@ CREATE TABLE exam_action (
     attempt_id INTEGER NOT NULL REFERENCES exam_attempt (id) ON DELETE CASCADE,
     action_id TEXT NOT NULL,
     outcome TEXT NOT NULL,
+    digest TEXT NOT NULL,
     PRIMARY KEY (attempt_id, action_id)
 );
