@@ -713,3 +713,43 @@ def test_option_labels_carry_the_token_the_answer_check_uses(tmp_path):
         body = {"attempt_id": current(c)[1]["id"], "position": pos, "answer": "Б)"}
         assert c.post("/exam/answer", json=body, headers=CHILD).status_code == 200
         assert current(c)[1]["items"][0]["answer"] == items[0]["options"][1]["token"]
+
+
+def test_screens_with_past_work_started_between_the_check_and_the_read_hide_the_tasks(
+    tmp_path, monkeypatch
+):
+    """Сегодня, Мои итоги и итог занятия: вариант стартовал между проверкой и чтением - заданий
+    варианта (текст, ответ, верность) в ответе нет. Без гонки они на месте (контроль)."""
+    c, clock, _ = boot(tmp_path)
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        assert (
+            attempt(c, task, "А", "sure").status_code == 200
+        )  # неверно: будет в итоге и в «Сегодня»
+        sid = c.post("/session/finish", json={}, headers=CHILD).json()["session_id"]
+        urls = ("/today", "/my", "/api/my", f"/api/my/sessions/{sid}")
+        marks = (
+            "цитология",
+            f"/tasks/{task}",
+            "ошибся",
+            "ошибка",
+        )  # текст, ссылка, причина разбора
+        for url in urls:
+            sql(tmp_path, "UPDATE exam_attempt SET status = 'submitted', end_reason = 'manual'")
+            r = c.get(url, headers=CHILD)
+            assert r.status_code == 200 and any(m in r.text for m in marks), url
+            fired = _start_before_snapshot(tmp_path, clock, monkeypatch)
+            r = c.get(url, headers=CHILD)
+            assert fired and r.status_code == 200, url
+            assert not any(m in r.text for m in marks), url
+            monkeypatch.undo()
+        # «Закончить» новое занятие: итог в ответе тоже без заданий идущего варианта
+        sql(tmp_path, "UPDATE exam_attempt SET status = 'submitted', end_reason = 'manual'")
+        clock.advance(60)
+        assert attempt(c, task, "А", "sure").status_code == 200
+        fired = _start_before_snapshot(tmp_path, clock, monkeypatch)
+        r = c.post("/session/finish", json={}, headers=CHILD)
+        assert fired and r.status_code == 200, r.text
+        assert not any(m in r.text for m in marks)

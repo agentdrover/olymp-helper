@@ -11,7 +11,7 @@ from app import exam
 from app.exam_countdown import exam_countdown
 from app.ingest.publish import is_published
 from app.model.ledger import moscow_day
-from app.tutor import state
+from app.tutor import seq, state
 
 
 def _label(material) -> str:
@@ -49,8 +49,13 @@ def _reason(run, flags) -> str | None:
 
 
 def build_today(conn, now: datetime) -> dict:
-    day = moscow_day(now)
-    hidden = exam.locked_task_ids(conn, now)  # идёт олимпиада: её задания в «Сегодня» не видны
+    exam.expire_due(conn, now)  # запись - до снимка чтения
+    with seq.read_snapshot(conn):  # замок олимпиады и данные экрана - из одного состояния базы
+        return _today_data(conn, now, exam.running_task_ids(conn))
+
+
+def _today_data(conn, now: datetime, hidden) -> dict:
+    day = moscow_day(now)  # hidden: идёт олимпиада, её задания в «Сегодня» не видны
     tasks = [
         t for t in conn.execute("SELECT * FROM task_item ORDER BY id")
         if is_published(t) and t["id"] not in hidden

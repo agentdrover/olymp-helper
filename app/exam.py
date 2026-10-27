@@ -394,17 +394,21 @@ def active(conn, now: datetime):
     return conn.execute("SELECT * FROM exam_attempt WHERE status = 'running'").fetchone()
 
 
-def locked_task_ids(conn, now: datetime) -> frozenset[int]:
-    attempt = active(conn, now)
-    if attempt is None:
-        return frozenset()
+def running_task_ids(conn) -> frozenset[int]:
+    """Только чтение (годится внутри снимка): задания идущего прохождения. Просроченное, но не
+    закрытое считается идущим - строго безопаснее; просроченные закрывает expire_due до снимка."""
     return frozenset(
         r[0]
         for r in conn.execute(
-            "SELECT task_item_id FROM exam_item WHERE attempt_id = ? AND task_item_id IS NOT NULL",
-            (attempt["id"],),
+            "SELECT i.task_item_id FROM exam_item i JOIN exam_attempt a ON a.id = i.attempt_id "
+            "WHERE a.status = 'running' AND i.task_item_id IS NOT NULL"
         )
     )
+
+
+def locked_task_ids(conn, now: datetime) -> frozenset[int]:
+    expire_due(conn, now)
+    return running_task_ids(conn)
 
 
 def task_running(conn, task_id: int) -> bool:

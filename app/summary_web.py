@@ -13,6 +13,7 @@ from app import exam, privacy, summary
 from app.ingest.web import TEMPLATES, Db, child_notice_gate
 from app.notice import notice_redirect
 from app.roles import now_of, require_csrf, require_parent
+from app.tutor import seq
 from app.tutor.web import _needs_notice, child_same_origin
 
 child = APIRouter()
@@ -23,9 +24,14 @@ parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)]
 
 
 def _my_data(conn, now, selected_id: int | None) -> dict:
-    hidden = exam.locked_task_ids(
-        conn, now
-    )  # идёт олимпиада: её задания скрыты и в прошлых занятиях
+    exam.expire_due(conn, now)
+    summary.ensure(conn, now)  # запись - до снимка чтения
+    with seq.read_snapshot(conn):  # замок олимпиады и данные экрана - из одного состояния базы
+        return _my_data_in(conn, now, selected_id, exam.running_task_ids(conn))
+
+
+def _my_data_in(conn, now, selected_id: int | None, hidden) -> dict:
+    # hidden: идёт олимпиада, её задания скрыты и в прошлых занятиях
     sessions = summary.list_sessions(conn, now)
     for s in sessions:
         s["summary"] = summary.hide_tasks(s["summary"], hidden) if s["summary"] else None
@@ -77,11 +83,15 @@ def my_json(request: Request, conn: Db, session: int | None = None):
 
 @child.get("/api/my/sessions/{session_id}", dependencies=[Depends(child_notice_gate)])
 def my_summary_json(session_id: int, request: Request, conn: Db):
-    found = summary.get_summary(conn, session_id, now_of(request))
-    if found is None:
-        raise HTTPException(404, "Итога этого занятия нет")
-    hidden = exam.locked_task_ids(conn, now_of(request))
-    return JSONResponse(summary.present(conn, found, child=True, hidden=hidden))
+    now = now_of(request)
+    exam.expire_due(conn, now)
+    summary.ensure(conn, now)  # запись - до снимка чтения
+    with seq.read_snapshot(conn):
+        found = summary.get_summary(conn, session_id, now)
+        if found is None:
+            raise HTTPException(404, "Итога этого занятия нет")
+        hidden = exam.running_task_ids(conn)
+        return JSONResponse(summary.present(conn, found, child=True, hidden=hidden))
 
 
 @child.post(
@@ -95,10 +105,10 @@ def finish(request: Request, conn: Db):
             {"ok": False, "code": "no_session", "message": "Идущего занятия нет."},
             status_code=409,
         )
-    return JSONResponse({"ok": True, "session_id": built["session_id"],
-         "summary": summary.present(
-             conn, built, child=True, hidden=exam.locked_task_ids(conn, now_of(request)))}
-    )  # fmt: skip
+    exam.expire_due(conn, now_of(request))
+    with seq.read_snapshot(conn):
+        shown = summary.present(conn, built, child=True, hidden=exam.running_task_ids(conn))
+    return JSONResponse({"ok": True, "session_id": built["session_id"], "summary": shown})
 
 
 @child.post(
