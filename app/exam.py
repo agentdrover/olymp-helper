@@ -11,9 +11,10 @@ import random
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from app.ingest.answers import display, key_value
+from app.ingest.answers import display, key_value, label_key
 from app.ingest.publish import is_published
 from app.ingest.store import atomic, figure_of, options_of
+from app.tutor import seq
 from app.tutor.check import BadAnswer, check_answer, parse_answer
 from app.tutor.seq import bump
 
@@ -538,6 +539,16 @@ def _current_position(conn, attempt_id: int) -> int:
     return row[0] if row else 1
 
 
+def _with_keys(options):
+    """Обозначение варианта и его ключ в виде, в котором его сравнивает проверка ответа
+    (label_key): экран сверяет выбор и сохранённый ответ по ключу, а не по сырой метке."""
+    if isinstance(options, list):
+        return [{**o, "token": label_key(o["label"])} for o in options]
+    if isinstance(options, dict):
+        return {side: _with_keys(rows) for side, rows in options.items()}
+    return options
+
+
 def running_view(conn, attempt, now=None) -> dict:
     """Что видит ребёнок, пока вариант идёт: условия, свои ответы и отметки. Ни ключа, ни
     признака верности."""
@@ -553,7 +564,7 @@ def running_view(conn, attempt, now=None) -> dict:
             "type": item["task_type"],
             "number": s["number"],
             "text": s["text"],
-            "options": s["options"],
+            "options": _with_keys(s["options"]),
             "figure": None if figure is None else {
                 "url": f"/exam/figure/{item['position']}.png", "alt": figure["alt"],
             },
@@ -575,17 +586,25 @@ def running_view(conn, attempt, now=None) -> dict:
     }
 
 
-def _overlaps_running(conn, attempt_id: int, now: datetime) -> bool:
-    """Задания этого прохождения входят в идущее: их результаты пока скрыты."""
-    locked = locked_task_ids(conn, now)
-    if not locked:
-        return False
-    return any(
-        r[0] in locked
-        for r in conn.execute(
-            "SELECT task_item_id FROM exam_item WHERE attempt_id = ?", (attempt_id,)
-        )
+def _overlaps_now(conn, attempt_id: int) -> bool:
+    """Только чтение (годится внутри снимка): задания этого прохождения входят в идущее."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM exam_item mine JOIN exam_item live ON live.task_item_id = mine.task_item_id "
+            "JOIN exam_attempt a ON a.id = live.attempt_id "
+            "WHERE mine.attempt_id = ? AND a.status = 'running' AND mine.task_item_id IS NOT NULL "
+            "LIMIT 1",
+            (attempt_id,),
+        ).fetchone()
+        is not None
     )
+
+
+def _overlaps_running(conn, attempt_id: int, now: datetime) -> bool:
+    """Предварительная проверка: закрывает просроченные и смотрит, скрыты ли результаты. Данные
+    читаются в снимке, где проверка повторяется: между ними вариант мог стартовать."""
+    expire_due(conn, now)
+    return _overlaps_now(conn, attempt_id)
 
 
 def result(conn, attempt_id: int, now: datetime) -> dict:
@@ -597,6 +616,14 @@ def result(conn, attempt_id: int, now: datetime) -> dict:
         raise ExamError(409, "exam_running", RUNNING_MESSAGE)
     if _overlaps_running(conn, attempt_id, now):
         raise ExamError(409, "exam_running", RUNNING_MESSAGE)
+    with seq.read_snapshot(conn):  # проверка и данные - из одного состояния базы
+        if _overlaps_now(conn, attempt_id):
+            raise ExamError(409, "exam_running", RUNNING_MESSAGE)
+        return _result_data(conn, attempt_id)
+
+
+def _result_data(conn, attempt_id: int) -> dict:
+    attempt = conn.execute("SELECT * FROM exam_attempt WHERE id = ?", (attempt_id,)).fetchone()
     snap = json.loads(attempt["snapshot"])
     seconds = _view_seconds(conn, attempt_id)
     items = []
@@ -648,13 +675,15 @@ def figure_png(conn, attempt_id: int, position: int) -> bytes | None:
 
 
 def history(conn, now: datetime) -> list[dict]:
-    return [
-        {
-            "id": r["id"], "title": r["title"], "submitted_at": r["submitted_at"],
-            "score": _num(r["score"]), "max_score": _num(r["max_score"]),
-        }
-        for r in conn.execute(
-            "SELECT * FROM exam_attempt WHERE status = 'submitted' ORDER BY id DESC LIMIT 20"
-        ).fetchall()
-        if not _overlaps_running(conn, r["id"], now)
-    ]  # fmt: skip
+    expire_due(conn, now)
+    with seq.read_snapshot(conn):  # скрытие и данные строк - из одного состояния базы
+        return [
+            {
+                "id": r["id"], "title": r["title"], "submitted_at": r["submitted_at"],
+                "score": _num(r["score"]), "max_score": _num(r["max_score"]),
+            }
+            for r in conn.execute(
+                "SELECT * FROM exam_attempt WHERE status = 'submitted' ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+            if not _overlaps_now(conn, r["id"])
+        ]  # fmt: skip

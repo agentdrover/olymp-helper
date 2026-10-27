@@ -635,3 +635,81 @@ def test_exam_start_and_finish_bump_the_version_and_the_block_carries_it(tmp_pat
         assert c.get("/api/exam/current", headers=CHILD).status_code in (200, 404, 409)
         exam.expire_due(db(tmp_path), clock())
         assert seq.current(db(tmp_path)) > started
+
+
+def _start_before_snapshot(tmp_path, clock, monkeypatch):
+    """Вход в снимок чтения (после предварительной проверки) запускает новый вариант: гонка."""
+    from app.tutor import seq
+
+    real, fired = seq.read_snapshot, []
+
+    def racing(conn):
+        if not fired:
+            fired.append(1)
+            other = open_db(tmp_path / "olymp.db")
+            try:
+                exam.start(other, clock(), mode="real", material_id=1)
+            finally:
+                other.close()
+        return real(conn)
+
+    monkeypatch.setattr(seq, "read_snapshot", racing)
+    return fired
+
+
+def _submitted_attempt(c):
+    a = start_real(c).json()["attempt_id"]
+    c.post("/exam/answer", json={"attempt_id": a, "position": 1, "answer": "Б"}, headers=CHILD)
+    done = {"attempt_id": a, "confirm": True}
+    assert c.post("/exam/submit", json=done, headers=CHILD).status_code == 200
+    return a
+
+
+def test_result_started_between_the_check_and_the_read_gives_no_key(tmp_path, monkeypatch):
+    c, clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        a = _submitted_attempt(c)
+        fired = _start_before_snapshot(tmp_path, clock, monkeypatch)
+        r = c.get(f"/api/exam/results/{a}", headers=CHILD)
+        assert fired and r.status_code == 409, r.text
+        assert "correct" not in r.text and "points" not in r.text
+
+
+def test_history_started_between_the_check_and_the_read_lists_nothing(tmp_path, monkeypatch):
+    c, clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        _submitted_attempt(c)
+        fired = _start_before_snapshot(tmp_path, clock, monkeypatch)
+        r = c.get("/api/exam", headers=CHILD)
+        assert fired and r.json()["history"] == [], r.text
+
+
+def test_option_labels_carry_the_token_the_answer_check_uses(tmp_path):
+    from app.ingest.answers import label_key
+
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        sets = (["А)", "Б)", "В)", "Г)"], ["а", "б", "в", "г"], ["A", "B", "C", "D"])
+        for n, labels in enumerate(sets, 1):
+            opts = [{"label": x, "text": f"вариант {x}"} for x in labels]
+            seed(tmp_path, options=opts, key="Б", number=str(n))
+        save_format(c, tmp_path)
+        assert start_real(c).status_code == 200
+        items = current(c)[1]["items"]
+        assert len(items) == 3
+        for it in items:
+            for o in it["options"]:
+                assert o["token"] == label_key(o["label"])
+            assert [o["token"] for o in it["options"]][1] in ("Б", "В")
+        assert [o["token"] for o in items[0]["options"]] == ["А", "Б", "В", "Г"]
+        assert [o["token"] for o in items[1]["options"]] == ["А", "Б", "В", "Г"]
+        assert [o["token"] for o in items[2]["options"]] == ["А", "В", "С", "D"]
+        # ответ, выбранный по метке «Б)», сохраняется ключом и совпадает с ключом варианта
+        pos = items[0]["position"]
+        body = {"attempt_id": current(c)[1]["id"], "position": pos, "answer": "Б)"}
+        assert c.post("/exam/answer", json=body, headers=CHILD).status_code == 200
+        assert current(c)[1]["items"][0]["answer"] == items[0]["options"][1]["token"]

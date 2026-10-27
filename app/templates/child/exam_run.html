@@ -12,10 +12,10 @@
    <button class="btn primary" id="exam-submit" type="button">Сдать вариант</button></p>
 <script>
 let exam = null, pos = 1, shown = 0;
-const LAT = {A: "А", B: "В", C: "С", E: "Е", H: "Н", K: "К", M: "М", O: "О", P: "Р", T: "Т", X: "Х"};
-const norm = l => String(l).toUpperCase().split("").map(ch => LAT[ch] || ch).join("");
+let gen = 0;  // номер последнего отправленного запроса: ответ на более старый ничего не перерисовывает
 const $ = id => document.getElementById(id);
 async function call(path, body) {
+  const my = ++gen;
   const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
   const j = await r.json();
   if (!r.ok) {
@@ -23,7 +23,10 @@ async function call(path, body) {
     if (j.code === "time_up" || j.code === "not_running") location.href = "/exam";
     return null;
   }
-  $("exam-msg").textContent = "";
+  if (my !== gen) j.stale = true;  // после этого запроса ушёл более новый
+  else $("exam-msg").textContent = "";
+  j.sent = body.answer;
+  j.at = body.position;
   return j;
 }
 function answerOf(it) {
@@ -33,20 +36,23 @@ function answerOf(it) {
   if (it.type === "match") return Object.fromEntries([...box.querySelectorAll("select[data-l]")].filter(s => s.value).map(s => [s.dataset.l, s.value]));
   return box.querySelector("input[name=n]").value;
 }
+function renderNav() {
+  $("exam-nav").innerHTML = exam.items.map(x => `<button type="button" data-p="${x.position}"${x.position === pos ? ' aria-current="true"' : ""}>${x.position}${x.answer != null && x.answer !== "" ? " ✓" : ""}${x.marked ? " ⚑" : ""}</button>`).join(" ");
+}
 function render() {
   const it = exam.items[pos - 1];
   shown = pos;
   $("exam-title").textContent = exam.title + " · " + exam.stage + " этап";
-  $("exam-nav").innerHTML = exam.items.map(x => `<button type="button" data-p="${x.position}"${x.position === pos ? ' aria-current="true"' : ""}>${x.position}${x.answer != null && x.answer !== "" ? " ✓" : ""}${x.marked ? " ⚑" : ""}</button>`).join(" ");
+  renderNav();
   const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
   let body = `<p>${esc(it.text)}</p>`;
   if (it.figure) body += `<img src="${it.figure.url}" alt="${esc(it.figure.alt)}">`;
   const cur = it.answer;
   if (it.type === "single" || it.type === "multiple") {
     const kind = it.type === "single" ? "radio" : "checkbox";
-    body += it.options.map(o => `<label><input type="${kind}" name="a" value="${esc(o.label)}"${[].concat(cur || []).includes(norm(o.label)) ? " checked" : ""}> ${esc(o.label)}) ${esc(o.text)}</label><br>`).join("");
+    body += it.options.map(o => `<label><input type="${kind}" name="a" value="${esc(o.label)}"${[].concat(cur || []).includes(o.token) ? " checked" : ""}> ${esc(o.label)}) ${esc(o.text)}</label><br>`).join("");
   } else if (it.type === "match") {
-    body += it.options.left.map(l => `<p>${esc(l.label)}) ${esc(l.text)} → <select data-l="${esc(l.label)}"><option value="">—</option>${it.options.right.map(r => `<option value="${esc(r.label)}"${cur && cur[norm(l.label)] === norm(r.label) ? " selected" : ""}>${esc(r.label)}) ${esc(r.text)}</option>`).join("")}</select></p>`).join("");
+    body += it.options.left.map(l => `<p>${esc(l.label)}) ${esc(l.text)} → <select data-l="${esc(l.label)}"><option value="">—</option>${it.options.right.map(r => `<option value="${esc(r.label)}"${cur && cur[l.token] === r.token ? " selected" : ""}>${esc(r.label)}) ${esc(r.text)}</option>`).join("")}</select></p>`).join("");
   } else {
     body += `<label>Число <input name="n" inputmode="decimal" value="${cur == null ? "" : esc(cur)}"></label>`;
   }
@@ -55,7 +61,20 @@ function render() {
 }
 let offset = 0, checking = false;  // сдвиг серверных часов относительно браузера
 function sync(v) { if (v && v.server_now) offset = new Date(v.server_now) - Date.now(); }
-async function refresh(j) { if (j && j.exam) { sync(j.exam); exam = j.exam; render(); } }
+// Ответ сервера применяется, только если за ним не ушёл более новый запрос; поле, которое ребёнок
+// правил после отправки, он не трогает (исправленный ввод уйдёт при следующем сохранении).
+async function refresh(j) {
+  if (!j || !j.exam) return;
+  sync(j.exam);
+  if (j.stale) return;
+  exam = j.exam;
+  if (j.sent !== undefined && j.at === shown && shown === pos
+      && JSON.stringify(answerOf(exam.items[shown - 1]) ?? null) !== JSON.stringify(j.sent ?? null)) {
+    renderNav();
+    return;
+  }
+  render();
+}
 // Несохранённый ввод на показанном задании сохраняется перед переходом, отметкой и сдачей.
 async function saveCurrent() {
   if (!exam || !shown) return true;
@@ -66,7 +85,7 @@ async function saveCurrent() {
   if (now === had || (empty.includes(now) && empty.includes(had))) return true;
   const j = await call("/exam/answer", {attempt_id: exam.id, position: shown, answer: answerOf(it)});
   if (!j) return false;
-  exam = j.exam; sync(exam);
+  if (!j.stale) { exam = j.exam; sync(exam); }
   return true;
 }
 async function open(p) {
