@@ -525,10 +525,33 @@ def test_an_older_steps_result_never_hides_a_newer_running_step(tmp_path):
 def test_the_client_orders_responses_by_server_version_and_keeps_one_poll_chain():
     js = STATIC.read_text(encoding="utf-8")
     assert "function isOld(html)" in js and "if (!isOld(html)) swap(html, true);" in js  # опрос
-    assert 'if (!isOld(html)) swap(html, act !== "attempt");' in js  # send
+    assert 'swap(html, !(act === "attempt" && accepted));' in js  # send
     assert "if (isOld(html)) return extend();" in js  # sendQuestion
     assert "var gen" not in js and "pending" not in js and "recovering" not in js
     assert (
         "clearTimeout(timer);" in js
         and "var done = function () { fetching = false; plan(); };" in js
     )
+
+
+def test_the_response_says_whether_an_attempt_was_accepted(tmp_path):
+    """Пока шаг держит замок, попытка не записывается; ответ это называет, чтобы клиент не стёр форму."""
+    model = Blocking()
+    c, _clock = boot_bg(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        wrong_attempt(c, tid, model)
+        hx = {**CHILD, "HX-Request": "true"}
+        assert c.post(f"/tasks/{tid}/hint", json={"level": 1}, headers=hx).status_code == 200
+        assert model.entered.wait(10)  # шаг идёт и держит замок
+        refused = c.post(f"/tasks/{tid}/attempt", json={"answer": "Б"}, headers=hx)
+        assert refused.status_code == 200
+        assert refused.headers["X-Attempt"] == "refused"
+        assert "ответ не отправлен" in refused.text and 'data-panel="thinking"' in refused.text
+        assert view(c, tid)["attempts"] == 1  # попытка не записана
+        model.release.set()
+        c.app.state.steps.join()
+        accepted = c.post(f"/tasks/{tid}/attempt", json={"answer": "Б"}, headers=hx)
+        assert accepted.headers["X-Attempt"] == "accepted"
+        c.app.state.steps.join()
+        assert view(c, tid)["attempts"] == 2

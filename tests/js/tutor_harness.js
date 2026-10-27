@@ -102,6 +102,7 @@ async function advance(ms) {
 }
 const ok = (html) => () => Promise.resolve({ text: () => Promise.resolve(html), headers: { get: () => null } });
 const ok_ = (fn) => () => Promise.resolve({ text: () => Promise.resolve(fn()), headers: { get: () => null } });
+const okH = (html, hdr) => () => Promise.resolve({ text: () => Promise.resolve(html), headers: { get: (k) => (hdr && hdr[k]) || null } });
 const fail = () => Promise.reject(new TypeError("network"));
 const deferred = () => { let res; const p = new Promise((r) => { res = r; }); return { p, res }; };
 
@@ -270,11 +271,26 @@ const scenarios = {
   async attempt_response_resets_the_form() {
     boot(screen("idle", ' data-version="5"'));
     page.els.find((e) => e.attrs.value === "Б").checked = true;
-    page.postq.push(ok(screen("idle", ' data-version="6"')));
+    page.postq.push(okH(screen("idle", ' data-version="6"'), { "X-Attempt": "accepted" }));
     const form = { getAttribute: (k) => (k === "data-act" ? "attempt" : "single"), querySelector: () => ({ value: "Б" }), querySelectorAll: () => [], preventDefault() {} };
     page.handlers.submit[0]({ target: form, preventDefault() {} });
     await settle();
     if (checkedOf("answer").length) throw new Error("form not reset after attempt");
+  },
+  // Шаг держит замок, попытка не принята: выбор и число остаются, ребёнок отправит снова.
+  async refused_attempt_keeps_unsent_answer() {
+    boot(screen("thinking", ' data-step="3" data-version="5"'));
+    page.els.find((e) => e.attrs.value === "Б").checked = true;
+    page.els.find((e) => e.attrs.value === "doubt").checked = true;
+    page.els.find((e) => e.attrs.name === "num").value = "42";
+    page.postq.push(okH(screen("thinking", ' data-step="3" data-version="5"'), { "X-Attempt": "refused" }));
+    const form = { getAttribute: (k) => (k === "data-act" ? "attempt" : "single"), querySelector: () => ({ value: "Б" }), querySelectorAll: () => [], preventDefault() {} };
+    page.handlers.submit[0]({ target: form, preventDefault() {} });
+    await settle();
+    if (page.posts.length < 1 || page.posts[0].method !== "POST") throw new Error("attempt POST not sent");
+    if (checkedOf("answer").join() !== "Б") throw new Error("option wiped by a refused attempt");
+    if (checkedOf("confidence").join() !== "doubt") throw new Error("confidence wiped");
+    if (page.els.find((e) => e.attrs.name === "num").value !== "42") throw new Error("number wiped");
   },
 };
 

@@ -161,12 +161,17 @@
   function send(act, body) {
     if (act in MODEL_ACTS && MODEL_ACTS[act]) setThinking();
     extend();
+    var accepted = false;
     return fetch(base + "/" + act, {
       method: "POST",
       headers: { "Content-Type": "application/json", "HX-Request": "true" },
       body: JSON.stringify(body || {}),
-    }).then(function (r) { return r.text(); }).then(function (html) {
-      if (!isOld(html)) swap(html, act !== "attempt");  // форму сбрасывает только отправка самой формы
+    }).then(function (r) {
+      accepted = r.headers.get("X-Attempt") === "accepted";
+      return r.text();
+    }).then(function (html) {
+      // форму сбрасывает только принятая попытка; отказ (шаг держит замок) выбор ребёнка не трогает
+      if (!isOld(html)) swap(html, !(act === "attempt" && accepted));
       extend();
     }).catch(lostReply);
   }

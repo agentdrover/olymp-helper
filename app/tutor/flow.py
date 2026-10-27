@@ -36,6 +36,8 @@ from app.tutor.prompts import (
 from app.tutor.state import DISPUTED, Refused
 
 log = logging.getLogger(__name__)
+
+BUSY_ATTEMPT = "Помощник ещё думает — ответ не отправлен, попробуй через минуту."
 LONG_TALK = "Слишком длинный разговор по этому заданию. Начни новое занятие или открой решение."
 
 
@@ -50,6 +52,7 @@ class Flow:
         self.clock = clock
         self.panel_state: str | None = None  # состояние панели, которое покажет ответ
         self.notice: str | None = None
+        self.attempt_state: str | None = None  # accepted | refused: ответ называет это клиенту
         self.channel: str | None = None  # канал, который сгенерировал текст: судья - другой
         self.session: int | None = None
 
@@ -258,9 +261,12 @@ class Flow:
         task = get_task(self.conn, task_id)
         locked = assist_mode(task) == "hints"
         if locked and not self._begin(task, "attempt"):
+            self.attempt_state = "refused"
+            self.notice = BUSY_ATTEMPT
             return None
         try:
             info = state.record_attempt(self.conn, task_id, raw, confidence, self.now)
+            self.attempt_state = "accepted"
             run = state.get_run(self.conn, info["run_id"])
             if locked and not (info["matched"] and not info["keyed"]):
                 self._launch(task, "_attempt_work", run["id"], bool(info["matched"]))

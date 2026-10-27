@@ -21,6 +21,7 @@ SCENARIOS = [
     "older_run_response_does_not_replace_new_run_form",
     "hint_response_keeps_unsent_answer",
     "attempt_response_resets_the_form",
+    "refused_attempt_keeps_unsent_answer",
 ]
 
 

@@ -152,7 +152,10 @@ def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, not
         request, conn, task_id, step=flow.step_id if flow else None, flow=flow, notice=notice
     )
     started = flow is not None and flow.launched
-    headers = {"X-Step-Started": "1"} if started else None
+    headers = {"X-Step-Started": "1"} if started else {}
+    if flow is not None and flow.attempt_state:
+        headers["X-Attempt"] = flow.attempt_state  # принята ли попытка: клиент сбрасывает форму
+    headers = headers or None
     if _is_fragment(request):
         resp = _fragment(request, view)
         if headers:
