@@ -1,34 +1,44 @@
-"""Версия панели задания (OH-T06b): хранимый монотонный счётчик на задание.
+"""Версия панели (OH-T06b): один глобальный монотонный счётчик в базе.
 
-`bump` вызывает КАЖДЫЙ писатель, меняющий то, что ребёнок видит на экране задания, внутри своей
-транзакции. Ответ панели несёт `current` из той же транзакции чтения, что и данные экрана
-(`read_snapshot`), поэтому HTML ответа и его версия всегда соответствуют друг другу. Версия не
-выводится из других таблиц: удаление строк её не уменьшает, правка без новых строк её растит.
+Правило записи: каждый писатель, меняющий то, что ребёнок видит на экране задания, зовёт `bump` в
+ТОЙ ЖЕ транзакции, что и сама запись; изменение в памяти (замок `Inflight`) растит версию своей
+короткой транзакцией ПОСЛЕ изменения (`bump_now`).
+Правило чтения: ответ панели читает версию ПЕРВОЙ, до замка и данных, потом данные в снимке чтения.
+Данные новее версии безвредны: в худшем случае ответ отбросят, и следующий опрос всё исправит.
+Версия не выводится из других таблиц, поэтому удаление строк её не уменьшает.
 """
 
 from contextlib import contextmanager
 
 
-def bump(conn, task_id: int | None) -> None:
-    """+1 к версии панели задания; в транзакции вызывающего. Без задания - ничего."""
-    if task_id is None:
+def bump(conn) -> None:
+    """+1 к версии панели; в транзакции вызывающего."""
+    conn.execute("UPDATE panel_seq SET seq = seq + 1 WHERE id = 1")
+
+
+def bump_now(conn) -> None:
+    """Короткая собственная транзакция (изменение в памяти уже сделано). Внутри открытой
+    транзакции вызывающего - просто её часть."""
+    if conn.in_transaction:
+        bump(conn)
         return
-    conn.execute(
-        "INSERT INTO panel_seq (task_id, seq) VALUES (?, 1) "
-        "ON CONFLICT (task_id) DO UPDATE SET seq = seq + 1",
-        (task_id,),
-    )
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        bump(conn)
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
 
 
-def current(conn, task_id: int) -> int:
-    row = conn.execute("SELECT seq FROM panel_seq WHERE task_id = ?", (task_id,)).fetchone()
-    return 0 if row is None else row[0]
+def current(conn) -> int:
+    return conn.execute("SELECT seq FROM panel_seq WHERE id = 1").fetchone()[0]
 
 
 @contextmanager
 def read_snapshot(conn):
-    """Одна транзакция чтения: данные экрана и версия видят одно состояние базы. Внутри уже
-    открытой транзакции владелец - вызывающий."""
+    """Одна транзакция чтения для данных экрана. Внутри уже открытой транзакции владелец - вызывающий."""
     if conn.in_transaction:
         yield
         return

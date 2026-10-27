@@ -53,14 +53,6 @@ def session_exists(conn: sqlite3.Connection, session_id: int) -> bool:
     )
 
 
-def _bump_tasks_of(conn: sqlite3.Connection, where: str, args: list) -> None:
-    """Версия панели каждого задания, чьи события сейчас удалятся, растёт (транзакция вызывающего)."""
-    for (task_id,) in conn.execute(
-        f"SELECT DISTINCT task_item_id FROM event WHERE task_item_id IS NOT NULL AND {where}", args
-    ).fetchall():
-        bump(conn, task_id)
-
-
 def delete_messages(conn: sqlite3.Connection, session_id: int | None = None) -> int:
     where = f"type IN ({_IN})"
     args: list = list(MESSAGE_TYPES)
@@ -68,7 +60,7 @@ def delete_messages(conn: sqlite3.Connection, session_id: int | None = None) -> 
         where += " AND session_id = ?"
         args.append(session_id)
     with atomic(conn):  # версия и удаление - одна транзакция
-        _bump_tasks_of(conn, where, args)  # сообщения исчезают с экрана задания: версия растёт
+        bump(conn)  # сообщения исчезают с экрана: версия растёт, а не падает
         return conn.execute(f"DELETE FROM event WHERE {where}", args).rowcount
 
 
@@ -76,7 +68,7 @@ def cleanup_retention(conn: sqlite3.Connection, now: datetime) -> int:
     """Сообщения старше 180 дней удаляются; занятия, итоги и прочие события остаются."""
     cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
     with atomic(conn):
-        _bump_tasks_of(conn, f"type IN ({_IN}) AND created_at < ?", [*MESSAGE_TYPES, cutoff])
+        bump(conn)
         return conn.execute(
             f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?",
             (*MESSAGE_TYPES, cutoff),

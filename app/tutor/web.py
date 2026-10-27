@@ -116,12 +116,13 @@ def _view_of(
     его итог (отказ модели, пояснение) показывается один раз."""
     app = request.app
     _published(conn, task_id)  # 404 до всего остального
+    version = seq.current(conn)  # ПЕРВОЙ: данные новее версии безвредны, версия новее данных - нет
     live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # сначала: идёт ли
-    with seq.read_snapshot(conn):  # данные экрана и его версия - из одного состояния базы
-        return _view_in_snapshot(request, conn, task_id, live, step, flow, notice)
+    with seq.read_snapshot(conn):  # данные экрана - из одного состояния базы
+        return _view_in_snapshot(request, conn, task_id, live, step, flow, notice, version)
 
 
-def _view_in_snapshot(request: Request, conn, task_id: int, live, step, flow, notice):
+def _view_in_snapshot(request: Request, conn, task_id: int, live, step, flow, notice, version):
     app = request.app
     task, material = _published(conn, task_id)
     # Итог шага - ДО прогона: если шаг найден оконченным, прогон читается после его записи, и ответ
@@ -136,6 +137,7 @@ def _view_in_snapshot(request: Request, conn, task_id: int, live, step, flow, no
     return build_view(
         conn, task, material, run, app.state.clock(),
         inflight=app.state.inflight, panel_state=shown, notice=notice or note, live=live,
+        version=version,
     )  # fmt: skip
 
 
@@ -260,6 +262,7 @@ def task_page(task_id: int, request: Request, conn: Db):
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
     app = request.app
+    version = seq.current(conn)  # первой, до замка и данных
     live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # до чтения прогона
     with atomic(conn):  # экран открыт: с этого момента идут 60 секунд до подсказки 1
         state.ensure_run(conn, task_id, app.state.clock())
@@ -267,7 +270,7 @@ def task_page(task_id: int, request: Request, conn: Db):
         task, material = _published(conn, task_id)
         view = build_view(
             conn, task, material, state.active_run(conn, task), app.state.clock(),
-            inflight=app.state.inflight, live=live,
+            inflight=app.state.inflight, live=live, version=version,
         )  # fmt: skip
     return TEMPLATES.TemplateResponse(request, "child/task.html", {"v": view, "task": view["task"]})
 

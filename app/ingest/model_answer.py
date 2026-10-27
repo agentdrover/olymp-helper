@@ -48,7 +48,7 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
         )
         if cur.rowcount == 1:
             save_snapshot(conn, task_id)
-            bump(conn, task_id)
+            bump(conn)
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:

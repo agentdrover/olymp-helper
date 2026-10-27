@@ -66,10 +66,9 @@ def update_task(conn: sqlite3.Connection, task_id: int, **cols) -> None:
             value = json.dumps(value, ensure_ascii=False)
         values.append(value)
     sets = ", ".join(f"{name} = ?" for name in cols)
-    conn.execute(f"UPDATE task_item SET {sets} WHERE id = ?", (*values, task_id))
-    bump(
-        conn, task_id
-    )  # правка родителя (ключ, ревизия, подтверждение, рисунок) меняет экран ребёнка
+    with atomic(conn):
+        conn.execute(f"UPDATE task_item SET {sets} WHERE id = ?", (*values, task_id))
+        bump(conn)  # правка родителя (ключ, ревизия, подтверждение, рисунок) меняет экран ребёнка
 
 
 def save_snapshot(conn: sqlite3.Connection, task_id: int) -> None:

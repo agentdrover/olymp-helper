@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from app import privacy
 from app.ingest.store import update_task
-from app.tutor import state, steps
+from app.tutor import seq, state, steps
 from tests.bank_helpers import db
 from tests.chat_helpers import chat_reply, say
 from tests.test_tutor_figure import FIGURE, NUM, SHORT
@@ -70,17 +70,15 @@ def test_every_panel_writer_bumps_the_version(tmp_path):
         update_task(conn, tid, key_version=task["key_version"] + 1)
         grows("правка и подтверждение родителя")
         # статусы шага: pending -> running -> done и отказ
-        from app.tutor import seq
-
-        before = seq.current(conn, tid)
+        before = seq.current(conn)
         step = steps.start(conn, tid, "hint", NOW)
-        assert seq.current(conn, tid) > before
-        before = seq.current(conn, tid)
+        assert seq.current(conn) > before
+        before = seq.current(conn)
         steps.activate(conn, step)
-        assert seq.current(conn, tid) > before
-        before = seq.current(conn, tid)
+        assert seq.current(conn) > before
+        before = seq.current(conn)
         steps.finish(conn, step, "done", NOW)
-        assert seq.current(conn, tid) > before
+        assert seq.current(conn) > before
         conn.close()
 
 
@@ -133,3 +131,120 @@ def test_a_response_carries_the_version_of_the_state_it_rendered(tmp_path, monke
         new = fragment_ver(c, tid)
         assert int(re.search(r'data-version="(\d+)"', old)[1]) < new
         assert "повтор" not in old  # HTML старого прогона и версия старого прогона
+
+
+def test_the_version_is_read_before_the_live_state(tmp_path, monkeypatch):
+    """Версия читается ПЕРВОЙ: шаг, начавшийся, пока ответ собирался, виден в данных, но не в версии -
+    такой ответ не получает версию, равную свежему."""
+    from app.tutor import web
+
+    c, _clock, _model = boot(tmp_path)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        real = web.snapshot_live
+        fired = []
+
+        def racing(conn, inflight, task_id, now):
+            if not fired:
+                fired.append(1)
+                other = db(tmp_path)
+                step = steps.start(other, tid, "hint", NOW)  # шаг начался, пока ответ собирался
+                steps.activate(other, step)
+                other.close()
+            return real(conn, inflight, task_id, now)
+
+        monkeypatch.setattr(web, "snapshot_live", racing)
+        paused = fragment_ver(c, tid)
+        monkeypatch.setattr(web, "snapshot_live", real)
+        assert fired and paused < fragment_ver(c, tid)
+
+
+def test_a_step_write_and_its_version_bump_are_one_transaction(tmp_path, monkeypatch):
+    """Если рост версии не удался, запись шага откатывается: другой читатель не увидит статус, за
+    которым нет новой версии."""
+    c, _clock, _model = boot(tmp_path)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        conn = db(tmp_path)
+
+        def boom(_conn):
+            raise RuntimeError("bump failed")
+
+        step = steps.start(conn, tid, "hint", NOW)
+        status = lambda: conn.execute(
+            "SELECT status FROM tutor_step WHERE id = ?", (step,)
+        ).fetchone()
+        monkeypatch.setattr(steps, "bump", boom)
+        for call in (
+            lambda: steps.activate(conn, step),
+            lambda: steps.discard(conn, step),
+        ):
+            try:
+                call()
+            except RuntimeError:
+                pass
+            assert status() is not None and status()[0] == "pending"
+        monkeypatch.undo()
+        steps.activate(conn, step)
+        monkeypatch.setattr(steps, "bump", boom)
+        try:
+            steps.finish(conn, step, "failed", NOW, error="x")
+        except RuntimeError:
+            pass
+        assert status()[0] == "running"
+        n = conn.execute("SELECT COUNT(*) FROM tutor_step").fetchone()[0]
+        try:
+            steps.start(conn, tid, "hint", NOW)
+        except RuntimeError:
+            pass
+        assert conn.execute("SELECT COUNT(*) FROM tutor_step").fetchone()[0] == n
+        conn.close()
+
+
+def test_a_fallback_to_the_second_channel_bumps_the_version(tmp_path):
+    from app.model.service import ModelService
+
+    c, _clock, _model = boot(tmp_path)
+    with c:
+        conn = db(tmp_path)
+        service = ModelService(conn, {}, lambda: NOW)
+        session = state.session_id_for(conn, NOW)
+        before = seq.current(conn)
+        service._fallback_event(session, "a", "b", "timeout")
+        assert seq.current(conn) > before
+        conn.close()
+
+
+def test_the_version_never_goes_backwards_when_a_task_is_deleted_and_its_id_reused(tmp_path):
+    c, _clock, _model = boot(tmp_path)
+    with c:
+        tid = seed(tmp_path, key="Б")
+        assert attempt(c, tid, "А").status_code == 200
+        before = ver(c, tid)
+        conn = db(tmp_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("DELETE FROM task_item WHERE id = ?", (tid,))
+        assert conn.execute("SELECT COUNT(*) FROM panel_seq").fetchone()[0] == 1  # один счётчик
+        conn.close()
+        again = seed(tmp_path, key="Б")  # id может совпасть со старым
+        assert ver(c, again) >= before
+
+
+def test_the_inflight_lock_bumps_the_version_after_it_changes(tmp_path):
+    from app.tutor.panel import Inflight
+
+    c, _clock, _model = boot(tmp_path)
+    with c:
+        conn = db(tmp_path)
+        lock = Inflight()
+        v0 = seq.current(conn)
+        assert lock.acquire(1, 0, 7, conn)
+        v1 = seq.current(conn)
+        assert v1 > v0
+        assert not lock.acquire(1, 0, 8, conn)  # отказ: замок не менялся
+        assert seq.current(conn) == v1
+        lock.release(1, 99, conn)  # чужой шаг: замок не менялся
+        assert seq.current(conn) == v1
+        lock.release(1, 7, conn)
+        assert seq.current(conn) > v1
+        conn.close()

@@ -95,7 +95,7 @@ class SessionService:
                     ),
                 )
                 event_id = cur.lastrowid
-                bump(self.conn, task_item_id)  # событие по заданию меняет его панель
+                bump(self.conn)  # событие по заданию меняет его панель
         if closed:
             raise SessionClosedError(session_id)
         return event_id

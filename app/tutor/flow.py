@@ -66,14 +66,16 @@ class Flow:
             return False
         last = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM event").fetchone()[0]
         step_id = steps.start(self.conn, task["id"], kind, self.now)
-        if not self.inflight.acquire(task["id"], last, step_id):  # замок и шаг - одной операцией
+        if not self.inflight.acquire(
+            task["id"], last, step_id, self.conn
+        ):  # замок и шаг - одной операцией
             steps.discard(self.conn, step_id)
             self.panel_state = "thinking"
             return False
         try:
             steps.activate(self.conn, step_id)
         except BaseException:
-            self.inflight.release(task["id"], step_id)
+            self.inflight.release(task["id"], step_id, self.conn)
             raise
         self.step_id = step_id
         return True
@@ -88,7 +90,7 @@ class Flow:
                     notice=None if error else self.notice, error=error,
                 )  # fmt: skip
         finally:
-            self.inflight.release(task["id"], self.step_id)
+            self.inflight.release(task["id"], self.step_id, self.conn)
 
     def _launch(self, task, name: str, *args) -> None:
         """Работа шага с моделью: в фоне, когда есть рабочий поток, иначе тут же. Замок после

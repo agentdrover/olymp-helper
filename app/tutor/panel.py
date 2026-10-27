@@ -7,6 +7,8 @@ T06 делает панель и состояния; T07 (чат, голос) и
 
 import threading
 
+from app.tutor.seq import bump_now
+
 LONG_WAIT_S = 60  # после этого срока вместо секунд - «Модель отвечает долго, жду…»
 
 TEXTS = {
@@ -43,21 +45,28 @@ class Inflight:
         self._lock = threading.Lock()
         self._items: dict = {}
 
-    def acquire(self, key, since_event: int, step_id: int) -> bool:
-        """Замок и номер шага берутся одной операцией: у замка нет момента без владельца."""
+    def acquire(self, key, since_event: int, step_id: int, conn=None) -> bool:
+        """Замок и номер шага берутся одной операцией: у замка нет момента без владельца.
+        С `conn` после взятия замка растёт версия панели (замок виден в «думаю»)."""
         with self._lock:
             if key in self._items:
                 return False
             self._items[key] = [since_event, step_id]
-            return True
+        if conn is not None:
+            bump_now(conn)
+        return True
 
-    def release(self, key, step_id: int) -> None:
+    def release(self, key, step_id: int, conn=None) -> None:
         """Снимает замок только если им владеет именно этот шаг: опоздавший поток не снимет
-        замок следующего шага. Снять замок без номера шага нельзя."""
+        замок следующего шага. Снять замок без номера шага нельзя. С `conn` после снятия растёт
+        версия панели."""
         with self._lock:
             item = self._items.get(key)
-            if item is not None and item[1] == step_id:
-                del self._items[key]
+            if item is None or item[1] != step_id:
+                return
+            del self._items[key]
+        if conn is not None:
+            bump_now(conn)
 
     def since(self, key) -> int | None:
         with self._lock:

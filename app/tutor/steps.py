@@ -14,7 +14,7 @@ import logging
 import threading
 from datetime import datetime
 
-from app.ingest.store import open_db
+from app.ingest.store import atomic, open_db
 from app.model.client import REQUEST_TIMEOUT_S
 from app.tutor.seq import bump
 
@@ -29,30 +29,30 @@ class StepExpired(Exception):
     """Шаг снят по сроку или потерял замок: его результат нельзя публиковать."""
 
 
-def _bump_of(conn, step_id: int) -> None:
-    """Статус шага изменился: версия панели его задания растёт."""
-    row = conn.execute("SELECT task_item_id FROM tutor_step WHERE id = ?", (step_id,)).fetchone()
-    if row is not None:
-        bump(conn, row[0])
-
-
 def start(conn, task_id: int, kind: str, now: datetime) -> int:
     """Строка шага в состоянии pending: идущим (running) он становится, когда взял замок."""
-    bump(conn, task_id)
-    return conn.execute(
-        "INSERT INTO tutor_step (task_item_id, kind, started_at) VALUES (?, ?, ?)",
-        (task_id, kind, now.isoformat()),
-    ).lastrowid
+    with atomic(conn):  # запись и версия панели - одна транзакция
+        step_id = conn.execute(
+            "INSERT INTO tutor_step (task_item_id, kind, started_at) VALUES (?, ?, ?)",
+            (task_id, kind, now.isoformat()),
+        ).lastrowid
+        bump(conn)
+        return step_id
 
 
 def activate(conn, step_id: int) -> None:
-    conn.execute("UPDATE tutor_step SET status = 'running' WHERE id = ?", (step_id,))
-    _bump_of(conn, step_id)
+    with atomic(conn):
+        conn.execute("UPDATE tutor_step SET status = 'running' WHERE id = ?", (step_id,))
+        bump(conn)
 
 
 def discard(conn, step_id: int) -> None:
-    _bump_of(conn, step_id)
-    conn.execute("DELETE FROM tutor_step WHERE id = ? AND status = 'pending'", (step_id,))
+    with atomic(conn):
+        gone = conn.execute(
+            "DELETE FROM tutor_step WHERE id = ? AND status = 'pending'", (step_id,)
+        )
+        if gone.rowcount:
+            bump(conn)
 
 
 def hold(conn, step_id: int | None) -> None:
@@ -74,12 +74,14 @@ def finish(
     conn, step_id: int, status: str, now: datetime, *, panel_state=None, notice=None, error=None
 ):
     """Итог пишет только шаг, который ещё идёт: просроченный шаг не перетирается позднее."""
-    conn.execute(
-        "UPDATE tutor_step SET status = ?, finished_at = ?, panel_state = ?, notice = ?, error = ? "
-        "WHERE id = ? AND status = 'running'",
-        (status, now.isoformat(), panel_state, notice, error, step_id),
-    )
-    _bump_of(conn, step_id)
+    with atomic(conn):
+        done = conn.execute(
+            "UPDATE tutor_step SET status = ?, finished_at = ?, panel_state = ?, notice = ?, "
+            "error = ? WHERE id = ? AND status = 'running'",
+            (status, now.isoformat(), panel_state, notice, error, step_id),
+        )
+        if done.rowcount:
+            bump(conn)
 
 
 def get(conn, step_id: int):
@@ -110,7 +112,7 @@ def expire(conn, inflight, task_id: int, now: datetime) -> None:
             continue
         reason = "timeout" if late else "interrupted"
         finish(conn, step["id"], "failed", now, error=reason)
-        inflight.release(task_id, step["id"])
+        inflight.release(task_id, step["id"], conn)
 
 
 class StepRunner:
@@ -141,7 +143,7 @@ class StepRunner:
             flow.execute(task_id, name, args, reraise=False)
         except BaseException:
             log.exception("шаг %s не стартовал", step_id)
-            st.inflight.release(task_id, step_id)
+            st.inflight.release(task_id, step_id, conn)
         finally:
             if conn is not None:
                 conn.close()
