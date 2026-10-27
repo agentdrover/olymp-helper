@@ -134,7 +134,7 @@ def test_a_reloaded_page_shows_the_running_step_with_elapsed_time(tmp_path):
         assert "Модель отвечает долго, жду…" in fragment(c, tid)
         js = STATIC.read_text(encoding="utf-8")
         assert "setTimeout(refresh" in js and "setInterval" not in js
-        assert "if (polling) return;" in js  # запросы опроса не накладываются
+        assert "if (polling || pending) return;" in js  # запросы опроса не накладываются
         assert "5–15" not in js and "5–15" not in page
         model.release.set()
         c.app.state.steps.join()
@@ -527,7 +527,9 @@ def test_the_client_discards_a_late_response_from_an_older_request():
     assert "var gen = 0;" in js and "mine !== gen" in js  # поколение запросов
     assert js.count("++gen") == 2  # send() и sendQuestion() начинают новое поколение
     assert "var mine = gen;" in js  # опрос запоминает поколение при старте
-    assert "if (stale(mine, html)) return schedule();" in js  # опрос: устаревший ответ не рисуется
+    assert (
+        "if (pending || stale(mine, html)) return schedule();" in js
+    )  # опрос: устаревший ответ не рисуется
     assert "if (!stale(mine, html)) swap(html);" in js  # send
     assert "if (stale(mine, html)) return;" in js  # sendQuestion
     assert "parseInt(m[1], 10) < now" in js  # шаг старее показанного отбрасывается
