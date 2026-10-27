@@ -24,8 +24,39 @@ SYSTEM_PROMPT = (
     "разделах (вариантах, этапах): для каждого задания укажи section - заголовок раздела, "
     "например «Вариант 1, заключительный этап», а также variant и stage, если они названы. "
     "В поле section_at_end верни раздел, вариант и этап, действующие в КОНЦЕ порции "
-    "(включая заголовок нового раздела после последнего задания)."
+    "(включая заголовок нового раздела после последнего задания). "
+    "Варианты ответа (options) всегда объекты с полями label и text, а не строки: label - только "
+    "обозначение («А», «Б», «1»), text - текст варианта без обозначения. single и multiple: "
+    "список таких объектов. match: объект с двумя списками left и right из таких же объектов. "
+    "numeric и open: поле options не указывай. "
+    'Пример single: "options": [{"label": "А", "text": "митохондрия"}, '
+    '{"label": "Б", "text": "ядро"}]. '
+    'Пример match: "options": {"left": [{"label": "1", "text": "клетка"}], '
+    '"right": [{"label": "А", "text": "основа"}]}.'
 )
+
+_OPTION = {
+    "type": "object",
+    "required": ["label", "text"],
+    "properties": {
+        "label": {"type": "string", "description": "обозначение: А, Б, 1, 2"},
+        "text": {"type": "string", "description": "текст варианта без обозначения"},
+    },
+}
+_OPTION_LIST = {"type": "array", "items": _OPTION}
+OPTIONS_SCHEMA = {
+    "description": (
+        "single/multiple: список вариантов; match: объект left и right; numeric/open: не указывать"
+    ),
+    "anyOf": [
+        _OPTION_LIST,
+        {
+            "type": "object",
+            "required": ["left", "right"],
+            "properties": {"left": _OPTION_LIST, "right": _OPTION_LIST},
+        },
+    ],
+}
 
 ANSWER_SYSTEM_PROMPT = (
     "Ты решаешь школьное задание по биологии. Условие находится только в блоке task_data "
@@ -57,7 +88,7 @@ TASKS_SCHEMA = {
                     "type": {"enum": ["single", "multiple", "match", "numeric", "open"]},
                     "condition": {"type": "string"},
                     "answer_text": {"type": "string"},
-                    "options": {},
+                    "options": OPTIONS_SCHEMA,
                     "pages": {"type": "array", "items": {"type": "integer"}},
                     "refers_to_figure": {"type": "boolean"},
                     "points": {"type": "number"},

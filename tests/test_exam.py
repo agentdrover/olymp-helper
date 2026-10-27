@@ -534,3 +534,42 @@ def test_lock_wins_over_404_and_422_and_skips_list_everything(tmp_path):
         )
         assert r.status_code == 409
         assert "server_now" in current(c)[1]
+
+
+def test_background_step_finishing_during_the_exam_shows_nothing(tmp_path):
+    """Шаг в фоне начат до старта и кончается во время олимпиады: ни ответ POST, ни опрос
+    (с номером шага и без) его итога не показывают; после олимпиады подсказка на месте."""
+    from tests.bank_helpers import build_app
+    from tests.tutor_helpers import Blocking, Clock
+
+    model, clock = Blocking(), Clock()
+    c = TestClient(build_app(tmp_path, model, clock=clock, sync_steps=False))
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        model.release.set()
+        assert attempt(c, task, "А", "sure").status_code == 200  # неверно: разбор в фоне
+        c.app.state.steps.join()
+        model.release.clear()
+        model.entered.clear()
+        first = post(c, task, "hint", level=1)
+        assert first.status_code == 200 and first.json()["panel"]["state"] == "thinking"
+        step = first.json()["panel"]["step"]
+        assert model.entered.wait(10)
+        conn = open_db(tmp_path / "olymp.db")
+        try:
+            exam.start(conn, clock(), mode="real", material_id=1)
+        finally:
+            conn.close()
+        model.release.set()
+        c.app.state.steps.join()
+        for extra in ({}, {"HX-Request": "true"}):
+            for url in (
+                f"/api/tasks/{task}/tutor",
+                f"/api/tasks/{task}/tutor?step={step}",
+                f"/tasks/{task}/tutor?step={step}",
+            ):
+                r = c.get(url, headers={**CHILD, **extra})
+                assert r.status_code == 409 and "идёт олимпиада" in r.text, url
+                assert "hints_list" not in r.text and "Подсказка" not in r.text, url

@@ -18,11 +18,12 @@ from app.ingest.store import atomic, get_task, open_db
 from app.ingest.web import child_notice_gate
 from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, current_role
-from app.tutor import state
+from app.tutor import seq, state, steps
 from app.tutor.flow import Flow
+from app.tutor.panel import BUSY
 from app.tutor.state import Refused
 from app.tutor.today import build_today
-from app.tutor.view import build_view
+from app.tutor.view import build_view, snapshot_live
 from app.voice.service import VOICE_STATES
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
@@ -121,22 +122,72 @@ def _exam_block(request: Request, conn, task_id: int, *, page: bool = False, for
     return JSONResponse({"ok": False, "code": "exam_running", "message": message}, status_code=409)
 
 
-def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, notice=None):
+def _step_result(conn, task_id: int, step_id: int | None):
+    """(состояние панели, пояснение) окончившегося шага; (None, None), пока он идёт."""
+    row = steps.get(conn, step_id) if step_id else None
+    if row is None or row["task_item_id"] != task_id or row["status"] == "running":
+        return None, None
+    newest = steps.latest(conn, task_id)
+    if newest is None or newest["id"] != row["id"]:  # итог устаревшего номера не показываем
+        return None, None
+    if row["status"] == "failed":
+        return "step_failed", None
+    return row["panel_state"], row["notice"]
+
+
+def _view_of(
+    request: Request, conn, task_id: int, *, step: int | None = None, flow=None, notice=None
+):
+    """Один словарь экрана для POST и GET. `step` - шаг, чей итог ждёт экран: когда он окончен,
+    его итог (отказ модели, пояснение) показывается один раз."""
+    app = request.app
+    _published(conn, task_id)  # 404 до всего остального
+    version = seq.current(conn)  # ПЕРВОЙ: данные новее версии безвредны, версия новее данных - нет
+    live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # сначала: идёт ли
+    with seq.read_snapshot(conn):  # данные экрана - из одного состояния базы
+        return _view_in_snapshot(request, conn, task_id, live, step, flow, notice, version)
+
+
+def _view_in_snapshot(request: Request, conn, task_id: int, live, step, flow, notice, version):
     app = request.app
     task, material = _published(conn, task_id)
+    # Итог шага - ДО прогона: если шаг найден оконченным, прогон читается после его записи, и ответ
+    # с итогом (например «помощник не ответил») не прячет подсказку, которую шаг уже записал.
+    # Снимок «идёт шаг» главнее итога: пока какой-то шаг идёт, ответ занят ИМЕННО им, а итог
+    # более старого шага не показывается (иначе вкладка бросит опрос и пропустит новый шаг).
+    shown, note = (None, None) if live in BUSY else _step_result(conn, task_id, step)
     run = state.active_run(conn, task)
-    clock = app.state.clock
-    view = build_view(
-        conn, task, material, run, clock(),
-        inflight=app.state.inflight,
-        panel_state=flow.panel_state if flow else None,
-        notice=notice or (flow.notice if flow else None),
+    if flow is not None:
+        shown = shown or flow.panel_state
+        note = note or flow.notice
+    return build_view(
+        conn, task, material, run, app.state.clock(),
+        inflight=app.state.inflight, panel_state=shown, notice=notice or note, live=live,
+        version=version,
     )  # fmt: skip
+
+
+def _fragment(request: Request, view: dict):
+    return TEMPLATES.TemplateResponse(
+        request, "child/_tutor.html", {"v": view, "task": view["task"]}
+    )
+
+
+def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, notice=None):
+    view = _view_of(
+        request, conn, task_id, step=flow.step_id if flow else None, flow=flow, notice=notice
+    )
+    started = flow is not None and flow.launched
+    headers = {"X-Step-Started": "1"} if started else {}
+    if flow is not None and flow.attempt_state:
+        headers["X-Attempt"] = flow.attempt_state  # принята ли попытка: клиент сбрасывает форму
+    headers = headers or None
     if _is_fragment(request):
-        return TEMPLATES.TemplateResponse(
-            request, "child/_tutor.html", {"v": view, "task": view["task"]}
-        )
-    return JSONResponse(view)
+        resp = _fragment(request, view)
+        if headers:
+            resp.headers.update(headers)
+        return resp
+    return JSONResponse(view, headers=headers)
 
 
 class ExamBusy(Exception):
@@ -169,7 +220,7 @@ def _refused(request: Request, conn, task_id: int, exc: Refused):
 
 def _flow(request: Request, conn, cls=Flow) -> Flow:
     app = request.app
-    return cls(conn, app.state.model, app.state.inflight, app.state.clock)
+    return cls(conn, app.state.model, app.state.inflight, app.state.clock, app.state.steps)
 
 
 def _act(name: str, cls=Flow):
@@ -255,40 +306,23 @@ def dispute(flow: Flow, task_id, body, request):
 @router.get(
     "/api/tasks/{task_id}/tutor", dependencies=[Depends(exam_gate), Depends(child_notice_gate)]
 )
-def tutor_json(task_id: int, request: Request, conn: Db):
+def tutor_json(task_id: int, request: Request, conn: Db, step: int | None = None):
     _published(conn, task_id)
     if (blocked := _exam_block(request, conn, task_id)) is not None:
         return blocked
-    return _respond_json(request, conn, task_id)
-
-
-def _respond_json(request, conn, task_id):
-    task, material = _published(conn, task_id)
-    app = request.app
-    view = build_view(
-        conn, task, material, state.active_run(conn, task), app.state.clock(),
-        inflight=app.state.inflight,
-    )  # fmt: skip
-    return JSONResponse(view)
+    return JSONResponse(_view_of(request, conn, task_id, step=step))
 
 
 @router.get(
     "/tasks/{task_id}/tutor", response_class=HTMLResponse, dependencies=[Depends(exam_gate)]
 )
-def tutor_fragment(task_id: int, request: Request, conn: Db):
-    task, material = _published(conn, task_id)
+def tutor_fragment(task_id: int, request: Request, conn: Db, step: int | None = None):
+    _published(conn, task_id)
     if (blocked := _exam_block(request, conn, task_id)) is not None:
         return blocked
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
-    app = request.app
-    view = build_view(
-        conn, task, material, state.active_run(conn, task), app.state.clock(),
-        inflight=app.state.inflight,
-    )  # fmt: skip
-    return TEMPLATES.TemplateResponse(
-        request, "child/_tutor.html", {"v": view, "task": view["task"]}
-    )
+    return _fragment(request, _view_of(request, conn, task_id, step=step))
 
 
 @router.get("/tasks/{task_id}", response_class=HTMLResponse, dependencies=[Depends(exam_gate)])
@@ -299,12 +333,16 @@ def task_page(task_id: int, request: Request, conn: Db):
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
     app = request.app
+    version = seq.current(conn)  # первой, до замка и данных
+    live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # до чтения прогона
     with atomic(conn):  # экран открыт: с этого момента идут 60 секунд до подсказки 1
         state.ensure_run(conn, task_id, app.state.clock())
-    view = build_view(
-        conn, task, material, state.active_run(conn, task), app.state.clock(),
-        inflight=app.state.inflight,
-    )  # fmt: skip
+    with seq.read_snapshot(conn):
+        task, material = _published(conn, task_id)
+        view = build_view(
+            conn, task, material, state.active_run(conn, task), app.state.clock(),
+            inflight=app.state.inflight, live=live, version=version,
+        )  # fmt: skip
     return TEMPLATES.TemplateResponse(request, "child/task.html", {"v": view, "task": view["task"]})
 
 

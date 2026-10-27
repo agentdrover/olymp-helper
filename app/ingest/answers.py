@@ -13,6 +13,12 @@ def _label(raw: str) -> str:
     return raw.upper().translate(_LATIN)
 
 
+def label_key(raw) -> str:
+    """Обозначение варианта в виде, в котором его сравнивает проверка ответа: регистр и
+    латинские двойники кириллицы не важны. Единственное место, где это решается."""
+    return normalize_answer(raw, "single") or _label(str(raw).strip())
+
+
 def normalize_answer(raw, task_type: str):
     """single -> 'Б'; multiple -> ['А', 'В']; match -> {'1': 'А'}; непонятное -> None."""
     if raw is None:
