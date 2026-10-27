@@ -129,6 +129,8 @@ def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, not
 
 
 def _refused(request: Request, conn, task_id: int, exc: Refused):
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked  # олимпиада началась, пока шёл запрос: ни отказа, ни вида задания
     if exc.code == "exam_running":  # в том числе отложенный отказ: полного вида с результатом нет
         return _exam_block(request, conn, task_id, force=True)
     if _is_fragment(request):

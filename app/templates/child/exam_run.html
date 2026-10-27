@@ -11,7 +11,9 @@
 <p><button class="btn" id="exam-mark" type="button">Вернусь</button>
    <button class="btn primary" id="exam-submit" type="button">Сдать вариант</button></p>
 <script>
-let exam = null, pos = 1;
+let exam = null, pos = 1, shown = 0;
+const LAT = {A: "А", B: "В", C: "С", E: "Е", H: "Н", K: "К", M: "М", O: "О", P: "Р", T: "Т", X: "Х"};
+const norm = l => String(l).toUpperCase().split("").map(ch => LAT[ch] || ch).join("");
 const $ = id => document.getElementById(id);
 async function call(path, body) {
   const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
@@ -33,6 +35,7 @@ function answerOf(it) {
 }
 function render() {
   const it = exam.items[pos - 1];
+  shown = pos;
   $("exam-title").textContent = exam.title + " · " + exam.stage + " этап";
   $("exam-nav").innerHTML = exam.items.map(x => `<button type="button" data-p="${x.position}"${x.position === pos ? ' aria-current="true"' : ""}>${x.position}${x.answer != null && x.answer !== "" ? " ✓" : ""}${x.marked ? " ⚑" : ""}</button>`).join(" ");
   const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
@@ -41,9 +44,9 @@ function render() {
   const cur = it.answer;
   if (it.type === "single" || it.type === "multiple") {
     const kind = it.type === "single" ? "radio" : "checkbox";
-    body += it.options.map(o => `<label><input type="${kind}" name="a" value="${esc(o.label)}"${[].concat(cur || []).includes(o.label) ? " checked" : ""}> ${esc(o.label)}) ${esc(o.text)}</label><br>`).join("");
+    body += it.options.map(o => `<label><input type="${kind}" name="a" value="${esc(o.label)}"${[].concat(cur || []).includes(norm(o.label)) ? " checked" : ""}> ${esc(o.label)}) ${esc(o.text)}</label><br>`).join("");
   } else if (it.type === "match") {
-    body += it.options.left.map(l => `<p>${esc(l.label)}) ${esc(l.text)} → <select data-l="${esc(l.label)}"><option value="">—</option>${it.options.right.map(r => `<option value="${esc(r.label)}"${cur && cur[l.label] === r.label ? " selected" : ""}>${esc(r.label)}) ${esc(r.text)}</option>`).join("")}</select></p>`).join("");
+    body += it.options.left.map(l => `<p>${esc(l.label)}) ${esc(l.text)} → <select data-l="${esc(l.label)}"><option value="">—</option>${it.options.right.map(r => `<option value="${esc(r.label)}"${cur && cur[norm(l.label)] === norm(r.label) ? " selected" : ""}>${esc(r.label)}) ${esc(r.text)}</option>`).join("")}</select></p>`).join("");
   } else {
     body += `<label>Число <input name="n" inputmode="decimal" value="${cur == null ? "" : esc(cur)}"></label>`;
   }
@@ -51,12 +54,15 @@ function render() {
   $("exam-mark").textContent = it.marked ? "Снять «вернусь»" : "Вернусь";
 }
 async function refresh(j) { if (j && j.exam) { exam = j.exam; render(); } }
-async function open(p) { pos = p; await refresh(await call("/exam/open", {attempt_id: exam.id, position: p})); }
+async function open(p) {
+  const j = await call("/exam/open", {attempt_id: exam.id, position: p});
+  if (j) { pos = p; await refresh(j); }
+}
 document.addEventListener("click", async e => {
   const t = e.target;
   if (t.dataset && t.dataset.p) open(+t.dataset.p);
-  if (t.id === "exam-save") refresh(await call("/exam/answer", {attempt_id: exam.id, position: pos, answer: answerOf(exam.items[pos - 1])}));
-  if (t.id === "exam-mark") refresh(await call("/exam/mark", {attempt_id: exam.id, position: pos, marked: !exam.items[pos - 1].marked}));
+  if (t.id === "exam-save") refresh(await call("/exam/answer", {attempt_id: exam.id, position: shown, answer: answerOf(exam.items[shown - 1])}));
+  if (t.id === "exam-mark") refresh(await call("/exam/mark", {attempt_id: exam.id, position: shown, marked: !exam.items[shown - 1].marked}));
   if (t.id === "exam-submit" && confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) {
     const j = await call("/exam/submit", {attempt_id: exam.id, confirm: true});
     if (j) location.href = j.url;

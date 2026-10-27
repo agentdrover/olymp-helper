@@ -488,3 +488,24 @@ def test_figure_comes_from_snapshot(tmp_path):
         )
         assert c.get("/exam/figure/1.png", headers=CHILD).content == first.content
         assert "/exam/figure/1.png" in json.dumps(current(c)[1])
+
+
+def test_empty_collection_clears_answer(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        a = start_real(c).json()["attempt_id"]
+
+        def save(pos, answer):
+            body = {"attempt_id": a, "position": pos, "answer": answer}
+            r = c.post("/exam/answer", json=body, headers=CHILD)
+            assert r.status_code == 200, r.text
+
+        save(2, ["А"])
+        assert current(c)[1]["items"][1]["answer"] == ["А"]
+        save(2, [])
+        save(3, {"1": "А"})
+        save(3, {})
+        items = current(c)[1]["items"]
+        assert items[1]["answer"] is None and items[2]["answer"] is None

@@ -457,7 +457,7 @@ def save_answer(conn, now, attempt_id: int, position: int, raw) -> None:
     def work(attempt, t):
         item = _item(conn, attempt["id"], position)
         snap = json.loads(item["snapshot"])
-        if raw is None or (isinstance(raw, str) and not raw.strip()):
+        if raw is None or raw == [] or raw == {} or (isinstance(raw, str) and not raw.strip()):
             value = None
         else:
             try:
