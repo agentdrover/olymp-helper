@@ -264,7 +264,7 @@ def test_retention_cleanup_keeps_session_summaries(tmp_path):
     edge = (now - timedelta(days=RETENTION_DAYS - 1)).isoformat()
     sid = conn.execute(
         "INSERT INTO study_session (started_at, last_activity_at, ended_at, end_reason, summary) "
-        "VALUES (?, ?, ?, 'explicit', '{\"solved\": 4}')",
+        "VALUES (?, ?, ?, 'explicit', '{\"v\": 2, \"solved\": 4}')",
         (old, old, old),
     ).lastrowid
     for type_, at in [
@@ -285,7 +285,7 @@ def test_retention_cleanup_keeps_session_summaries(tmp_path):
     kinds = sorted(r[0] for r in conn.execute("SELECT type FROM event"))
     assert kinds == sorted(["chat", "attempt", "hint", "shown_to_parent", "parent_opened_chat"])
     summary = conn.execute("SELECT summary FROM study_session WHERE id = ?", (sid,)).fetchone()[0]
-    assert summary == '{"solved": 4}'
+    assert summary == '{"v": 2, "solved": 4}'
     assert cleanup_retention(conn, now) == 0
     conn.close()
 

@@ -20,6 +20,7 @@ from app.tutor.guard import render_markdown
 from app.tutor.outcomes import outcome_label
 from app.tutor.state import TERMINAL, UNVERIFIED, iso
 
+FORMAT = 2  # версия хранимого итога: старый формат перестраивается из событий
 JOURNAL_TYPES = ("parent_opened_chat", "shown_to_parent")
 MESSAGE_TYPES = ("chat", "voice")
 NOT_ANALYZED = ", не разобрано"
@@ -225,6 +226,7 @@ def build_summary(conn: sqlite3.Connection, session_id: int) -> dict:
         for t in tasks if t["answer_shown"]
     ]  # fmt: skip
     return {
+        "v": FORMAT,
         "session_id": session_id,
         "started_at": session["started_at"],
         "ended_at": session["ended_at"],
@@ -255,6 +257,8 @@ def _store(conn: sqlite3.Connection, session_id: int) -> dict:
     prior = json.loads(row[0]) if row and row[0] else {}
     if prior.get("partial"):  # сообщения, удалённые до закрытия занятия
         summary["messages"] += prior.get("messages", 0)
+    elif prior:  # старый формат: удалённых сообщений в событиях уже нет, число берём из итога
+        summary["messages"] = max(summary["messages"], prior.get("messages", 0))
     conn.execute(
         "UPDATE study_session SET summary = ? WHERE id = ?",
         (json.dumps(summary, ensure_ascii=False), session_id),
@@ -274,7 +278,9 @@ def ensure(conn: sqlite3.Connection, now: datetime) -> None:
             (iso(now - IDLE_TIMEOUT),),
         )
         for (sid,) in conn.execute(
-            "SELECT id FROM study_session WHERE ended_at IS NOT NULL AND summary IS NULL"
+            "SELECT id FROM study_session WHERE ended_at IS NOT NULL AND (summary IS NULL "
+            "OR json_extract(summary, '$.partial') = 1 OR json_extract(summary, '$.v') IS NOT ?)",
+            (FORMAT,),
         ).fetchall():
             _store(conn, sid)
 
@@ -465,12 +471,19 @@ def preserve_message_counts(
 
 
 def _current_terminal(conn: sqlite3.Connection, task_id: int | None) -> bool:
+    """Закрыт ли ТЕКУЩИЙ прогон: тот же счёт, что в state.active_run - прогон считается, только
+    если он по текущим ревизии и версии ключа задания."""
     if task_id is None:
         return True
     row = conn.execute(
-        "SELECT state FROM tutor_run WHERE task_item_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
+        "SELECT r.state, r.revision, r.key_version, t.revision, t.key_version FROM task_item t "
+        "LEFT JOIN tutor_run r ON r.id = (SELECT MAX(id) FROM tutor_run WHERE task_item_id = t.id) "
+        "WHERE t.id = ?",
+        (task_id,),
     ).fetchone()
-    return row is not None and row[0] in TERMINAL
+    if row is None:
+        return True
+    return row[0] in TERMINAL and (row[1], row[2]) == (row[3], row[4])
 
 
 def present(conn: sqlite3.Connection, found: dict, *, child: bool) -> dict:
@@ -492,9 +505,11 @@ def present(conn: sqlite3.Connection, found: dict, *, child: bool) -> dict:
         ):
             task["key_note"] = KEY_CORRECTED_NOTE
         if child and not _current_terminal(conn, task["task_id"]):
+            # Хранимому полю не верим: выбранный ответ скрыт у каждой попытки.
             for a in task["attempts"]:
-                if a["correctness"] == "correct" or a.get("matched"):
-                    a["answer"], a["result"] = None, SOLVED_BEFORE
+                a["answer"] = None
+                if a["correctness"] == "correct" or str(a.get("result", "")).startswith("совпало"):
+                    a["result"] = SOLVED_BEFORE
             if task["outcome"].startswith(("верно", "совпало")):
                 task["outcome"] = SOLVED_BEFORE
     return out
