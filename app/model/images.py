@@ -47,13 +47,29 @@ def png_size(data: bytes) -> tuple[int, int]:
         or data[12:16] != b"IHDR"
     ):
         raise ChannelError("bad_image")
-    kinds = [kind for kind, _ in _chunks(bytes(data))]
-    if kinds[0] != b"IHDR" or b"IDAT" not in kinds or kinds[-1] != b"IEND":
+    chunks = list(_chunks(bytes(data)))
+    kinds = [kind for kind, _ in chunks]
+    if kinds[0] != b"IHDR" or len(chunks[0][1]) != 13 or b"IDAT" not in kinds:
+        raise ChannelError("bad_image")
+    if kinds[-1] != b"IEND" or len(chunks[-1][1]) != 0:
         raise ChannelError("bad_image")
     width, height = struct.unpack(">II", data[16:24])
     if width <= 0 or height <= 0:
         raise ChannelError("bad_image")
     return width, height
+
+
+def _check_pixels(data: bytes, width: int, height: int) -> None:
+    """IDAT - целый zlib-поток; распаковка ограничена размером строк (до 8 байт на пиксель)."""
+    idat = b"".join(body for kind, body in _chunks(data) if kind == b"IDAT")
+    cap = height * (width * 8 + 1)
+    unpacker = zlib.decompressobj()
+    try:
+        out = unpacker.decompress(idat, cap + 1)
+    except zlib.error:
+        raise ChannelError("bad_image") from None
+    if len(out) > cap or not unpacker.eof or unpacker.unused_data or not out:
+        raise ChannelError("bad_image")
 
 
 def check_images(images: list[bytes]) -> list[bytes]:
@@ -68,6 +84,7 @@ def check_images(images: list[bytes]) -> list[bytes]:
             raise ChannelError("image_too_large")
         if width > MAX_IMAGE_SIDE or height > MAX_IMAGE_SIDE or width * height > MAX_IMAGE_PIXELS:
             raise ChannelError("image_too_many_pixels")
+        _check_pixels(data, width, height)
     return images
 
 

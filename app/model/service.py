@@ -7,9 +7,10 @@ import sqlite3
 from datetime import UTC, datetime
 
 from app.ingest.store import atomic
+from app.model.client import MAX_IMAGE_REQUEST_BYTES, request_size
 from app.model.ledger import Ledger
 from app.model.redaction import redact
-from app.model.types import CHANNELS, LIMIT_MESSAGE, ModelChannel, ModelResult
+from app.model.types import CHANNELS, LIMIT_MESSAGE, ChannelError, ModelChannel, ModelResult
 from app.tutor.seq import bump
 
 __all__ = ["DEFAULT_MODELS", "LIMIT_MESSAGE", "ModelService", "model_family"]
@@ -99,6 +100,13 @@ class ModelService:
         }
 
     def _attempt(self, name, model, system, messages, schema, fallback, images=None) -> ModelResult:
+        if images:
+            # Локально отклонённое вложение не расходует дневной лимит запусков.
+            try:
+                if request_size(system, messages, schema, images) > MAX_IMAGE_REQUEST_BYTES:
+                    raise ChannelError("request_too_large")
+            except ChannelError as exc:
+                return ModelResult.failure(name, model, exc.kind)
         run_id = self.ledger.reserve(name, model, fallback)
         if run_id is None:
             return ModelResult.failure(name, model, "limit", message=LIMIT_MESSAGE)

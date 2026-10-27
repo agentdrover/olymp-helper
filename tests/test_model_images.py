@@ -189,3 +189,37 @@ def test_stream_output_truncated_png_oversize_text_and_facade(tmp_path):
     assert model.family("claude") == "anthropic"
     res = model.complete_on("claude", "s", MSG, None, None, [png, png, png, png, png])
     assert res.error_kind == "too_many_images"
+
+
+def test_corrupt_png_data_and_rejected_images_do_not_spend_the_limit(tmp_path):
+    png = make_png()
+
+    def rechunk(kind, body):
+        def chunk(k, b):
+            return struct.pack(">I", len(b)) + k + b + struct.pack(">I", zlib.crc32(k + b))
+
+        return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0)) \
+            + chunk(kind, body) + chunk(b"IEND", b"")  # fmt: skip
+
+    short_ihdr = png[:8] + struct.pack(">I", 8) + b"IHDR" + b"\0" * 8
+    short_ihdr += struct.pack(">I", zlib.crc32(b"IHDR" + b"\0" * 8)) + png[33:]
+    bad = [rechunk(b"IDAT", b"not zlib data"), rechunk(b"IDAT", zlib.compress(b"x" * 99)[:-4]),
+           short_ihdr, rechunk(b"IDAT", zlib.compress(b"\0" * 50_000))]  # fmt: skip
+    for item in bad:
+        seen = []
+        assert run("claude", [item], seen)["error_kind"] == "bad_image" and not seen
+
+    conn = connect(tmp_path / "o.db")
+    migrate(conn)
+    conn.execute("UPDATE settings SET daily_run_limit=1")
+    chan = Down("claude")
+    svc = ModelService(
+        conn,
+        {
+            "claude": ExecutorChannel("claude", "http://x", key="k", post=make_post([])),
+            "cursor": chan,
+        },
+    )
+    assert svc.complete_on("claude", "s", MSG, images=[png] * 5).error_kind == "too_many_images"
+    assert svc.complete_on("claude", "s", MSG, images=[b"junk"]).error_kind == "bad_image"
+    assert svc.complete_on("claude", "s", MSG, images=[png]).error_kind != "limit"
