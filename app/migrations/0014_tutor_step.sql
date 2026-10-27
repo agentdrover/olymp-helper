@@ -13,3 +13,12 @@ CREATE TABLE tutor_step (
     error TEXT
 );
 CREATE INDEX idx_tutor_step_task ON tutor_step (task_item_id, id);
+
+-- Версия панели задания: монотонный счётчик, растёт при любой записи, меняющей то, что видит ребёнок
+-- (попытка, подсказка, объяснение, чат, прогон, шаг, правка родителя, удаление сообщений). Клиент
+-- применяет ответ, только если версия не меньше уже применённой. Приложение одно, профиля нет:
+-- ключ - задание. Строка живёт, пока есть задание.
+CREATE TABLE panel_seq (
+    task_id INTEGER PRIMARY KEY REFERENCES task_item (id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL
+);

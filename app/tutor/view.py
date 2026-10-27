@@ -8,7 +8,7 @@ from datetime import datetime
 
 from app.chat import store as chat_store
 from app.ingest.publish import assist_mode, child_view, has_key
-from app.tutor import state, steps
+from app.tutor import seq, state, steps
 from app.tutor.panel import BUSY, Inflight, live_state, panel
 
 
@@ -119,7 +119,7 @@ def build_view(
             "needs_confirm": nxt == 3,
         },
         "can_show_answer": assist == "key_only" and not terminal and attempts >= state.BASE_CHECKS,
-        "panel": {**panel(shown, **extra), "version": steps.version(conn, task["id"])},
+        "panel": {**panel(shown, **extra), "version": seq.current(conn, task["id"])},
         "notice": notice,
         "task": child_view(task, material),
     }

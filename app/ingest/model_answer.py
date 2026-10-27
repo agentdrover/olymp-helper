@@ -6,6 +6,7 @@ from app.ingest.answers import display, normalize_answer
 from app.ingest.keys import candidate
 from app.ingest.prompt import ANSWER_SCHEMA, build_task_request
 from app.ingest.store import figure_of, get_task, save_snapshot
+from app.tutor.seq import bump
 
 
 def compute_model_answer(ctx, conn, task_id: int) -> bool:
@@ -47,6 +48,7 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
         )
         if cur.rowcount == 1:
             save_snapshot(conn, task_id)
+            bump(conn, task_id)
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:

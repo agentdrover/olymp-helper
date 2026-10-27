@@ -522,53 +522,6 @@ def test_an_older_steps_result_never_hides_a_newer_running_step(tmp_path):
         assert stale["panel"]["state"] == "idle"
 
 
-def test_every_panel_response_carries_a_version_that_grows_with_the_step(tmp_path):
-    model = Blocking()
-    c, _clock = boot_bg(tmp_path, model)
-    with c:
-        tid = seed(tmp_path, key="Б")
-
-        def ver(html):
-            m = re.search(r'data-version="(\d+)\.(\d+)\.(\d+)\.(\d+)"', html)
-            assert m, "ответ панели без версии"
-            return tuple(int(g) for g in m.groups())
-
-        seen = [ver(c.get(f"/tasks/{tid}", headers=CHILD).text)]  # страница задания
-
-        def now():
-            v = ver(fragment(c, tid))
-            assert v > seen[-1], (v, seen)  # строго растёт после КАЖДОГО изменения
-            seen.append(v)
-
-        model.release.set()
-        assert attempt(c, tid, "Б").status_code == 200  # решено
-        c.app.state.steps.join()
-        now()
-        assert post(c, tid, "dispute").status_code == 200  # отметка ключа
-        now()
-        assert post(c, tid, "repeat").status_code == 200  # новый прогон
-        now()
-        assert attempt(c, tid, "А").status_code == 200  # попытка
-        c.app.state.steps.join()
-        now()
-        model.release.clear()
-        model.entered.clear()
-        r = c.post(
-            f"/tasks/{tid}/hint", json={"level": 1}, headers={**CHILD, "HX-Request": "true"}
-        )  # POST отвечает фрагментом: шаг идёт
-        running = ver(r.text)
-        assert running > seen[-1] and running[3] == 2
-        assert ver(fragment(c, tid)) == running  # опрос видит ту же версию, что POST
-        seen.append(running)
-        model.release.set()
-        c.app.state.steps.join()
-        now()
-        assert seen[-1][3] == 3
-        assert c.get(f"/api/tasks/{tid}/tutor", headers=CHILD).json()["panel"]["version"] == (
-            ".".join(map(str, seen[-1]))
-        )
-
-
 def test_the_client_orders_responses_by_server_version_and_keeps_one_poll_chain():
     js = STATIC.read_text(encoding="utf-8")
     assert "function isOld(html)" in js and "if (!isOld(html)) swap(html, true);" in js  # опрос

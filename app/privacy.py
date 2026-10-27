@@ -11,6 +11,9 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from app.ingest.store import atomic
+from app.tutor.seq import bump
+
 RETENTION_DAYS = 180
 MESSAGE_TYPES = ("chat", "voice")
 _IN = ",".join("?" for _ in MESSAGE_TYPES)
@@ -50,21 +53,34 @@ def session_exists(conn: sqlite3.Connection, session_id: int) -> bool:
     )
 
 
+def _bump_tasks_of(conn: sqlite3.Connection, where: str, args: list) -> None:
+    """Версия панели каждого задания, чьи события сейчас удалятся, растёт (транзакция вызывающего)."""
+    for (task_id,) in conn.execute(
+        f"SELECT DISTINCT task_item_id FROM event WHERE task_item_id IS NOT NULL AND {where}", args
+    ).fetchall():
+        bump(conn, task_id)
+
+
 def delete_messages(conn: sqlite3.Connection, session_id: int | None = None) -> int:
-    sql = f"DELETE FROM event WHERE type IN ({_IN})"
+    where = f"type IN ({_IN})"
     args: list = list(MESSAGE_TYPES)
     if session_id is not None:
-        sql += " AND session_id = ?"
+        where += " AND session_id = ?"
         args.append(session_id)
-    return conn.execute(sql, args).rowcount
+    with atomic(conn):  # версия и удаление - одна транзакция
+        _bump_tasks_of(conn, where, args)  # сообщения исчезают с экрана задания: версия растёт
+        return conn.execute(f"DELETE FROM event WHERE {where}", args).rowcount
 
 
 def cleanup_retention(conn: sqlite3.Connection, now: datetime) -> int:
     """Сообщения старше 180 дней удаляются; занятия, итоги и прочие события остаются."""
     cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
-    return conn.execute(
-        f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?", (*MESSAGE_TYPES, cutoff)
-    ).rowcount
+    with atomic(conn):
+        _bump_tasks_of(conn, f"type IN ({_IN}) AND created_at < ?", [*MESSAGE_TYPES, cutoff])
+        return conn.execute(
+            f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?",
+            (*MESSAGE_TYPES, cutoff),
+        ).rowcount
 
 
 # -------------------------------------------------------------------------- материалы

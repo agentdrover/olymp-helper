@@ -16,6 +16,7 @@ from datetime import datetime
 
 from app.ingest.store import open_db
 from app.model.client import REQUEST_TIMEOUT_S
+from app.tutor.seq import bump
 
 log = logging.getLogger(__name__)
 
@@ -28,8 +29,16 @@ class StepExpired(Exception):
     """Шаг снят по сроку или потерял замок: его результат нельзя публиковать."""
 
 
+def _bump_of(conn, step_id: int) -> None:
+    """Статус шага изменился: версия панели его задания растёт."""
+    row = conn.execute("SELECT task_item_id FROM tutor_step WHERE id = ?", (step_id,)).fetchone()
+    if row is not None:
+        bump(conn, row[0])
+
+
 def start(conn, task_id: int, kind: str, now: datetime) -> int:
     """Строка шага в состоянии pending: идущим (running) он становится, когда взял замок."""
+    bump(conn, task_id)
     return conn.execute(
         "INSERT INTO tutor_step (task_item_id, kind, started_at) VALUES (?, ?, ?)",
         (task_id, kind, now.isoformat()),
@@ -38,9 +47,11 @@ def start(conn, task_id: int, kind: str, now: datetime) -> int:
 
 def activate(conn, step_id: int) -> None:
     conn.execute("UPDATE tutor_step SET status = 'running' WHERE id = ?", (step_id,))
+    _bump_of(conn, step_id)
 
 
 def discard(conn, step_id: int) -> None:
+    _bump_of(conn, step_id)
     conn.execute("DELETE FROM tutor_step WHERE id = ? AND status = 'pending'", (step_id,))
 
 
@@ -68,6 +79,7 @@ def finish(
         "WHERE id = ? AND status = 'running'",
         (status, now.isoformat(), panel_state, notice, error, step_id),
     )
+    _bump_of(conn, step_id)
 
 
 def get(conn, step_id: int):
@@ -78,32 +90,6 @@ def latest(conn, task_id: int):
     return conn.execute(
         "SELECT * FROM tutor_step WHERE task_item_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
     ).fetchone()
-
-
-RANK = {"pending": 1, "running": 2, "done": 3, "failed": 3}
-
-
-def version(conn, task_id: int) -> str:
-    """Версия экрана «<прогон>.<событие>.<шаг>.<ранг>», сравнивается по частям слева направо и растёт
-    монотонно при ЛЮБОМ изменении состояния панели: новый прогон (повтор), попытка, подсказка,
-    отметка ключа, объяснение (последний id события задания), новый шаг, переход шага
-    (идёт < окончен). Экран без прогонов, событий и шагов - «0.0.0.0». Клиент применяет ответ,
-    только если версия не меньше уже применённой, поэтому опоздавший ответ (POST или опрос) не
-    откатывает экран. Строка «pending» живёт внутри одного запроса и может исчезнуть (discard),
-    поэтому в версию не входит."""
-    run = conn.execute(
-        "SELECT COALESCE(MAX(id), 0) FROM tutor_run WHERE task_item_id = ?", (task_id,)
-    ).fetchone()[0]
-    seq = conn.execute(
-        "SELECT COALESCE(MAX(id), 0) FROM event WHERE task_item_id = ?", (task_id,)
-    ).fetchone()[0]
-    row = conn.execute(
-        "SELECT id, status FROM tutor_step WHERE task_item_id = ? AND status != 'pending' "
-        "ORDER BY id DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
-    step, rank = (0, 0) if row is None else (row["id"], RANK.get(row["status"], 3))
-    return f"{run}.{seq}.{step}.{rank}"
 
 
 def elapsed(row, now: datetime) -> int:

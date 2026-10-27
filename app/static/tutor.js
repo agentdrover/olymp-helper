@@ -32,28 +32,23 @@
   var pollUntil = 0;      // до этого момента опрос идёт, даже если панель в покое (сервер мог начать шаг)
   var appliedBusy = false;    // последнее применённое состояние: шаг идёт
   var appliedPanel = "idle";
-  var lastVer = null;     // версия последнего применённого ответа: числа по частям
+  var lastVer = null;     // версия последнего применённого ответа
   var tickTimer = null;
   var tickBase = null;
 
   function busyNode() { return root.querySelector(BUSY_SEL); }
 
-  // Версию отдаёт сервер в каждом ответе панели (POST и опрос): «<прогон>.<событие>.<шаг>.<ранг>»,
-  // растёт при любом изменении состояния. Части сравниваются слева направо; ответ с меньшей версией,
-  // чем уже применённая, опоздал - отбрасывается, откуда бы он ни пришёл. Равная версия применяется.
+  // Версию отдаёт сервер в каждом ответе панели (POST и опрос): хранимый монотонный счётчик задания,
+  // он растёт при любой записи, меняющей экран. Ответ с меньшей версией, чем уже применённая,
+  // опоздал - отбрасывается, откуда бы он ни пришёл. Равная версия - то же состояние, применяется.
   function versionOf(html) {
-    var m = /data-version="(\d+(?:\.\d+)*)"/.exec(html);
-    return m ? m[1].split(".").map(function (n) { return parseInt(n, 10); }) : null;
+    var m = /data-version="(\d+)"/.exec(html);
+    return m ? parseInt(m[1], 10) : null;
   }
 
   function isOld(html) {
     var v = versionOf(html);
-    if (!v || !lastVer) return false;
-    for (var i = 0; i < Math.max(v.length, lastVer.length); i++) {
-      var a = v[i] || 0, b = lastVer[i] || 0;
-      if (a !== b) return a < b;
-    }
-    return false;
+    return v !== null && lastVer !== null && v < lastVer;
   }
 
   function nextDelay() {
@@ -356,7 +351,7 @@
   (function init() {
     var s = root.querySelector(".helper-status");
     var v = s ? s.getAttribute("data-version") : null;
-    lastVer = v ? versionOf('data-version="' + v + '"') : null;
+    lastVer = v ? parseInt(v, 10) : null;
     appliedPanel = s ? s.getAttribute("data-panel") : "idle";
     appliedBusy = !!busyNode();
     plan();

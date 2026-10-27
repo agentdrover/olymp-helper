@@ -169,15 +169,15 @@ const scenarios = {
   },
   // Версия сервера - единственное правило устаревания: опоздавший ответ (опрос) старее применённого не рисуется.
   async stale_poll_does_not_overwrite_newer_step() {
-    boot(screen("thinking", ' data-step="3" data-version="3.2"'));
+    boot(screen("thinking", ' data-step="3" data-version="3"'));
     const slow = deferred();
     page.fetches.push(() => slow.p);
     await advance(2600);  // опрос ушёл и висит
-    page.fetches.push(ok(screen("thinking", ' data-step="5" data-version="5.2"')));
+    page.fetches.push(ok(screen("thinking", ' data-step="5" data-version="5"')));
     page.handlers.click[0]({ target: { closest: () => get("button") } });
     await settle();
     if (get(".helper-status").attrs["data-step"] !== "5") throw new Error("new step not shown");
-    slow.res({ text: () => Promise.resolve(screen("idle", ' data-version="4.3"')), headers: { get: () => null } });
+    slow.res({ text: () => Promise.resolve(screen("idle", ' data-version="4"')), headers: { get: () => null } });
     await settle();
     if (get(".helper-status").attrs["data-step"] !== "5") throw new Error("stale poll overwrote the newer step");
   },
@@ -203,8 +203,8 @@ const scenarios = {
   },
   // Codex 1: оба POST оборваны, сервер принял шаг позже срока от старта: опрос продлевается от сбоя.
   async failed_posts_extend_polling_deadline() {
-    boot(screen("idle", ' data-version="0.0"'));
-    let server = screen("idle", ' data-version="0.0"');
+    boot(screen("idle", ' data-version="0"'));
+    let server = screen("idle", ' data-version="0"');
     page.getFn = ok_(() => server);
     const retry = deferred();
     page.postq.push(fail, () => retry.p);
@@ -218,40 +218,40 @@ const scenarios = {
     retry.p.catch(() => {});
     await settle();
     for (let i = 0; i < 6; i++) await advance(2600);  // ~65 с: срок от старта вышел, от сбоя - нет
-    server = screen("thinking", ' data-step="1" data-version="1.2"');  // сервер начал шаг позже
+    server = screen("thinking", ' data-step="1" data-version="1"');  // сервер начал шаг позже
     for (let i = 0; i < 3; i++) await advance(2600);
     if (get(".helper-status").attrs["data-panel"] !== "thinking") throw new Error("late step never shown: " + get(".helper-status").attrs["data-panel"]);
   },
   // Codex 2: ранний POST ещё в пути, поздний уже ответил; сбой и опоздавший ответ опроса цикл не рвут.
   async loop_survives_failed_and_stale_polls_while_older_post_pends() {
-    boot(screen("idle", ' data-version="4.3"'));
+    boot(screen("idle", ' data-version="4"'));
     const older = deferred();
-    page.postq.push(() => older.p, ok(screen("thinking", ' data-step="6" data-version="6.2"')));
-    page.getq.push(fail, ok(screen("thinking", ' data-step="5" data-version="5.3"')), ok(screen("idle", ' data-version="6.3"')));
+    page.postq.push(() => older.p, ok(screen("thinking", ' data-step="6" data-version="6"')));
+    page.getq.push(fail, ok(screen("thinking", ' data-step="5" data-version="5"')), ok(screen("idle", ' data-version="7"')));
     const click = () => page.handlers.click[0]({ target: { closest: () => get("button") } });
     click();  // старый POST: ответ задержан
     await settle();
     click();  // новый POST отвечает "думаю"
     await settle();
-    if (get(".helper-status").attrs["data-version"] !== "6.2") throw new Error("newer POST not applied");
+    if (get(".helper-status").attrs["data-version"] !== "6") throw new Error("newer POST not applied");
     for (let i = 0; i < 3; i++) await advance(2600);
-    if (get(".helper-status").attrs["data-version"] !== "6.3") throw new Error("loop died: " + get(".helper-status").attrs["data-version"]);
+    if (get(".helper-status").attrs["data-version"] !== "7") throw new Error("loop died: " + get(".helper-status").attrs["data-version"]);
   },
   // Codex 3: ответ на отметку ключа (старый прогон) опоздал к новому прогону того же шага: форму не затирает.
   async older_run_response_does_not_replace_new_run_form() {
-    boot(screen("idle", ' data-version="2.9.5.3"'));
+    boot(screen("idle", ' data-version="9"'));
     const dispute = deferred();
-    page.postq.push(() => dispute.p, ok(screen("idle", ' data-version="3.11.5.3"')));
+    page.postq.push(() => dispute.p, ok(screen("idle", ' data-version="11"')));
     const click = () => page.handlers.click[0]({ target: { closest: () => get("button") } });
     click();  // «Кажется, ключ неверный»: ответ задержан
     await settle();
     click();  // «Разобрать ещё раз»: новый прогон
     await settle();
-    if (get(".helper-status").attrs["data-version"] !== "3.11.5.3") throw new Error("new run not applied");
+    if (get(".helper-status").attrs["data-version"] !== "11") throw new Error("new run not applied");
     page.els.find((e) => e.attrs.value === "Б").checked = true;  // ребёнок выбрал ответ
-    dispute.res({ text: () => Promise.resolve(screen("idle", ' data-version="2.10.5.3"')), headers: { get: () => null } });
+    dispute.res({ text: () => Promise.resolve(screen("idle", ' data-version="10"')), headers: { get: () => null } });
     await settle();
-    if (get(".helper-status").attrs["data-version"] !== "3.11.5.3") throw new Error("old run response replaced the screen");
+    if (get(".helper-status").attrs["data-version"] !== "11") throw new Error("old run response replaced the screen");
     if (checkedOf("answer").join() !== "Б") throw new Error("selected answer lost");
   },
 };

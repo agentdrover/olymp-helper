@@ -18,6 +18,7 @@ from app.tutor import steps
 from app.tutor.check import BadAnswer, parse_answer
 from app.tutor.guard import leaks_note, render_markdown, strip_claims
 from app.tutor.outcomes import outcome_label
+from app.tutor.seq import bump
 
 TERMINAL = ("solved", "solved_unknown", "hint3", "answer_shown")
 HINT_WAIT_S = 60
@@ -65,6 +66,9 @@ def add_event(conn, now: datetime, type: str, task_id: int, data: dict) -> int:
     session = session_id_for(conn, now)
     stamp = iso(now)
     conn.execute("UPDATE study_session SET last_activity_at = ? WHERE id = ?", (stamp, session))
+    bump(
+        conn, task_id
+    )  # попытка, подсказка, объяснение, чат, ответ, отметка ключа - всё через событие
     return conn.execute(
         "INSERT INTO event (session_id, type, task_item_id, data, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -98,6 +102,7 @@ def _new_run(conn, task, now: datetime, repeat: bool):
             iso(now),
         ),
     )
+    bump(conn, task["id"])  # новый прогон (повтор или после правки родителя)
     return get_run(conn, cur.lastrowid)
 
 
@@ -409,6 +414,7 @@ def merge_solution(conn, run_id: int, step_id=None, **fields) -> None:
         sol = json.loads(run["solution_json"])
         sol.update(fields)
         update_run_json(conn, run_id, "solution_json", sol)
+        bump(conn, run["task_item_id"])
 
 
 def store_analysis(
@@ -426,6 +432,7 @@ def store_analysis(
             conn, run_id, "analysis_json",
             {"html": html, "generic": generic, "rejected_by": reason, "uncertainty": uncertainty},
         )  # fmt: skip
+        bump(conn, run["task_item_id"])  # разбор ошибки меняет экран без нового события
 
 
 def add_explain(
@@ -461,6 +468,7 @@ def record_discrepancy(conn, task, run_id: int, out, now, step_id=None) -> None:
             (task["id"], run_id, task["revision"], task["key_version"], answer, out.explanation,
              out.uncertainty, iso(now)),
         )  # fmt: skip
+        bump(conn, task["id"])  # расхождение прячет объяснение модели от ребёнка
 
 
 def is_disputed(conn, task) -> bool:
@@ -488,6 +496,7 @@ def resolve_discrepancies(conn, task_id: int) -> None:
         "UPDATE tutor_discrepancy SET resolved_at = ? WHERE task_item_id = ? AND resolved_at IS NULL",
         (iso(datetime.now(UTC)), task_id),
     )
+    bump(conn, task_id)  # расхождение разобрано: объяснение снова допустимо
 
 
 def discrepancies(conn, task_id: int) -> list[dict]:

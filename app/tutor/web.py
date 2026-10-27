@@ -17,7 +17,7 @@ from app.ingest.store import atomic, get_task, open_db
 from app.ingest.web import child_notice_gate
 from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, current_role
-from app.tutor import state, steps
+from app.tutor import seq, state, steps
 from app.tutor.flow import Flow
 from app.tutor.panel import BUSY
 from app.tutor.state import Refused
@@ -115,8 +115,15 @@ def _view_of(
     """Один словарь экрана для POST и GET. `step` - шаг, чей итог ждёт экран: когда он окончен,
     его итог (отказ модели, пояснение) показывается один раз."""
     app = request.app
-    task, material = _published(conn, task_id)
+    _published(conn, task_id)  # 404 до всего остального
     live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # сначала: идёт ли
+    with seq.read_snapshot(conn):  # данные экрана и его версия - из одного состояния базы
+        return _view_in_snapshot(request, conn, task_id, live, step, flow, notice)
+
+
+def _view_in_snapshot(request: Request, conn, task_id: int, live, step, flow, notice):
+    app = request.app
+    task, material = _published(conn, task_id)
     # Итог шага - ДО прогона: если шаг найден оконченным, прогон читается после его записи, и ответ
     # с итогом (например «помощник не ответил») не прячет подсказку, которую шаг уже записал.
     # Снимок «идёт шаг» главнее итога: пока какой-то шаг идёт, ответ занят ИМЕННО им, а итог
@@ -256,10 +263,12 @@ def task_page(task_id: int, request: Request, conn: Db):
     live = snapshot_live(conn, app.state.inflight, task_id, app.state.clock())  # до чтения прогона
     with atomic(conn):  # экран открыт: с этого момента идут 60 секунд до подсказки 1
         state.ensure_run(conn, task_id, app.state.clock())
-    view = build_view(
-        conn, task, material, state.active_run(conn, task), app.state.clock(),
-        inflight=app.state.inflight, live=live,
-    )  # fmt: skip
+    with seq.read_snapshot(conn):
+        task, material = _published(conn, task_id)
+        view = build_view(
+            conn, task, material, state.active_run(conn, task), app.state.clock(),
+            inflight=app.state.inflight, live=live,
+        )  # fmt: skip
     return TEMPLATES.TemplateResponse(request, "child/task.html", {"v": view, "task": view["task"]})
 
 
