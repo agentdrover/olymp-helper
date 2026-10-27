@@ -84,8 +84,8 @@ def _rows(conn):
     materials = {m["id"]: m for m in conn.execute("SELECT * FROM material")}
     out = []
     for task in conn.execute("SELECT * FROM task_item ORDER BY id"):
-        if not is_published(task):
-            continue
+        if not is_published(task) or task["id"] in locked:
+            continue  # задания идущего варианта: ни статуса, ни места в списках и «Решать по теме»
         run = runs.get(task["id"])
         if run is not None and (run["revision"], run["key_version"]) != (
             task["revision"],

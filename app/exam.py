@@ -11,6 +11,8 @@ import random
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+from fastapi import HTTPException
+
 from app.ingest.answers import display, key_value, label_key
 from app.ingest.publish import is_published
 from app.ingest.store import atomic, figure_of, options_of
@@ -610,14 +612,14 @@ def _overlaps_running(conn, attempt_id: int, now: datetime) -> bool:
 def stable(conn, build):
     """Сборка экрана в снимке чтения и свежая проверка ПОСЛЕ неё, вне снимка: если во время
     сборки стартовал вариант, экран пересобирается с новым замком. build(hidden) -> данные."""
-    for _ in range(3):
+    for _ in range(5):
         with seq.read_snapshot(conn):
             hidden = running_task_ids(conn)
             data = build(hidden)
         if running_task_ids(conn) <= hidden:
             return data
-    with seq.read_snapshot(conn):
-        return build(running_task_ids(conn))
+    # непроверенный снимок не отдаётся
+    raise HTTPException(503, "Занято, попробуй ещё раз.", headers={"Retry-After": "1"})
 
 
 def result(conn, attempt_id: int, now: datetime) -> dict:

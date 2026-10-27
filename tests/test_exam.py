@@ -542,7 +542,8 @@ def test_lock_wins_over_404_and_422_and_skips_list_everything(tmp_path):
 
 def test_background_step_finishing_during_the_exam_shows_nothing(tmp_path):
     """Шаг в фоне начат до старта и кончается во время олимпиады: ни ответ POST, ни опрос
-    (с номером шага и без) его итога не показывают; после олимпиады подсказка на месте."""
+    (с номером шага и без) его итога не показывают; отложенный итог не сохраняется, а после сдачи
+    помощь работает штатно: подсказку можно взять заново."""
     from tests.bank_helpers import build_app
     from tests.tutor_helpers import Blocking, Clock
 
@@ -577,6 +578,11 @@ def test_background_step_finishing_during_the_exam_shows_nothing(tmp_path):
                 r = c.get(url, headers={**CHILD, **extra})
                 assert r.status_code == 409 and "идёт олимпиада" in r.text, url
                 assert "hints_list" not in r.text and "Подсказка" not in r.text, url
+        # после сдачи §1.3 действует как обычно: экран открыт, подсказка берётся заново
+        assert act(c, "submit", **keep(c)).status_code == 303
+        assert c.get(f"/api/tasks/{task}/tutor", headers=CHILD).status_code == 200
+        again = post(c, task, "hint", level=1)
+        assert again.status_code == 200 and again.json()["panel"]["state"] != "exam_running"
 
 
 def _start_in_between(tmp_path, clock, monkeypatch):
@@ -1057,3 +1063,30 @@ def test_results_and_history_started_during_assembly_give_nothing(tmp_path, monk
         monkeypatch.setattr(exam, "_result_data", racing)
         r = c.get(f"/api/exam/results/{a}", headers=CHILD)
         assert r.status_code == 409 and "score" not in r.text
+
+
+def test_task_map_has_no_status_for_the_running_variant_tasks(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        assert attempt(c, 1, "Б", "sure").status_code == 200
+        start_real(c)
+        for url in ("/tasks?q=цифр", "/tasks?status=new", "/tasks?status=ok", "/tasks"):
+            r = c.get(url, headers=CHILD)
+            assert r.status_code == 200 and '/tasks/1"' not in r.text, url
+            assert "Решать по теме" not in r.text and '/tasks/1"' not in r.text, url
+
+
+def test_stable_refuses_an_unchecked_snapshot(tmp_path, monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        conn = db(tmp_path)
+        grow = iter(range(1, 100))
+        monkeypatch.setattr(exam, "running_task_ids", lambda _c: frozenset({next(grow)}))
+        with pytest.raises(HTTPException) as err:
+            exam.stable(conn, lambda hidden: hidden)
+        assert err.value.status_code == 503
