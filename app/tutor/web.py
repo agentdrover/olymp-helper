@@ -104,6 +104,25 @@ def child_same_origin(request: Request) -> None:
         )
 
 
+def child_same_origin_form(request: Request) -> None:
+    """Отправка обычной формы бланка: чужой источник отклоняется. Нужен свой Origin или Referer
+    (Sec-Fetch-Site: same-origin тоже годится); чужой или отсутствующий источник - 403."""
+    site = request.headers.get("sec-fetch-site")
+    source = request.headers.get("origin") or request.headers.get("referer")
+    same = source is not None and urlsplit(source).netloc == request.url.netloc
+    if site is not None:
+        same = site == "same-origin" and (source is None or same)
+    if not same:
+        raise HTTPException(
+            403, detail={"error": "cross_origin", "message": "Чужой источник запроса."}
+        )
+    kind = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if kind not in ("application/x-www-form-urlencoded", "multipart/form-data"):
+        raise HTTPException(
+            415, detail={"error": "form_required", "message": "Запрос должен быть формой."}
+        )
+
+
 def _is_fragment(request: Request) -> bool:
     return request.headers.get("hx-request") == "true"
 
@@ -190,6 +209,8 @@ def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, not
     view = _view_of(
         request, conn, task_id, step=flow.step_id if flow else None, flow=flow, notice=notice
     )
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        raise ExamBusy(blocked)  # новое чтение после сборки: старт мог прийти, пока шла сборка
     started = flow is not None and flow.launched
     headers = {"X-Step-Started": "1"} if started else {}
     if flow is not None and flow.attempt_state:
@@ -323,7 +344,10 @@ def tutor_json(task_id: int, request: Request, conn: Db, step: int | None = None
     _published(conn, task_id)
     if (blocked := _exam_block(request, conn, task_id)) is not None:
         return blocked
-    return JSONResponse(_view_of(request, conn, task_id, step=step))
+    view = _view_of(request, conn, task_id, step=step)
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked  # свежая проверка после сборки, вне снимка
+    return JSONResponse(view)
 
 
 @router.get(
@@ -335,7 +359,10 @@ def tutor_fragment(task_id: int, request: Request, conn: Db, step: int | None = 
         return blocked
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
-    return _fragment(request, _view_of(request, conn, task_id, step=step))
+    view = _view_of(request, conn, task_id, step=step)
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked  # свежая проверка после сборки, вне снимка
+    return _fragment(request, view)
 
 
 @router.get("/tasks/{task_id}", response_class=HTMLResponse, dependencies=[Depends(exam_gate)])
@@ -358,6 +385,8 @@ def task_page(task_id: int, request: Request, conn: Db):
             conn, task, material, state.active_run(conn, task), app.state.clock(),
             inflight=app.state.inflight, live=live, version=version,
         )  # fmt: skip
+    if (blocked := _exam_block(request, conn, task_id, page=True)) is not None:
+        return blocked  # свежая проверка после сборки, вне снимка
     return TEMPLATES.TemplateResponse(request, "child/task.html", {"v": view, "task": view["task"]})
 
 

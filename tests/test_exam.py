@@ -1,6 +1,7 @@
 """Имитация олимпиады (OH-K3a): формат родителя, допуск, сборка, запрет помощи, срок, итог."""
 
 import json
+import re
 
 from fastapi.testclient import TestClient
 
@@ -53,6 +54,52 @@ def four(tmp_path):
 def start_real(c, **over):
     body = {"mode": "real", "material_id": 1, "section": None, "variant": None, "stage": None}
     return c.post("/exam/start", json={**body, **over}, headers=CHILD)
+
+
+def form_of(c):
+    """Скрытые поля бланка: прохождение, ревизия, показанная позиция, идентификатор действия."""
+    r = c.get("/exam/run", headers=CHILD)
+    assert r.status_code == 200, r.text
+    return dict(re.findall(r'<input type="hidden" name="(\w+)" value="([^"]*)"', r.text))
+
+
+def act(c, action, form=None, **fields):
+    data = {**(form or form_of(c)), "action": action, **fields}
+    return c.post(
+        "/exam/act", data=data, headers={**CHILD, "Origin": "http://testserver"},
+        follow_redirects=False,
+    )  # fmt: skip
+
+
+def keep(c):
+    """Поля показанного задания с сохранённым ответом: браузер шлёт их с каждым переходом."""
+    view = current(c)[1]
+    it = view["items"][view["current"] - 1]
+    answer = it["answer"]
+    if it["type"] == "numeric":
+        return {"n": answer or ""}
+    if it["type"] == "match":
+        return {f"m.{k}": v for k, v in (answer or {}).items()}
+    return {"a": answer or []}
+
+
+def nav(c, position):
+    return act(c, f"open:{position}", **keep(c))
+
+
+def at(c, position, action="save", **fields):
+    """Показать задание position (переход) и выполнить действие над ним; всегда 303."""
+    if int(form_of(c)["shown"]) != position:
+        assert nav(c, position).status_code == 303
+    r = act(c, action, **(fields or keep(c)))
+    assert r.status_code == 303, r.text
+    return r
+
+
+def submit(c):
+    r = act(c, "submit", **keep(c))
+    assert r.status_code == 303 and "/exam/results/" in r.headers["location"], r.text
+    return c.get("/api" + r.headers["location"], headers=CHILD).json()
 
 
 def current(c):
@@ -140,7 +187,7 @@ def test_format_variant_reports_shortage_per_type(tmp_path):
         assert r.status_code == 200
         _, view = current(c)
         assert sorted(i["number"] for i in view["items"]) == ["1", "2", "4"] and view["reduced"]
-        done = c.post("/exam/submit", json={"confirm": True}, headers=CHILD).json()["result"]
+        done = submit(c)
         assert done["max_score"] == 1 + 1 + 4 and done["total"] == 3  # максимум уменьшенного
         # нет ни одного допущенного задания: вариант не создаётся и по согласию
         sql(tmp_path, "UPDATE task_item SET key_source = 'generated'")
@@ -281,22 +328,8 @@ def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
         save_format(c, tmp_path)
         first = start_real(c).json()["attempt_id"]
         _, view = current(c)
-        assert (
-            c.post(
-                "/exam/answer",
-                json={"attempt_id": first, "position": 1, "answer": "Б"},
-                headers=CHILD,
-            ).status_code
-            == 200
-        )
-        assert (
-            c.post(
-                "/exam/mark",
-                json={"attempt_id": first, "position": 2, "marked": True},
-                headers=CHILD,
-            ).status_code
-            == 200
-        )
+        at(c, 1, "save", a="Б")
+        at(c, 2, "mark")
         clock.advance(30)
         # повторный старт и «перезагрузка»: то же прохождение, срок не сброшен, ответы на месте
         again = start_real(c).json()["attempt_id"]
@@ -305,36 +338,18 @@ def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
         assert reloaded["deadline_at"] == view["deadline_at"]
         assert reloaded["items"][0]["answer"] == "Б" and reloaded["items"][1]["marked"]
         assert db(tmp_path).execute("SELECT COUNT(*) FROM exam_attempt").fetchone()[0] == 1
-        # две вкладки: открытие другого задания закрывает прежний интервал
-        assert (
-            c.post(
-                "/exam/open", json={"attempt_id": first, "position": 3}, headers=CHILD
-            ).status_code
-            == 200
-        )
-        assert (
-            c.post(
-                "/exam/open", json={"attempt_id": first, "position": 2}, headers=CHILD
-            ).status_code
-            == 200
-        )
-        opened = (
-            db(tmp_path)
-            .execute("SELECT COUNT(*) FROM exam_view WHERE closed_at IS NULL")
-            .fetchone()[0]
-        )
-        assert opened == 1
+        # переход закрывает прежний интервал просмотра
+        at(c, 3, "save")
+        at(c, 2, "save")
+        opened = db(tmp_path).execute("SELECT COUNT(*) FROM exam_view WHERE closed_at IS NULL")
+        assert opened.fetchone()[0] == 1
         # последняя секунда ещё внутри срока, граница - уже нет
         clock.advance(569)
-        ok = c.post(
-            "/exam/answer", json={"attempt_id": first, "position": 4, "answer": "28"}, headers=CHILD
-        )
-        assert ok.status_code == 200
+        at(c, 4, "save", n="28")
+        form = form_of(c)
         clock.advance(1)
-        late = c.post(
-            "/exam/answer", json={"attempt_id": first, "position": 1, "answer": "А"}, headers=CHILD
-        )
-        assert late.status_code == 409 and late.json()["code"] == "time_up"
+        late = act(c, "save", form, a="А")
+        assert late.status_code == 303 and "/exam/results/" in late.headers["location"]
         row = db(tmp_path).execute("SELECT * FROM exam_attempt").fetchone()
         assert row["status"] == "submitted" and row["end_reason"] == "time"
         assert (
@@ -356,30 +371,26 @@ def test_deadline_single_attempt_and_idempotent_submit(tmp_path):
             assert res["status"] == "submitted" and res["end_reason"] == "time"
             assert restarted.get("/api/exam", headers=CHILD).json()["running_id"] is None
 
-    # сдача кнопкой: подтверждение обязательно, повтор идемпотентен, ответы после неё не меняются
+    # сдача: повтор той же формы идемпотентен, ответы после неё не меняются
     c3, clock3, _ = boot(tmp_path / "third")
     with c3:
         four(tmp_path / "third")
         save_format(c3, tmp_path / "third")
         attempt_id = start_real(c3).json()["attempt_id"]
-        c3.post(
-            "/exam/answer",
-            json={"attempt_id": attempt_id, "position": 1, "answer": "Б"},
-            headers=CHILD,
-        )
-        no = c3.post("/exam/submit", json={"attempt_id": attempt_id}, headers=CHILD)
-        assert no.status_code == 422 and no.json()["code"] == "confirm_required"
-        body = {"attempt_id": attempt_id, "confirm": True}
-        one = c3.post("/exam/submit", json=body, headers=CHILD).json()
+        at(c3, 1, "save", a="Б")
+        form, kept = form_of(c3), keep(c3)
+        one = act(c3, "submit", form, **kept)
         clock3.advance(5)
-        two = c3.post("/exam/submit", json=body, headers=CHILD).json()
-        assert one["result"] == two["result"] and one["result"]["score"] == 1
-        after = c3.post(
-            "/exam/answer",
-            json={"attempt_id": attempt_id, "position": 2, "answer": "А"},
-            headers=CHILD,
-        )
-        assert after.status_code == 409
+        two = act(c3, "submit", form, **kept)  # второе нажатие «сдать» с той же страницы
+        assert one.status_code == two.status_code == 303
+        assert one.headers["location"] == two.headers["location"] == f"/exam/results/{attempt_id}"
+        done = c3.get(f"/api/exam/results/{attempt_id}", headers=CHILD).json()
+        assert done["score"] == 1
+        after = act(c3, "save", form, a="А")
+        assert after.status_code == 303  # просто ведёт к итогу
+        row = db(tmp_path / "third").execute("SELECT answer FROM exam_item WHERE position = 2")
+        assert row.fetchone()[0] is None
+        assert c3.get(f"/api/exam/results/{attempt_id}", headers=CHILD).json() == done
         assert c3.get(f"/exam/results/{attempt_id}", headers=CHILD).status_code == 200
 
 
@@ -390,28 +401,24 @@ def test_result_uses_start_snapshot_score_and_view_time(tmp_path):
         save_format(c, tmp_path)
         attempt_id = start_real(c).json()["attempt_id"]  # позиция 1 открыта в момент старта
 
-        def call(path, **body):
-            r = c.post(path, json={"attempt_id": attempt_id, **body}, headers=CHILD)
-            assert r.status_code == 200, r.text
-
         # после старта родитель меняет ключ и баллы: на это прохождение они не влияют
         sql(tmp_path, "UPDATE task_item SET answer_key = ? WHERE id = ?",
             key_json("А", "single"), single)  # fmt: skip
         save_format(c, tmp_path, points_single="9", points_numeric="9")
         clock.advance(10)
-        call("/exam/answer", position=1, answer="Б")  # верно по ключу на момент старта
-        call("/exam/open", position=2)
+        assert act(c, "save", a="Б").status_code == 303  # верно по ключу на момент старта
+        assert nav(c, 2).status_code == 303
         clock.advance(20)
-        call("/exam/answer", position=2, answer=["А"])  # неверно: ключ А+В
-        call("/exam/open", position=3)  # пропуск
+        assert act(c, "save", a="А").status_code == 303  # неверно: ключ А+В
+        assert nav(c, 3).status_code == 303  # пропуск
         clock.advance(5)
-        call("/exam/open", position=1)  # возврат
+        assert nav(c, 1).status_code == 303  # возврат
         clock.advance(7)
-        call("/exam/open", position=4)
-        call("/exam/answer", position=4, answer="28,0")  # число в другой записи
+        assert nav(c, 4).status_code == 303
+        assert act(c, "save", n="28,0").status_code == 303  # число в другой записи
+        assert db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 4").fetchone()[0] == '"28"'
         clock.advance(3)
-        done = c.post("/exam/submit", json={"attempt_id": attempt_id, "confirm": True},
-                      headers=CHILD).json()["result"]  # fmt: skip
+        done = submit(c)
         assert done["score"] == 1 + 4 and done["max_score"] == 1 + 2 + 3 + 4
         assert done["correct"] == 2 and done["total"] == 4
         by_pos = {i["position"]: i for i in done["items"]}
@@ -438,16 +445,14 @@ def test_stale_tab_old_results_and_expired_start(tmp_path):
         four(tmp_path)
         save_format(c, tmp_path)
         a = start_real(c).json()["attempt_id"]
-        c.post("/exam/answer", json={"attempt_id": a, "position": 1, "answer": "Б"}, headers=CHILD)
-        done = {"attempt_id": a, "confirm": True}
-        assert c.post("/exam/submit", json=done, headers=CHILD).status_code == 200
+        at(c, 1, "save", a="Б")
+        old = form_of(c)
+        assert act(c, "submit", old, **keep(c)).status_code == 303
         assert c.get(f"/api/exam/results/{a}", headers=CHILD).status_code == 200
         b = start_real(c).json()["attempt_id"]
         assert b != a
         # старая вкладка не меняет новый вариант; результаты старого скрыты, пока идёт новый
-        stale = c.post(
-            "/exam/answer", json={"attempt_id": a, "position": 1, "answer": "А"}, headers=CHILD
-        )
+        stale = act(c, "save", {**old, "action_id": "other"}, a="А")
         assert stale.status_code == 409
         assert (
             db(tmp_path)
@@ -456,7 +461,7 @@ def test_stale_tab_old_results_and_expired_start(tmp_path):
             is None
         )
         assert c.get(f"/api/exam/results/{a}", headers=CHILD).status_code == 409
-        assert c.post("/exam/submit", json=done, headers=CHILD).status_code == 409
+        assert act(c, "submit", {**old, "action_id": "o2"}, **keep(c)).status_code == 303
         assert c.get("/api/exam", headers=CHILD).json()["history"] == []
         # срок вышел, новый старт отклонён нехваткой: закрытие по времени сохранено
         clock.advance(601)
@@ -495,18 +500,13 @@ def test_empty_collection_clears_answer(tmp_path):
     with c:
         four(tmp_path)
         save_format(c, tmp_path)
-        a = start_real(c).json()["attempt_id"]
-
-        def save(pos, answer):
-            body = {"attempt_id": a, "position": pos, "answer": answer}
-            r = c.post("/exam/answer", json=body, headers=CHILD)
-            assert r.status_code == 200, r.text
-
-        save(2, ["А"])
+        start_real(c)
+        at(c, 2, "save", a=["А"])
         assert current(c)[1]["items"][1]["answer"] == ["А"]
-        save(2, [])
-        save(3, {"1": "А"})
-        save(3, {})
+        at(c, 2, "save", cleared="1")  # ничего не выбрано
+        at(c, 3, "save", **{"m.1": "А"})
+        assert current(c)[1]["items"][2]["answer"] == {"1": "А"}  # частичное соответствие как есть
+        at(c, 3, "save", cleared="1")
         items = current(c)[1]["items"]
         assert items[1]["answer"] is None and items[2]["answer"] is None
 
@@ -659,9 +659,8 @@ def _start_before_snapshot(tmp_path, clock, monkeypatch):
 
 def _submitted_attempt(c):
     a = start_real(c).json()["attempt_id"]
-    c.post("/exam/answer", json={"attempt_id": a, "position": 1, "answer": "Б"}, headers=CHILD)
-    done = {"attempt_id": a, "confirm": True}
-    assert c.post("/exam/submit", json=done, headers=CHILD).status_code == 200
+    at(c, 1, "save", a="Б")
+    assert act(c, "submit", **keep(c)).status_code == 303
     return a
 
 
@@ -710,8 +709,7 @@ def test_option_labels_carry_the_token_the_answer_check_uses(tmp_path):
         assert [o["token"] for o in items[2]["options"]] == ["А", "В", "С", "D"]
         # ответ, выбранный по метке «Б)», сохраняется ключом и совпадает с ключом варианта
         pos = items[0]["position"]
-        body = {"attempt_id": current(c)[1]["id"], "position": pos, "answer": "Б)"}
-        assert c.post("/exam/answer", json=body, headers=CHILD).status_code == 200
+        at(c, pos, "save", a="Б)")
         assert current(c)[1]["items"][0]["answer"] == items[0]["options"][1]["token"]
 
 

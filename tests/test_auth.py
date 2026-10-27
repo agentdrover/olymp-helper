@@ -59,10 +59,7 @@ PUBLIC = {
     ("GET", "/api/exam/current"),
     ("GET", "/api/exam/results/{attempt_id}"),
     ("POST", "/exam/start"),
-    ("POST", "/exam/open"),
-    ("POST", "/exam/answer"),
-    ("POST", "/exam/mark"),
-    ("POST", "/exam/submit"),
+    ("POST", "/exam/act"),
 }
 FRAMEWORK = {"/static"}  # the API description is switched off: no /docs, /redoc, /openapi.json
 

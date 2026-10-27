@@ -1,5 +1,6 @@
 """Маршруты имитации олимпиады: формат (родитель), сборка, прохождение, сдача и итог (ребёнок)."""
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -11,7 +12,7 @@ from app.exam import ExamError
 from app.ingest.web import TEMPLATES, Db, child_notice_gate
 from app.notice import notice_redirect
 from app.roles import csrf_token, now_of, require_csrf, require_parent
-from app.tutor.web import _needs_notice, child_same_origin
+from app.tutor.web import _needs_notice, child_same_origin, child_same_origin_form
 
 child = APIRouter()
 parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)])
@@ -26,11 +27,6 @@ class Body(BaseModel):
     variant: str | None = None
     stage: str | None = None
     accept_reduced: bool = False
-    position: int | None = None
-    answer: Any = None
-    marked: bool = False
-    confirm: bool = False
-    attempt_id: int | None = None
 
 
 def _error(exc: ExamError) -> JSONResponse:
@@ -121,73 +117,104 @@ def exam_figure(position: int, request: Request, conn: Db):
     return Response(png, media_type="image/png")
 
 
+def _fill(item: dict, entered: dict | None) -> dict:
+    """Что подставить в поля показанного задания: введённое (если действие не выполнено) или
+    сохранённое. Выбор и обе стороны соответствия - token варианта, число - текст."""
+    if entered is not None:
+        return entered
+    saved = item["answer"]
+    if item["type"] == "numeric":
+        return {"n": "" if saved is None else str(saved)}
+    if item["type"] == "match":
+        side = item["options"]["left"]
+        right = {r["token"] for r in item["options"]["right"]}
+        pairs = {k: v for k, v in (saved or {}).items() if v in right}
+        return {"m": {x["token"]: pairs.get(x["token"], "") for x in side}}
+    chosen = [saved] if isinstance(saved, str) else list(saved or [])
+    return {"a": chosen}
+
+
+def _blank(
+    request: Request, conn, status: int = 200, message: str | None = None,
+    entered: dict | None = None, lost: str | None = None,
+):  # fmt: skip
+    """Бланк: обычная страница, каждое действие - отправка формы (POST) и 303 на эту страницу."""
+    now = now_of(request)
+    attempt = exam.active(conn, now)
+    if attempt is None:
+        return RedirectResponse("/exam", status_code=303)
+    view = exam.running_view(conn, attempt, now)
+    item = view["items"][view["current"] - 1]
+    page = TEMPLATES.TemplateResponse(
+        request,
+        "child/exam_run.html",
+        {"v": view, "item": item, "fill": _fill(item, entered), "message": message,
+         "lost": lost, "action_id": uuid.uuid4().hex, "type_labels": exam.TYPE_LABELS},
+    )  # fmt: skip
+    page.status_code = status
+    return page
+
+
 @child.get("/exam/run", response_class=HTMLResponse)
 def exam_run(request: Request, conn: Db):
     if _needs_notice(request, conn):
         return notice_redirect("/exam/run")
-    attempt = exam.active(conn, now_of(request))
-    if attempt is None:
-        return RedirectResponse("/exam", status_code=303)
-    return TEMPLATES.TemplateResponse(
-        request, "child/exam_run.html", {"type_labels": exam.TYPE_LABELS}
+    return _blank(request, conn)
+
+
+def _entered(task_type: str, form) -> tuple[Any, dict, str]:
+    """(ответ для проверки, значения для подстановки, текст для показа) из полей формы."""
+    if task_type == "numeric":
+        text = str(form.get("n", ""))
+        return text, {"n": text}, text
+    if task_type == "match":
+        pairs = {
+            k[2:]: str(form.get(k, "")) for k in form.keys() if k.startswith("m.")
+        }  # fmt: skip
+        chosen = {k: v for k, v in pairs.items() if v}
+        return chosen, {"m": pairs}, "; ".join(f"{k} → {v}" for k, v in chosen.items())
+    chosen = [str(v) for v in form.getlist("a")]
+    raw: Any = chosen if task_type == "multiple" else (chosen[0] if chosen else None)
+    return raw, {"a": chosen}, ", ".join(chosen)
+
+
+def _gone(exc: ExamError) -> HTMLResponse:
+    return HTMLResponse(
+        f'<p role="alert">{exc.message}</p><p><a href="/exam">К олимпиаде</a></p>',
+        status_code=exc.status,
     )
 
 
-def _act(path: str):
-    def decorate(fn):
-        @child.post(path, dependencies=JSON_ACTION)
-        def route(request: Request, conn: Db, body: Body):
-            now = now_of(request)
-            try:
-                if body.attempt_id is None:
-                    raise ExamError(422, "no_attempt", "Не указан вариант.")
-                fn(conn, lambda: now_of(request), body)
-            except ExamError as exc:
-                return _error(exc)
-            attempt = exam.active(conn, now)
-            view = exam.running_view(conn, attempt, now_of(request)) if attempt else None
-            return JSONResponse({"ok": True, "exam": view})
-
-        return fn
-
-    return decorate
-
-
-def _position(body: Body) -> int:
-    if body.position is None:
-        raise ExamError(422, "no_position", "Не указан номер задания.")
-    return body.position
-
-
-@_act("/exam/open")
-def _open(conn, now, body):
-    exam.open_item(conn, now, body.attempt_id, _position(body))
-
-
-@_act("/exam/answer")
-def _answer(conn, now, body):
-    exam.save_answer(conn, now, body.attempt_id, _position(body), body.answer)
-
-
-@_act("/exam/mark")
-def _mark(conn, now, body):
-    exam.set_mark(conn, now, body.attempt_id, _position(body), body.marked)
-
-
-@child.post("/exam/submit", dependencies=JSON_ACTION)
-def exam_submit(request: Request, conn: Db, body: Body):
-    now = now_of(request)
-    attempt_id = body.attempt_id
-    if attempt_id is None:
-        running = exam.active(conn, now)
-        if running is None:
-            return _error(ExamError(409, "not_running", "Вариант не идёт."))
-        attempt_id = running["id"]
+@child.post("/exam/act", dependencies=[Depends(child_same_origin_form), Depends(child_notice_gate)])
+async def exam_act(request: Request, conn: Db):
+    """Действие бланка: «сохранить», переход, «вернусь», «сдать». Успех - 303 на страницу."""
+    form = await request.form()
     try:
-        done = exam.submit(conn, lambda: now_of(request), attempt_id, confirm=body.confirm)
+        attempt_id, rev, shown = (int(str(form.get(k, ""))) for k in ("attempt_id", "rev", "shown"))
+        action, _, target = str(form.get("action", "")).partition(":")
+        goal = int(target) if target else None
+    except ValueError:
+        return _gone(ExamError(422, "bad_form", "Форма бланка неполная: открой бланк заново."))
+    kind = conn.execute(
+        "SELECT task_type FROM exam_item WHERE attempt_id = ? AND position = ?",
+        (attempt_id, shown),
+    ).fetchone()
+    raw, entered, lost = _entered(kind[0] if kind else "single", form)
+    try:
+        outcome = exam.act(
+            conn, lambda: now_of(request), attempt_id=attempt_id, rev=rev,
+            action_id=str(form.get("action_id", "")), shown=shown, action=action, target=goal,
+            raw=raw,
+        )  # fmt: skip
     except ExamError as exc:
-        return _error(exc)
-    return JSONResponse({"ok": True, "url": f"/exam/results/{done['id']}", "result": done})
+        if exc.code == "stale":
+            return _blank(request, conn, 409, exc.message, lost=lost or None)
+        if exc.code in ("bad_answer", "no_item"):
+            return _blank(request, conn, exc.status, exc.message, entered=entered)
+        return _gone(exc)
+    if outcome in ("submitted", "time"):
+        return RedirectResponse(f"/exam/results/{attempt_id}", status_code=303)
+    return RedirectResponse("/exam/run", status_code=303)
 
 
 @child.get("/api/exam/results/{attempt_id}", dependencies=[Depends(child_notice_gate)])

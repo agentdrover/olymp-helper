@@ -438,86 +438,76 @@ def _item(conn, attempt_id: int, position: int):
     return item
 
 
-def _mutate(conn, now, attempt_id: int, work):
-    """Сохранение атомарно со сроком: время читается после получения замка записи; при времени
-    >= срока изменение отклоняется, вариант закрывается по времени. Запрос от другого
-    (завершённого) прохождения отклоняется."""
+def _answer_value(item, raw):
+    """Нормализованный ответ (None - пусто); число «28,0» сводится к «28», неполное соответствие
+    сохраняется как есть и оценивается по §1.1."""
+    if raw is None or raw == [] or raw == {} or (isinstance(raw, str) and not raw.strip()):
+        return None
+    options = json.loads(item["snapshot"])["options"]
+    try:
+        return parse_answer(item["task_type"], options, raw)
+    except BadAnswer as exc:
+        raise ExamError(422, "bad_answer", str(exc)) from exc
+
+
+ACTIONS = ("save", "open", "mark", "submit")
+
+
+def act(
+    conn, now, *, attempt_id: int, rev: int, action_id: str, shown: int, action: str,
+    target: int | None = None, raw=None,
+) -> str:  # fmt: skip
+    """Одно действие бланка (обычная форма): в одной транзакции под замком записи сверяются
+    прохождение, срок, показанная позиция и ревизия; сохраняется ответ показанного задания,
+    применяется действие, ревизия растёт. Повтор принятого действия (тот же action_id) ничего не
+    меняет. Результат: "ok", "replay", "submitted" (сдано) или "time" (срок вышел). Устаревшая
+    страница (другая ревизия или позиция) - ExamError 409 "stale": ни ответ, ни интервал
+    просмотра не меняются."""
+    if action not in ACTIONS:
+        raise ExamError(422, "bad_action", "Неизвестное действие.")
     with atomic(conn):
         t = _t(now)
-        attempt = conn.execute("SELECT * FROM exam_attempt WHERE status = 'running'").fetchone()
-        if attempt is None or attempt["id"] != attempt_id:
-            raise ExamError(
-                409, "not_running", "Этот вариант уже не идёт: он сдан или время вышло."
-            )
-        if t >= _parse(attempt["deadline_at"]):
-            _finish(conn, attempt, "time", _parse(attempt["deadline_at"]))
-            return "timeout"
-        work(attempt, t)
-    return "ok"
-
-
-def _refuse_timeout() -> ExamError:
-    return ExamError(409, "time_up", "Время вышло: вариант сдан.")
-
-
-def open_item(conn, now, attempt_id: int, position: int) -> None:
-    def work(attempt, t):
-        _item(conn, attempt["id"], position)
-        _open_view(conn, attempt["id"], position, t)
-
-    if _mutate(conn, now, attempt_id, work) == "timeout":
-        raise _refuse_timeout()
-
-
-def save_answer(conn, now, attempt_id: int, position: int, raw) -> None:
-    def work(attempt, t):
-        item = _item(conn, attempt["id"], position)
-        snap = json.loads(item["snapshot"])
-        if raw is None or raw == [] or raw == {} or (isinstance(raw, str) and not raw.strip()):
-            value = None
-        else:
-            try:
-                value = parse_answer(item["task_type"], snap["options"], raw)
-            except BadAnswer as exc:
-                raise ExamError(422, "bad_answer", str(exc)) from exc
-        conn.execute(
-            "UPDATE exam_item SET answer = ? WHERE attempt_id = ? AND position = ?",
-            (None if value is None else json.dumps(value, ensure_ascii=False),
-             attempt["id"], position),
-        )  # fmt: skip
-
-    if _mutate(conn, now, attempt_id, work) == "timeout":
-        raise _refuse_timeout()
-
-
-def set_mark(conn, now, attempt_id: int, position: int, marked: bool) -> None:
-    def work(attempt, t):
-        _item(conn, attempt["id"], position)
-        conn.execute(
-            "UPDATE exam_item SET marked = ? WHERE attempt_id = ? AND position = ?",
-            (1 if marked else 0, attempt["id"], position),
-        )
-
-    if _mutate(conn, now, attempt_id, work) == "timeout":
-        raise _refuse_timeout()
-
-
-def submit(conn, now, attempt_id: int, confirm: bool = True) -> dict:
-    """Сдача идемпотентна: повторная возвращает тот же итог, ответы после сдачи не меняются."""
-    with atomic(conn):
-        now = _t(now)
         attempt = conn.execute("SELECT * FROM exam_attempt WHERE id = ?", (attempt_id,)).fetchone()
         if attempt is None:
             raise ExamError(404, "no_attempt", "Такого прохождения нет.")
-        if attempt["status"] == "running":
-            deadline = _parse(attempt["deadline_at"])
-            if now < deadline and not confirm:
-                raise ExamError(422, "confirm_required", "Подтверди сдачу варианта.")
-            if now >= deadline:
-                _finish(conn, attempt, "time", deadline)
-            else:
-                _finish(conn, attempt, "manual", now)
-    return result(conn, attempt_id, now)
+        if attempt["status"] != "running":
+            if action == "submit" or attempt["last_action"] == action_id:
+                return "submitted"  # сдача идемпотентна: ответы после неё не меняются
+            raise ExamError(
+                409, "not_running", "Этот вариант уже не идёт: он сдан или время вышло."
+            )
+        deadline = _parse(attempt["deadline_at"])
+        if t >= deadline:
+            _finish(conn, attempt, "time", deadline)
+            return "time"
+        if attempt["last_action"] == action_id:
+            return "replay"
+        if rev != attempt["rev"] or shown != _current_position(conn, attempt_id):
+            raise ExamError(
+                409, "stale",
+                "Страница устарела: вариант изменился в другой вкладке. Твой ввод не сохранён.",
+            )  # fmt: skip
+        item = _item(conn, attempt_id, shown)
+        value = _answer_value(item, raw)
+        if action == "open":
+            _item(conn, attempt_id, target if target is not None else 0)
+        conn.execute(
+            "UPDATE exam_item SET answer = ?, marked = CASE WHEN ? = 'mark' THEN 1 - marked "
+            "ELSE marked END WHERE attempt_id = ? AND position = ?",
+            (None if value is None else json.dumps(value, ensure_ascii=False), action,
+             attempt_id, shown),
+        )  # fmt: skip
+        outcome = "ok"
+        if action == "open":
+            _open_view(conn, attempt_id, target, t)
+        elif action == "submit":
+            _finish(conn, attempt, "manual", t)
+            outcome = "submitted"
+        conn.execute(
+            "UPDATE exam_attempt SET rev = rev + 1, last_action = ? WHERE id = ?",
+            (action_id, attempt_id),
+        )
+    return outcome
 
 
 # ----------------------------------------------------------------------- показ
@@ -577,6 +567,7 @@ def running_view(conn, attempt, now=None) -> dict:
         })  # fmt: skip
     return {
         "id": attempt["id"],
+        "rev": attempt["rev"],
         "status": "running",
         "server_now": iso(_t(now)) if now is not None else None,
         "title": attempt["title"],

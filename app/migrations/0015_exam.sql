@@ -32,6 +32,9 @@ CREATE TABLE exam_attempt (
     max_score REAL NOT NULL,
     score REAL,
     correct_count INTEGER,
+    -- Ревизия бланка и идентификатор последнего принятого действия (повтор не применяется).
+    rev INTEGER NOT NULL DEFAULT 0,
+    last_action TEXT,
     CHECK ((status = 'submitted') = (end_reason IS NOT NULL))
 );
 -- У ребёнка не больше одного активного прохождения.

@@ -26,8 +26,13 @@ parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)]
 def _my_data(conn, now, selected_id: int | None) -> dict:
     exam.expire_due(conn, now)
     summary.ensure(conn, now)  # запись - до снимка чтения
-    with seq.read_snapshot(conn):  # замок олимпиады и данные экрана - из одного состояния базы
-        return _my_data_in(conn, now, selected_id, exam.running_task_ids(conn))
+    for _ in range(3):
+        with seq.read_snapshot(conn):  # замок олимпиады и данные экрана - из одного состояния базы
+            hidden = exam.running_task_ids(conn)
+            data = _my_data_in(conn, now, selected_id, hidden)
+        if exam.running_task_ids(conn) <= hidden:  # свежая проверка после сборки, вне снимка
+            return data
+    return _my_data_in(conn, now, selected_id, exam.running_task_ids(conn))  # пересборка с фильтром
 
 
 def _my_data_in(conn, now, selected_id: int | None, hidden) -> dict:

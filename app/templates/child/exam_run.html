@@ -1,133 +1,60 @@
 {% extends "base_child.html" %}
 {% block title %}Олимпиада{% endblock %}
 {% block content %}
+{# Бланк без фоновых запросов: каждое действие - обычная отправка формы (POST) и 303 на эту страницу. #}
 <header>
-  <div class="kicker" id="exam-title"></div>
-  <h1>Олимпиада: осталось <span id="exam-left">…</span></h1>
+  <div class="kicker">{{ v.title }} · {{ v.stage }} этап</div>
+  <h1>Олимпиада: осталось <span id="exam-left" data-deadline="{{ v.deadline_at }}" data-now="{{ v.server_now }}">…</span></h1>
 </header>
-<nav id="exam-nav" aria-label="Задания варианта"></nav>
-<section class="card" id="exam-task" aria-live="polite"></section>
-<p id="exam-msg" class="err" role="alert"></p>
-<p><button class="btn" id="exam-mark" type="button">Вернусь</button>
-   <button class="btn primary" id="exam-submit" type="button">Сдать вариант</button></p>
+{% if message %}<p class="err" role="alert">{{ message }}</p>{% endif %}
+{% if lost %}<p class="notice">Введённое тобой (не сохранено): {{ lost }}</p>{% endif %}
+<form method="post" action="/exam/act" id="exam-form">
+  <input type="hidden" name="attempt_id" value="{{ v.id }}">
+  <input type="hidden" name="rev" value="{{ v.rev }}">
+  <input type="hidden" name="shown" value="{{ item.position }}">
+  <input type="hidden" name="action_id" value="{{ action_id }}">
+  <nav aria-label="Задания варианта">
+  {% for x in v["items"] %}
+    <button type="submit" name="action" value="open:{{ x.position }}"{% if x.position == item.position %} aria-current="true"{% endif %}>{{ x.position }}{% if x.answer is not none and x.answer != "" and x.answer != [] and x.answer != {} %} ✓{% endif %}{% if x.marked %} ⚑{% endif %}</button>
+  {% endfor %}
+  </nav>
+  <section class="card">
+    <p>{{ item.text }}</p>
+    {% if item.figure %}<img src="{{ item.figure.url }}" alt="{{ item.figure.alt }}">{% endif %}
+    {% if item.type in ("single", "multiple") %}
+      {% for o in item.options %}
+      <label><input type="{{ 'radio' if item.type == 'single' else 'checkbox' }}" name="a" value="{{ o.token }}"{% if o.token in fill.a %} checked{% endif %}> {{ o.label }}) {{ o.text }}</label><br>
+      {% endfor %}
+    {% elif item.type == "match" %}
+      {% for l in item.options.left %}
+      <p>{{ l.label }}) {{ l.text }} → <select name="m.{{ l.token }}"><option value="">—</option>
+        {% for r in item.options.right %}<option value="{{ r.token }}"{% if fill.m[l.token] == r.token %} selected{% endif %}>{{ r.label }}) {{ r.text }}</option>{% endfor %}
+      </select></p>
+      {% endfor %}
+    {% else %}
+      <label>Число <input name="n" inputmode="decimal" value="{{ fill.n }}"></label>
+    {% endif %}
+    <p><button class="btn" type="submit" name="action" value="save">Сохранить ответ</button></p>
+  </section>
+  <p><button class="btn" type="submit" name="action" value="mark">{{ "Снять «вернусь»" if item.marked else "Вернусь" }}</button>
+     <button class="btn primary" type="submit" name="action" value="submit" id="exam-submit">Сдать вариант</button></p>
+</form>
 <script>
-let exam = null, pos = 1, shown = 0;
-let gen = 0;  // номер последнего отправленного запроса: ответ на более старый ничего не перерисовывает
-// Ввод на показанном задании (JSON) - для любого запроса запоминается в момент отправки.
-const inputNow = () => (exam && shown ? JSON.stringify(answerOf(exam.items[shown - 1]) ?? null) : null);
-const $ = id => document.getElementById(id);
-async function call(path, body) {
-  const my = ++gen;
-  const snap = {at: shown, val: inputNow()};  // что было в поле, когда запрос ушёл
-  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-  const j = await r.json();
-  if (!r.ok) {
-    $("exam-msg").textContent = j.message || "Не получилось.";
-    if (j.code === "time_up" || j.code === "not_running") location.href = "/exam";
-    return null;
-  }
-  if (my !== gen) j.stale = true;  // после этого запроса ушёл более новый
-  else $("exam-msg").textContent = "";
-  j.snap = snap;
-  return j;
-}
-function answerOf(it) {
-  const box = $("exam-task");
-  if (it.type === "single") return (box.querySelector("input[name=a]:checked") || {}).value || null;
-  if (it.type === "multiple") return [...box.querySelectorAll("input[name=a]:checked")].map(x => x.value);
-  if (it.type === "match") return Object.fromEntries([...box.querySelectorAll("select[data-l]")].filter(s => s.value).map(s => [s.dataset.l, s.value]));
-  return box.querySelector("input[name=n]").value;
-}
-function renderNav() {
-  $("exam-nav").innerHTML = exam.items.map(x => `<button type="button" data-p="${x.position}"${x.position === pos ? ' aria-current="true"' : ""}>${x.position}${x.answer != null && x.answer !== "" ? " ✓" : ""}${x.marked ? " ⚑" : ""}</button>`).join(" ");
-  const cur = exam.items[shown - 1];
-  if (cur) $("exam-mark").textContent = cur.marked ? "Снять «вернусь»" : "Вернусь";
-}
-function render() {
-  const it = exam.items[pos - 1];
-  shown = pos;
-  $("exam-title").textContent = exam.title + " · " + exam.stage + " этап";
-  renderNav();
-  const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
-  let body = `<p>${esc(it.text)}</p>`;
-  if (it.figure) body += `<img src="${it.figure.url}" alt="${esc(it.figure.alt)}">`;
-  const cur = it.answer;
-  if (it.type === "single" || it.type === "multiple") {
-    const kind = it.type === "single" ? "radio" : "checkbox";
-    body += it.options.map(o => `<label><input type="${kind}" name="a" value="${esc(o.label)}"${[].concat(cur || []).includes(o.token) ? " checked" : ""}> ${esc(o.label)}) ${esc(o.text)}</label><br>`).join("");
-  } else if (it.type === "match") {
-    body += it.options.left.map(l => `<p>${esc(l.label)}) ${esc(l.text)} → <select data-l="${esc(l.label)}"><option value="">—</option>${it.options.right.map(r => `<option value="${esc(r.label)}"${cur && cur[l.token] === r.token ? " selected" : ""}>${esc(r.label)}) ${esc(r.text)}</option>`).join("")}</select></p>`).join("");
-  } else {
-    body += `<label>Число <input name="n" inputmode="decimal" value="${cur == null ? "" : esc(cur)}"></label>`;
-  }
-  $("exam-task").innerHTML = body + `<p><button class="btn" type="button" id="exam-save">Сохранить ответ</button></p>`;
-  $("exam-mark").textContent = it.marked ? "Снять «вернусь»" : "Вернусь";
-}
-let offset = 0, checking = false;  // сдвиг серверных часов относительно браузера
-function sync(v) { if (v && v.server_now) offset = new Date(v.server_now) - Date.now(); }
-// Ответ сервера применяется, только если за ним не ушёл более новый запрос; поле, которое ребёнок
-// правил после отправки, он не трогает (исправленный ввод уйдёт при следующем сохранении).
-async function refresh(j, toPos) {
-  if (!j || !j.exam) return false;
-  sync(j.exam);
-  if (j.stale) return false;
-  exam = j.exam;
-  // Любой ответ (сохранение, отметка, переход) не трогает поле, которое ребёнок правил после
-  // отправки запроса: состояние и номера принимаются, поле и позиция остаются; правка уйдёт
-  // при следующем сохранении (saveCurrent сверяет поле с сохранённым ответом).
-  if (j.snap && j.snap.at === shown && j.snap.val !== inputNow()) { renderNav(); return false; }
-  if (toPos) pos = toPos;
-  render();
-  return true;
-}
-// Несохранённый ввод на показанном задании сохраняется перед переходом, отметкой и сдачей. Правка
-// во время сохранения сохраняется следующим кругом; не устоялось за три круга - действие отменяется.
-async function saveCurrent() {
-  if (!exam || !shown) return true;
-  const empty = ["null", "[]", "{}", '""'];
-  for (let i = 0; i < 3; i++) {
-    const it = exam.items[shown - 1];
-    const now = inputNow();
-    const had = JSON.stringify(it.answer ?? null);
-    if (now === had || (empty.includes(now) && empty.includes(had))) return true;
-    const j = await call("/exam/answer", {attempt_id: exam.id, position: shown, answer: answerOf(it)});
-    if (!j) return false;
-    if (!j.stale) { exam = j.exam; sync(exam); }
-  }
-  return false;
-}
-async function open(p) {
-  if (!(await saveCurrent())) return;
-  await refresh(await call("/exam/open", {attempt_id: exam.id, position: p}), p);
-}
-document.addEventListener("click", async e => {
-  const t = e.target;
-  if (t.dataset && t.dataset.p) open(+t.dataset.p);
-  if (t.id === "exam-save") refresh(await call("/exam/answer", {attempt_id: exam.id, position: shown, answer: answerOf(exam.items[shown - 1])}));
-  if (t.id === "exam-mark" && await saveCurrent()) refresh(await call("/exam/mark", {attempt_id: exam.id, position: shown, marked: !exam.items[shown - 1].marked}));
-  if (t.id === "exam-submit" && confirm("Сдать вариант? После сдачи ответы изменить нельзя.") && await saveCurrent()) {
-    const j = await call("/exam/submit", {attempt_id: exam.id, confirm: true});
-    if (j) location.href = j.url;
-  }
-});
-setInterval(async () => {
-  if (!exam) return;
-  const s = Math.max(0, Math.round((new Date(exam.deadline_at) - (Date.now() + offset)) / 1000));
-  $("exam-left").textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  if (s === 0 && !checking) {  // истечение подтверждает сервер, а не часы браузера
-    checking = true;
-    const r = await fetch("/api/exam/current");
-    if (!r.ok) { location.href = "/exam"; return; }
-    sync(await r.json());
-    setTimeout(() => { checking = false; }, 2000);
-  }
+// Только отображение: время на странице и блокировка кнопок до перехода. Срок решает сервер.
+const left = document.getElementById("exam-left"), form = document.getElementById("exam-form");
+const offset = new Date(left.dataset.now) - Date.now();
+setInterval(() => {
+  const s = Math.max(0, Math.round((new Date(left.dataset.deadline) - (Date.now() + offset)) / 1000));
+  left.textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  if (s === 0) location.reload();
 }, 1000);
-(async () => {
-  const r = await fetch("/api/exam/current");
-  if (!r.ok) { location.href = "/exam"; return; }
-  exam = await r.json(); sync(exam); pos = exam.current;
-  const j = await call("/exam/open", {attempt_id: exam.id, position: pos});
-  if (j) await refresh(j);
-})();
+form.addEventListener("click", e => {
+  if (e.target.id === "exam-submit" && !confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) e.preventDefault();
+});
+form.addEventListener("submit", () => {
+  // Поля блокируются после того, как браузер собрал форму (выключенная кнопка не отправляется).
+  setTimeout(() => form.querySelectorAll("button, input:not([type=hidden]), select").forEach(x => { x.disabled = true; }), 0);
+});
+window.addEventListener("pageshow", e => { if (e.persisted) location.reload(); });
 </script>
 {% endblock %}
