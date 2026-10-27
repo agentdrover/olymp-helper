@@ -28,6 +28,7 @@
 
   var BUSY_SEL = ".helper-status[data-panel='thinking'], .helper-status[data-panel='second_channel']";
   var polling = false;
+  var gen = 0;  // поколение запросов: каждая отправка его увеличивает, опоздавший ответ отбрасывается
   var tickTimer = null;
   var tickBase = null;
 
@@ -64,6 +65,15 @@
 
   function field() { return document.getElementById("chat-input"); }
 
+  // Ответ устарел, если после запроса была новая отправка или в нём шаг старее того, что на экране.
+  function stale(mine, html) {
+    if (mine !== gen) return true;
+    var s = busyNode();
+    var now = s ? parseInt(s.getAttribute("data-step"), 10) : NaN;
+    var m = /data-step="(\d+)"/.exec(html);
+    return !isNaN(now) && m !== null && parseInt(m[1], 10) < now;
+  }
+
   function swap(html) {
     var wasOpen = zoomDialog() && zoomDialog().open;
     if (field()) draft = field().value;  // недописанный вопрос не пропадает при обновлении панели
@@ -76,11 +86,16 @@
   function refresh() {
     if (polling) return;
     polling = true;
+    var mine = gen;
     var s = busyNode();
     var step = s ? s.getAttribute("data-step") : null;
     fetch(base + "/tutor" + (step ? "?step=" + encodeURIComponent(step) : ""), { headers: { "HX-Request": "true" } })
       .then(function (r) { return r.text(); })
-      .then(function (html) { polling = false; swap(html); })
+      .then(function (html) {
+        polling = false;
+        if (stale(mine, html)) return schedule();  // опоздавший ответ не затирает экран
+        swap(html);
+      })
       .catch(function () { polling = false; schedule(); });  // сеть мигнула: опрос не обрывается
   }
 
@@ -92,11 +107,14 @@
 
   function send(act, body) {
     if (act in MODEL_ACTS && MODEL_ACTS[act]) setThinking();
+    var mine = ++gen;
     return fetch(base + "/" + act, {
       method: "POST",
       headers: { "Content-Type": "application/json", "HX-Request": "true" },
       body: JSON.stringify(body || {}),
-    }).then(function (r) { return r.text(); }).then(swap).catch(function () {
+    }).then(function (r) { return r.text(); }).then(function (html) {
+      if (!stale(mine, html)) swap(html);
+    }).catch(function () {
       var s = root.querySelector(".helper-status");
       if (s) s.textContent = "Помощник сейчас не отвечает — проверка по ключу работает.";
     });
@@ -130,6 +148,7 @@
     var text = box ? box.value.trim() : "";
     if (!text) { if (box) box.focus(); return; }
     setThinking();
+    var mine = ++gen;
     var started = false;
     fetch(base + "/chat", {
       method: "POST",
@@ -140,6 +159,7 @@
       return r.text();
     }).then(function (html) {
       // вопрос ушёл, если сервер начал шаг или сразу ответил и панель не сообщает об отказе
+      if (stale(mine, html)) return;
       var sent = started || html.indexOf('data-panel="idle"') !== -1;
       if (sent && mode === "chat") draft = "";
       else if (field()) draft = field().value;

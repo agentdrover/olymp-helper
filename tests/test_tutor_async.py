@@ -520,3 +520,14 @@ def test_an_older_steps_result_never_hides_a_newer_running_step(tmp_path):
         assert done["hints"] == 1 and done["panel"]["state"] == "idle"
         stale = c.get(f"/api/tasks/{tid}/tutor?step={step_a}", headers=CHILD).json()
         assert stale["panel"]["state"] == "idle"
+
+
+def test_the_client_discards_a_late_response_from_an_older_request():
+    js = STATIC.read_text(encoding="utf-8")
+    assert "var gen = 0;" in js and "mine !== gen" in js  # поколение запросов
+    assert js.count("++gen") == 2  # send() и sendQuestion() начинают новое поколение
+    assert "var mine = gen;" in js  # опрос запоминает поколение при старте
+    assert "if (stale(mine, html)) return schedule();" in js  # опрос: устаревший ответ не рисуется
+    assert "if (!stale(mine, html)) swap(html);" in js  # send
+    assert "if (stale(mine, html)) return;" in js  # sendQuestion
+    assert "parseInt(m[1], 10) < now" in js  # шаг старее показанного отбрасывается
