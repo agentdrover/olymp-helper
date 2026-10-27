@@ -557,4 +557,7 @@ def test_the_client_orders_responses_by_server_version_and_keeps_one_poll_chain(
     assert "if (!isOld(html)) swap(html);" in js  # send
     assert "if (isOld(html)) return extend();" in js  # sendQuestion
     assert "var gen" not in js and "pending" not in js and "recovering" not in js
-    assert "clearTimeout(timer);" in js and "var done = function () { fetching = false; plan(); };" in js
+    assert (
+        "clearTimeout(timer);" in js
+        and "var done = function () { fetching = false; plan(); };" in js
+    )
