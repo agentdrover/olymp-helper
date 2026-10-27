@@ -14,7 +14,8 @@ GENERATED = "generated"
 STATUSES = {
     "new": "не решал",
     "ok": "верно",
-    "model": "совпало с моделью",
+    "model": "совпало с моделью · не проверено",
+    "modelhint": "совпало с моделью, с подсказкой · не проверено",
     "hint": "с подсказкой",
     "wrong": "ошибся",
     "shown": "ответ показан",
@@ -32,8 +33,10 @@ def task_status(task, run) -> str:
         return "new"
     if run["state"] == "answer_shown":
         return "shown"
-    if run["state"] == "solved_unknown" and not run["hints"]:
-        return "model"  # без подтверждённого ключа слово «верно» не используется (SPEC 1.3, 2в)
+    if task["answer_key"] is None and state.is_terminal(run):
+        # без подтверждённого ключа слово «верно» не используется (SPEC 1.2, 1.3 2в):
+        # результат - ответ модели, не проверен, с подсказкой или без
+        return "modelhint" if run["hints"] else "model"
     if run["state"] == "solved" and not run["hints"]:
         return "ok"
     if run["hints"] or run["state"] == "hint3":
@@ -91,9 +94,11 @@ def _summary(rows) -> dict:
     counts = {"ok": 0, "hint": 0, "wrong": 0, "model": 0}
     done = first = 0
     for r in rows:
-        if r["status"] in ("ok", "hint", "wrong", "shown", "model"):
-            counts["wrong" if r["status"] == "shown" else r["status"]] += 1
-        if r["run"] is not None and state.is_terminal(r["run"]):
+        key = {"shown": "wrong", "modelhint": "model"}.get(r["status"], r["status"])
+        if key in counts:
+            counts[key] += 1
+        # «ответ показан» - не «разобрано» (SPEC 1.1)
+        if r["run"] is not None and state.is_terminal(r["run"]) and r["status"] != "shown":
             done += 1
         first += _first_try(r["run"])
     total = len(rows)

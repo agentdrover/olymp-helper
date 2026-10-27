@@ -154,3 +154,30 @@ def test_a_model_matched_task_is_not_called_correct_and_not_in_the_first_try_sha
         page = c.get("/tasks?block=021", headers=CHILD).text
         assert "совпало с моделью" in row(page, guess) and "верно" not in row(page, guess)
         assert "верно" in row(page, keyed) and "совпало" not in row(page, keyed)
+
+
+def test_keyless_results_are_marked_and_kept_out_of_the_first_try_share(tmp_path):
+    """Codex P2 на 4fb7b64: SPEC 1.1 (ответ показан - не разобрано), 1.2 (метка видна)."""
+    c, clock, _model = boot(tmp_path)
+    with c:
+        keyed = seed(tmp_path, key="Б")
+        hinted = seed(tmp_path, key=None, model_answer="Б")
+        shown = seed(tmp_path, key="Б", figure={"ack": False})  # key_only: ответ можно показать
+        for t in (keyed, hinted, shown):
+            put(tmp_path, t, topic="b10")
+        attempt(c, keyed, "Б")
+        c.get(f"/tasks/{hinted}")
+        clock.advance(61)
+        assert post(c, hinted, "hint", level=1).status_code == 200
+        attempt(c, hinted, "Б")  # совпало с моделью уже после подсказки
+        attempt(c, shown, "А")
+        attempt(c, shown, "А")
+        assert post(c, shown, "show-answer", confirm=True).status_code == 200
+        html = c.get("/tasks", headers=CHILD).text
+        b10 = card(html, "b10")
+        assert "разобрано 2 из 3" in b10  # ответ показан - не разобрано
+        assert "с 1-й попытки: 100%" in b10  # модельный результат в долю не входит
+        assert "совпало с моделью: 1 (не проверено)" in b10
+        page = c.get("/tasks?block=021", headers=CHILD).text
+        assert "совпало с моделью, с подсказкой · не проверено" in row(page, hinted)
+        assert "ответ показан" in row(page, shown)
