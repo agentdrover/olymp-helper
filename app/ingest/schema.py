@@ -2,6 +2,7 @@
 
 import re
 
+from app.ingest.answers import label_key
 from app.ingest.leaks import is_drawing, split_elements
 from app.ingest.topics import accept
 
@@ -10,6 +11,9 @@ NO_OPTIONS = ("open", "numeric")
 MAX_ANSWER_TEXT = 4000
 # Номер задания: цифры, необязательные «.цифры» и необязательная буква; ничего другого.
 NUMBER = re.compile(r"^\d{1,4}(\.\d{1,3})?[A-Za-zА-Яа-я]?$")
+# Вариант строкой: «А) текст», «А. текст», «а) текст», «1) текст», «A) текст». Обозначение -
+# одна буква или 1-2 цифры, затем «)» или «.» с пробелом. Порядок вариантов обозначением не служит.
+STRING_OPTION = re.compile(r"^\s*(\d{1,2}|[A-Za-zА-Яа-яЁё])(?:\)\s*|\.\s+)(\S.*)$", re.DOTALL)
 
 
 class InvalidStructure(Exception):
@@ -29,21 +33,39 @@ def _fail(where: str, what: str, safe: str | None = None):
     )
 
 
+def _option_item(item, where: str) -> tuple:
+    """(обозначение, текст) варианта: объект {label, text} или строка с однозначным обозначением."""
+    if isinstance(item, str):
+        found = STRING_OPTION.match(item)
+        if not found:
+            _fail(
+                where,
+                "вариант-строка без обозначения («А) текст»); обозначения по порядку не угадываются",
+            )
+        return found.group(1), found.group(2)
+    if not isinstance(item, dict):
+        _fail(where, "вариант должен быть объектом или строкой с обозначением")
+    return item.get("label"), item.get("text")
+
+
 def _option_list(value, where: str, minimum: int) -> list[dict]:
     if not isinstance(value, list) or len(value) < minimum:
         _fail(where, f"нужен список из {minimum} или больше вариантов")
     out, labels = [], set()
     for item in value:
-        if not isinstance(item, dict):
-            _fail(where, "вариант должен быть объектом")
-        label, text = item.get("label"), item.get("text")
+        label, text = _option_item(item, where)
         if not isinstance(label, str) or not label.strip():
             _fail(where, "у варианта нет обозначения")
         if not isinstance(text, str) or not text.strip():
             _fail(where, f"у варианта {label} нет текста", "у варианта нет текста")
-        if label in labels:
-            _fail(where, f"обозначение {label} повторяется", "обозначение варианта повторяется")
-        labels.add(label)
+        key = label_key(label)  # повтор ищется ПОСЛЕ нормализации: «А» и «A» - один вариант
+        if key in labels:
+            _fail(
+                where,
+                f"обозначение {label} повторяется: обозначения вариантов совпадают после нормализации",
+                "обозначения вариантов совпадают после нормализации (повтор)",
+            )
+        labels.add(key)
         out.append({"label": label.strip(), "text": text.strip()})
     return out
 

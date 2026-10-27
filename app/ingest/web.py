@@ -20,6 +20,7 @@ from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
 from app.ingest.names import clean_original_name
 from app.ingest.progress import progress_text
 from app.ingest.publish import child_view, is_published
+from app.ingest.reparse import UNAVAILABLE, reset_material, touched_materials
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
 from app.ingest.topics import load_catalog
@@ -91,6 +92,7 @@ FLASH = {
     "queued": "Сборник принят, разбор идёт.",
     "duplicate": "Файл уже загружен.",
     "requeued": "Файл перезапущен, разбор идёт.",
+    "reparse": "Сборник разбирается заново.",
 }
 
 
@@ -133,6 +135,7 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
         "FROM material m ORDER BY m.id DESC"
     ).fetchall()
     progress = ctx_of(request).progress
+    touched = touched_materials(conn)
     page = TEMPLATES.TemplateResponse(
         request,
         "parent/materials.html",
@@ -144,6 +147,8 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
                 )
                 for m in rows
             },
+            "touched": touched,
+            "unavailable": UNAVAILABLE,
             "flash": flash,
             "error": error,
         },
@@ -155,7 +160,7 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
 @parent.get("/parent/materials", response_class=HTMLResponse)
 def materials_page(request: Request, conn: Db, msg: str = "", id: int = 0):
     flash = FLASH.get(msg)
-    if msg in ("queued", "requeued"):  # «разбор идёт» - только пока он правда идёт
+    if msg in ("queued", "requeued", "reparse"):  # «разбор идёт» - только пока он правда идёт
         row = conn.execute("SELECT import_status FROM material WHERE id = ?", (id,)).fetchone()
         if row is None or row["import_status"] not in ("queued", "running"):
             flash = None
@@ -183,6 +188,28 @@ def upload_material(
     return RedirectResponse(
         f"/parent/materials?msg={code}&id={body['material_id']}", status_code=303
     )
+
+
+@parent.post("/parent/materials/{material_id}/reparse")
+def reparse_material(material_id: int, request: Request, conn: Db):
+    """«Разобрать заново»: только пока ни одно задание не тронуто (reparse.reset_material)."""
+    html = _wants_html(request)
+    try:
+        started = reset_material(ctx_of(request), conn, material_id)
+    except Refusal as exc:
+        if html:
+            return _materials_view(request, conn, error=exc.message, status=exc.status)
+        return _refusal(exc)
+    except sqlite3.Error:
+        message = "Не удалось начать разбор заново: база занята или повреждена. Повторите позже."
+        if html:
+            return _materials_view(request, conn, error=message, status=500)
+        return JSONResponse({"error": message}, status_code=500)
+    if started:
+        request.app.state.imports.submit(material_id)
+    if html:
+        return RedirectResponse(f"/parent/materials?msg=reparse&id={material_id}", status_code=303)
+    return JSONResponse({"material_id": material_id, "started": started}, status_code=202)
 
 
 def _store_upload(
