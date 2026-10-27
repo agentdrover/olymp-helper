@@ -15,6 +15,7 @@ SCENARIOS = [
     "post_failure_polls_and_shows_started_step",
     "post_failure_without_step_returns_to_idle",
     "stale_poll_does_not_overwrite_newer_step",
+    "lost_retry_reply_keeps_recovery_polling",
 ]
 
 

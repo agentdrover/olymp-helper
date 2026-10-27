@@ -28,6 +28,8 @@
 
   var BUSY_SEL = ".helper-status[data-panel='thinking'], .helper-status[data-panel='second_channel']";
   var polling = false;
+  var pending = 0;  // POST в пути: пока он идёт, опрос ничего не рисует, иначе он перекрасит панель раньше ответа
+  var recovering = 0;  // сколько опросов ещё сделать после потерянного ответа POST, даже если панель в покое
   var gen = 0;  // поколение запросов: каждая отправка его увеличивает, опоздавший ответ отбрасывается
   var tickTimer = null;
   var tickBase = null;
@@ -38,7 +40,8 @@
     clearTimeout(timer);
     var busy = busyNode();
     var wait = root.querySelector("[data-wait]");
-    if (busy) timer = setTimeout(refresh, POLL_MS);
+    if (busy) { recovering = 0; timer = setTimeout(refresh, POLL_MS); }
+    else if (recovering > 0) { recovering--; timer = setTimeout(refresh, POLL_MS); }
     else if (wait) timer = setTimeout(refresh, (parseInt(wait.getAttribute("data-wait"), 10) + 1) * 1000);
     startTick();
   }
@@ -106,7 +109,7 @@
   }
 
   function refresh() {
-    if (polling) return;
+    if (polling || pending) return;  // конец POST сам запустит опрос заново
     polling = true;
     var mine = gen;
     var s = busyNode();
@@ -115,7 +118,7 @@
       .then(function (r) { return r.text(); })
       .then(function (html) {
         polling = false;
-        if (stale(mine, html)) return schedule();  // опоздавший ответ не затирает экран
+        if (pending || stale(mine, html)) return schedule();  // опоздавший ответ не затирает экран
         swap(html, true);
       })
       .catch(function () { polling = false; schedule(); });  // сеть мигнула: опрос не обрывается
@@ -126,7 +129,16 @@
     var s = root.querySelector(".helper-status");
     if (s) s.textContent = "Помощник сейчас не отвечает — проверка по ключу работает.";
     root.querySelectorAll(".helper button").forEach(function (b) { b.disabled = false; });
+    recovering = Math.ceil(LONG_WAIT_S * 1000 / POLL_MS);  // ограниченное время, не бесконечный опрос
     schedule();
+  }
+
+  // Счётчик POST в пути; вызов возвращённой функции закрывает запрос ровно один раз.
+  function beginPost() {
+    var open = true;
+    pending++;
+    recovering = 0;
+    return function () { if (open) { open = false; pending--; } };
   }
 
   function setThinking() {
@@ -138,13 +150,14 @@
   function send(act, body) {
     if (act in MODEL_ACTS && MODEL_ACTS[act]) setThinking();
     var mine = ++gen;
+    var end = beginPost();
     return fetch(base + "/" + act, {
       method: "POST",
       headers: { "Content-Type": "application/json", "HX-Request": "true" },
       body: JSON.stringify(body || {}),
-    }).then(function (r) { return r.text(); }).then(function (html) {
+    }).then(function (r) { end(); return r.text(); }).then(function (html) {
       if (!stale(mine, html)) swap(html);
-    }).catch(lostReply);
+    }).catch(function () { end(); lostReply(); });
   }
 
   function collect(form) {
@@ -177,11 +190,13 @@
     setThinking();
     var mine = ++gen;
     var started = false;
+    var end = beginPost();
     fetch(base + "/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", "HX-Request": "true" },
       body: JSON.stringify({ message: text, mode: mode }),
     }).then(function (r) {
+      end();
       started = r.headers.get("X-Step-Started") === "1";
       return r.text();
     }).then(function (html) {
@@ -192,7 +207,7 @@
       else if (field()) draft = field().value;
       swap(html);
       if (sent && mode === "chat" && field()) field().value = "";
-    }).catch(lostReply);
+    }).catch(function () { end(); lostReply(); });
   }
 
   // ------------------------------------------------------------------------ голос

@@ -60,7 +60,7 @@ function matchOne(el, part) {
   return true;
 }
 
-const page = { els: [], focused: null, timers: [], now: 0, fetches: [], handlers: {}, posts: [] };
+const page = { els: [], focused: null, timers: [], now: 0, fetches: [], handlers: {}, posts: [], postq: [], getFn: null };
 
 const root = {
   getAttribute(k) { return k === "data-url" ? "/tasks/1" : null; },
@@ -82,7 +82,11 @@ const sandbox = {
   document, window: { isSecureContext: false }, console, parseInt, String, Array, Promise, JSON, Math, Date: { now: () => page.now },
   setTimeout(fn, ms) { const id = ++seq; page.timers.push({ id, fn, at: page.now + ms }); return id; },
   clearTimeout(id) { page.timers = page.timers.filter((t) => t.id !== id); },
-  fetch(url, opts) { page.posts.push({ url, method: (opts && opts.method) || "GET" }); return page.fetches.shift()(url, opts); },
+  fetch(url, opts) { page.posts.push({ url, method: (opts && opts.method) || "GET" }); const post = opts && opts.method === "POST";
+    if (post && page.postq.length) return page.postq.shift()(url, opts);
+    if (!post && page.getFn) return page.getFn(url, opts);
+    return page.fetches.shift()(url, opts);
+  },
   navigator: {}, encodeURIComponent,
 };
 
@@ -96,6 +100,7 @@ async function advance(ms) {
   await settle();
 }
 const ok = (html) => () => Promise.resolve({ text: () => Promise.resolve(html), headers: { get: () => null } });
+const ok_ = (fn) => () => Promise.resolve({ text: () => Promise.resolve(fn()), headers: { get: () => null } });
 const fail = () => Promise.reject(new TypeError("network"));
 const deferred = () => { let res; const p = new Promise((r) => { res = r; }); return { p, res }; };
 
@@ -174,6 +179,26 @@ const scenarios = {
     slow.res({ text: () => Promise.resolve(screen("idle")), headers: { get: () => null } });
     await settle();
     if (get(".helper-status").attrs["data-step"] !== "5") throw new Error("stale poll overwrote the newer step");
+  },
+  // Повтор после обрыва: опрос не перекрывает идущий POST, а потерянный ответ повтора не обрывает опрос.
+  async lost_retry_reply_keeps_recovery_polling() {
+    boot(screen("idle"));
+    let server = screen("idle");
+    page.getFn = ok_(() => server);
+    const retry = deferred();
+    page.postq.push(fail, () => retry.p);
+    const click = () => page.handlers.click[0]({ target: { closest: () => get("button") } });
+    click();  // первый POST обрывается до сервера
+    await settle();
+    click();  // ребёнок жмёт включённую кнопку до опроса: повтор идёт медленно
+    await settle();
+    await advance(2600);  // опрос в этот момент не должен перекрасить панель
+    server = screen("thinking", ' data-step="4"');  // сервер принял повтор, но ответ потерян
+    retry.res(Promise.reject(new TypeError("network")));
+    retry.p.catch(() => {});
+    await settle();
+    for (let i = 0; i < 3; i++) await advance(2600);
+    if (get(".helper-status").attrs["data-panel"] !== "thinking") throw new Error("started step never shown: " + get(".helper-status").attrs["data-panel"]);
   },
 };
 
