@@ -62,7 +62,15 @@ def test_blocks_show_progress_and_task_statuses(tmp_path):
         assert f'href="/tasks/{d}"' in b10  # первое нерешённое: d (ревизия сменилась)
         none = card(html, "none")
         assert "разобрано 0 из 1" in none and "с 1-й попытки: —" in none
-        assert "разобрано 0 из 0" in card(html, "b01")
+        assert 'id="block-b01"' in html and 'block-card" id="block-b01"' not in html
+        empty = html[html.index("Пока нет заданий:") :]
+        assert (
+            "Царство грибов" in empty and "Царство растений" not in empty
+        )  # пустые - строкой, не карточками
+        assert "разобрано 0 из 0" not in html
+        assert html.index('id="block-b05"') < html.index(
+            'id="block-none"'
+        )  # «Без темы» - после блоков
 
         page = c.get("/tasks?block=007", headers=CHILD).text
         assert listed(page) == {a, b, wrong}

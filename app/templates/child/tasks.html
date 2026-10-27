@@ -7,11 +7,17 @@
 </header>
 
 <form method="get" action="/tasks" class="panel search-form" role="search" aria-label="Поиск заданий">
-  <div class="fields">
+  <div class="search-row">
     <div class="field">
       <label for="f-q">Поиск: условие, номер или тема</label>
       <input id="f-q" type="search" name="q" value="{{ params.q }}">
     </div>
+    <button type="submit" class="btn">Найти</button>
+    {% if active %}<a href="/tasks">Сбросить</a>{% endif %}
+  </div>
+  <details class="filters"{% if params.theme or params.type or params.source or params.variant or params.status %} open{% endif %}>
+  <summary>Фильтры</summary>
+  <div class="fields filter-grid">
     <div class="field">
       <label for="f-theme">Блок или тема</label>
       <select id="f-theme" name="theme">
@@ -64,8 +70,7 @@
       </select>
     </div>
   </div>
-  <button type="submit" class="btn">Найти</button>
-  {% if active %}<a href="/tasks">Сбросить</a>{% endif %}
+  </details>
 </form>
 
 {% if active %}
@@ -99,8 +104,10 @@
 
 <section aria-labelledby="map-h">
   <h2 id="map-h">Карта блоков</h2>
+  {% set filled = blocks|selectattr("total")|list %}
+  {% set empty = blocks|rejectattr("total")|list %}
   <div class="block-grid">
-    {% for b in blocks %}
+    {% for b in filled %}
     <article class="card block-card" id="block-{{ b.code }}">
       <h3><a href="/tasks?block={{ b.pos }}">{{ b.title }}</a></h3>
       <p class="hint">разобрано {{ b.done }} из {{ b.total }}</p>
@@ -113,5 +120,10 @@
     </article>
     {% endfor %}
   </div>
+  {% if empty %}
+  <p class="hint empty-blocks">Пока нет заданий:
+    {% for b in empty %}<span class="chip" id="block-{{ b.code }}">{{ b.title }}</span>{% if not loop.last %}, {% endif %}{% endfor %}
+  </p>
+  {% endif %}
 </section>
 {% endblock %}

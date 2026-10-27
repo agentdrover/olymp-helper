@@ -200,3 +200,11 @@ dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max
 .bar-hint { background: #B8892B; }
 .bar-wrong { background: var(--warn); }
 .bar-model { background: var(--ink-3); opacity: .5; }
+.search-row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 8px; }
+.search-row .field { flex: 1 1 320px; }
+.filters summary { cursor: pointer; padding: 6px 0; color: var(--ink-3); }
+.filter-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 900px) { .filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .filter-grid { grid-template-columns: minmax(0, 1fr); } }
+.empty-blocks { margin-top: 16px; color: var(--ink-3); }
+.empty-blocks .chip { color: var(--ink-3); }
