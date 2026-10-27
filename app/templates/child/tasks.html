@@ -113,6 +113,7 @@
       <p class="hint">разобрано {{ b.done }} из {{ b.total }}</p>
       <p class="hint">с 1-й попытки: {% if b.first_share is none %}—{% else %}{{ b.first_share }}%{% endif %}</p>
       {% if b.model %}<p class="hint">совпало с моделью: {{ b.model }} (не проверено)</p>{% endif %}
+      {% if b.hint3_model %}<p class="hint">решение модели по подсказке 3: {{ b.hint3_model }} (не проверено)</p>{% endif %}
       <div class="bar" role="img" aria-label="верно {{ b.bar.ok }}%, с подсказкой {{ b.bar.hint }}%, ошибся {{ b.bar.wrong }}%, совпало с моделью {{ b.bar.model }}%">
         <span class="bar-ok" style="width: {{ b.bar.ok }}%"></span><span class="bar-hint" style="width: {{ b.bar.hint }}%"></span><span class="bar-wrong" style="width: {{ b.bar.wrong }}%"></span><span class="bar-model" style="width: {{ b.bar.model }}%"></span>
       </div>

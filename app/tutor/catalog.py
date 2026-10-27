@@ -8,6 +8,7 @@ outcomes.outcome_label: solved, подсказок нет, попытка пер
 from app.ingest.publish import child_view, is_published
 from app.search.tasks import search_published_tasks
 from app.tutor import state
+from app.tutor.outcomes import outcome_label
 
 NO_TOPIC = "none"
 GENERATED = "generated"
@@ -33,6 +34,8 @@ def task_status(task, run) -> str:
         return "new"
     if run["state"] == "answer_shown":
         return "shown"
+    if run["state"] == "hint3":
+        return "hint"  # без ключа ярлык строки - «решение модели по подсказке 3» (см. status_label)
     if task["answer_key"] is None and state.is_terminal(run):
         # без подтверждённого ключа слово «верно» не используется (SPEC 1.2, 1.3 2в):
         # результат - ответ модели, не проверен, с подсказкой или без
@@ -44,6 +47,17 @@ def task_status(task, run) -> str:
     if run["attempts"]:
         return "wrong"
     return "new"
+
+
+def unverified_hint3(task, run) -> bool:
+    """Решение по подсказке 3 без подтверждённого ключа: это решение модели, не «совпало»."""
+    return run is not None and run["state"] == "hint3" and task["answer_key"] is None
+
+
+def status_label(task, run, status: str) -> str:
+    if unverified_hint3(task, run):
+        return outcome_label(False, "hint3", run["attempts"], 3)
+    return STATUSES[status]
 
 
 def _first_try(run) -> bool:
@@ -92,8 +106,9 @@ def _rows(conn):
 
 def _summary(rows) -> dict:
     counts = {"ok": 0, "hint": 0, "wrong": 0, "model": 0}
-    done = first = 0
+    done = first = unverified = 0
     for r in rows:
+        unverified += unverified_hint3(r["task"], r["run"])
         key = {"shown": "wrong", "modelhint": "model"}.get(r["status"], r["status"])
         if key in counts:
             counts[key] += 1
@@ -102,13 +117,14 @@ def _summary(rows) -> dict:
             done += 1
         first += _first_try(r["run"])
     total = len(rows)
-    keyed_done = done - counts["model"]  # совпавшие с моделью в долю не входят
+    keyed_done = done - counts["model"] - unverified  # совпавшие с моделью в долю не входят
     share = round(100 * first / keyed_done) if keyed_done else None
     return {
         "total": total,
         "done": done,
         "first_try": first,
         "model": counts["model"],
+        "hint3_model": unverified,
         "first_share": share,
         "bar": {k: round(100 * v / total) if total else 0 for k, v in counts.items()},
     }
@@ -197,7 +213,7 @@ def filter_tasks(conn, *, q="", theme="", type="", source="", variant="", status
                 "type": task["type"],
                 "topic": r["topic_title"],
                 "status": r["status"],
-                "status_label": STATUSES[r["status"]],
+                "status_label": status_label(task, r["run"], r["status"]),
                 "snippet": " ".join(task["text"].split())[:140],
             }
         )

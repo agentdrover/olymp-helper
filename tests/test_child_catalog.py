@@ -181,3 +181,24 @@ def test_keyless_results_are_marked_and_kept_out_of_the_first_try_share(tmp_path
         page = c.get("/tasks?block=021", headers=CHILD).text
         assert "совпало с моделью, с подсказкой · не проверено" in row(page, hinted)
         assert "ответ показан" in row(page, shown)
+
+
+def test_keyless_hint3_is_the_models_solution_not_a_match(tmp_path):
+    """SPEC 1.3, 2в: без ключа решение по подсказке 3 - «решение модели», не «совпало»."""
+    c, clock, _model = boot(tmp_path)
+    with c:
+        solo = seed(tmp_path, key=None, model_answer="Б")
+        put(tmp_path, solo, topic="b10")
+        c.get(f"/tasks/{solo}")
+        attempt(c, solo, "А")
+        for level in (1, 2, 3):
+            clock.advance(61)
+            body = {"level": level, "confirm": True} if level == 3 else {"level": level}
+            assert post(c, solo, "hint", **body).status_code == 200
+        b10 = card(c.get("/tasks", headers=CHILD).text, "b10")
+        assert "разобрано 1 из 1" in b10 and "с 1-й попытки: —" in b10
+        assert "совпало с моделью:" not in b10
+        assert "решение модели по подсказке 3: 1 (не проверено)" in b10
+        page = c.get("/tasks?status=hint", headers=CHILD).text
+        assert "решение модели по подсказке 3, не проверено" in row(page, solo)
+        assert "совпало" not in row(page, solo)
