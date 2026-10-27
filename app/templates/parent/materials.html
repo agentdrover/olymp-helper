@@ -27,10 +27,10 @@
   </div>
 </form>
 <div class="panel"><table>
-  <thead><tr><th scope="col">№</th><th scope="col">Тип</th><th scope="col">Год</th><th scope="col">Вариант</th><th scope="col">Статус</th><th scope="col">Заданий</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
+  <thead><tr><th scope="col">№</th><th scope="col">Файл</th><th scope="col">Тип</th><th scope="col">Год</th><th scope="col">Вариант</th><th scope="col">Статус</th><th scope="col">Заданий</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
   {% for m in materials %}
   <tr>
-    <td>{{ m.id }}</td><td>{{ m.kind }}</td><td>{{ m.year or "" }}</td><td>{{ m.variant or "" }}</td>
+    <td>{{ m.id }}</td><td>{{ m.original_name or "" }}</td><td>{{ m.kind }}</td><td>{{ m.year or "" }}</td><td>{{ m.variant or "" }}</td>
     <td>{% if m.deleted_at %}файл удалён{% else %}{{ m.import_status }}{% endif %}{% if m.import_error %}{% if m.import_status == "done" %}<p class="warn-note">{{ m.import_error }}</p>{% else %}: <span class="err">{{ m.import_error }}</span>{% endif %}{% endif %}</td>
     <td>{{ m.tasks }}</td>
     <td>{% if m.import_status not in ("queued", "running") %}<a href="/parent/materials/{{ m.id }}/delete">Удалить</a>{% endif %}</td>

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from app.ingest import packs, review
 from app.ingest.figure_service import confirm_figure
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
+from app.ingest.names import clean_original_name
 from app.ingest.publish import child_view, is_published
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
@@ -151,8 +152,8 @@ def upload_material(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         cur = conn.execute(
-            "INSERT INTO material (file, sha256, kind, olympiad, year, stage, variant, pages_total) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO material (file, sha256, kind, olympiad, year, stage, variant, pages_total, "
+            "original_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 relative,
                 sha,
@@ -162,6 +163,7 @@ def upload_material(
                 stage.strip() or None,
                 variant.strip() or None,
                 pages,
+                clean_original_name(file.filename),
             ),
         )
         material_id = cur.lastrowid
