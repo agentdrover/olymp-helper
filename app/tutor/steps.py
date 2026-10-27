@@ -1,0 +1,113 @@
+"""Шаги с моделью в фоне (OH-T06b).
+
+POST проверяет запрос, берёт замок `Inflight`, записывает шаг (`tutor_step`) и отдаёт работу
+рабочему потоку со своим соединением с базой. Экран опрашивает сервер; «идёт ли шаг» и «сколько
+он идёт» берётся из замка и строки шага, а не из JS: страница после перезагрузки или другое
+устройство видит тот же шаг.
+
+Срок шага: один шаг - до 4 обращений к модели (текст, судья, перегенерация, судья), у каждого
+таймаут исполнителя 130 с; берём вдвое больше этого запаса. Шаг, который идёт дольше или потерял
+замок (перезапуск процесса), помечается failed при следующем чтении, замок снимается.
+"""
+
+import logging
+import threading
+from datetime import datetime
+
+from app.ingest.store import open_db
+from app.model.client import REQUEST_TIMEOUT_S
+
+log = logging.getLogger(__name__)
+
+STEP_CALLS = 4
+STEP_TIMEOUT_S = 2 * REQUEST_TIMEOUT_S * STEP_CALLS
+FAILED_TEXT = "Помощник не ответил вовремя"
+
+
+def start(conn, task_id: int, kind: str, now: datetime) -> int:
+    return conn.execute(
+        "INSERT INTO tutor_step (task_item_id, kind, started_at) VALUES (?, ?, ?)",
+        (task_id, kind, now.isoformat()),
+    ).lastrowid
+
+
+def finish(
+    conn, step_id: int, status: str, now: datetime, *, panel_state=None, notice=None, error=None
+):
+    """Итог пишет только шаг, который ещё идёт: просроченный шаг не перетирается позднее."""
+    conn.execute(
+        "UPDATE tutor_step SET status = ?, finished_at = ?, panel_state = ?, notice = ?, error = ? "
+        "WHERE id = ? AND status = 'running'",
+        (status, now.isoformat(), panel_state, notice, error, step_id),
+    )
+
+
+def get(conn, step_id: int):
+    return conn.execute("SELECT * FROM tutor_step WHERE id = ?", (step_id,)).fetchone()
+
+
+def latest(conn, task_id: int):
+    return conn.execute(
+        "SELECT * FROM tutor_step WHERE task_item_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
+    ).fetchone()
+
+
+def elapsed(row, now: datetime) -> int:
+    return max(0, int((now - datetime.fromisoformat(row["started_at"])).total_seconds()))
+
+
+def expire(conn, inflight, task_id: int, now: datetime) -> None:
+    """Зависший или потерявший замок шаг -> failed, замок снят (только если он этого шага)."""
+    row = conn.execute(
+        "SELECT * FROM tutor_step WHERE task_item_id = ? AND status = 'running' ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    for step in row:
+        holder = inflight.step_of(task_id)
+        lost = inflight.since(task_id) is None or (holder is not None and holder != step["id"])
+        late = elapsed(step, now) > STEP_TIMEOUT_S
+        if not (lost or late):
+            continue
+        reason = "timeout" if late else "interrupted"
+        finish(conn, step["id"], "failed", now, error=reason)
+        inflight.release(task_id, step["id"])
+
+
+class StepRunner:
+    """Запускает работу шага. sync=True (тесты) выполняет её в потоке запроса."""
+
+    def __init__(self, state, *, sync: bool = False):
+        self.state = state  # app.state: model, inflight, clock, ctx читаются при запуске
+        self.sync = sync
+        self.started = 0
+        self._threads: list[threading.Thread] = []
+
+    def submit(self, cls, task_id: int, step_id: int, name: str, args: tuple) -> None:
+        self.started += 1
+        worker = threading.Thread(
+            target=self._run, args=(cls, task_id, step_id, name, args), daemon=True,
+            name=f"step-{step_id}",
+        )  # fmt: skip
+        self._threads.append(worker)
+        worker.start()
+
+    def _run(self, cls, task_id, step_id, name, args) -> None:
+        st = self.state
+        conn = None
+        try:
+            conn = open_db(st.ctx.db_path)
+            flow = cls(conn, st.model, st.inflight, st.clock)
+            flow.step_id = step_id
+            flow.execute(task_id, name, args, reraise=False)
+        except BaseException:
+            log.exception("шаг %s не стартовал", step_id)
+            st.inflight.release(task_id, step_id)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def join(self, timeout: float = 20) -> None:
+        """Подождать рабочие потоки (тесты)."""
+        for worker in list(self._threads):
+            worker.join(timeout)
+        self._threads = [w for w in self._threads if w.is_alive()]

@@ -17,7 +17,7 @@ from app.ingest.store import atomic, get_task, open_db
 from app.ingest.web import child_notice_gate
 from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, current_role
-from app.tutor import state
+from app.tutor import state, steps
 from app.tutor.flow import Flow
 from app.tutor.state import Refused
 from app.tutor.today import build_today
@@ -95,22 +95,52 @@ def _is_fragment(request: Request) -> bool:
     return request.headers.get("hx-request") == "true"
 
 
-def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, notice=None):
+def _step_result(conn, task_id: int, step_id: int | None):
+    """(состояние панели, пояснение) окончившегося шага; (None, None), пока он идёт."""
+    row = steps.get(conn, step_id) if step_id else None
+    if row is None or row["task_item_id"] != task_id or row["status"] == "running":
+        return None, None
+    if row["status"] == "failed":
+        return "step_failed", None
+    return row["panel_state"], row["notice"]
+
+
+def _view_of(
+    request: Request, conn, task_id: int, *, step: int | None = None, flow=None, notice=None
+):
+    """Один словарь экрана для POST и GET. `step` - шаг, чей итог ждёт экран: когда он окончен,
+    его итог (отказ модели, пояснение) показывается один раз."""
     app = request.app
     task, material = _published(conn, task_id)
     run = state.active_run(conn, task)
-    clock = app.state.clock
-    view = build_view(
-        conn, task, material, run, clock(),
-        inflight=app.state.inflight,
-        panel_state=flow.panel_state if flow else None,
-        notice=notice or (flow.notice if flow else None),
+    shown, note = _step_result(conn, task_id, step)
+    if flow is not None:
+        shown = shown or flow.panel_state
+        note = note or flow.notice
+    return build_view(
+        conn, task, material, run, app.state.clock(),
+        inflight=app.state.inflight, panel_state=shown, notice=notice or note,
     )  # fmt: skip
+
+
+def _fragment(request: Request, view: dict):
+    return TEMPLATES.TemplateResponse(
+        request, "child/_tutor.html", {"v": view, "task": view["task"]}
+    )
+
+
+def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, notice=None):
+    view = _view_of(
+        request, conn, task_id, step=flow.step_id if flow else None, flow=flow, notice=notice
+    )
+    started = flow is not None and flow.launched
+    headers = {"X-Step-Started": "1"} if started else None
     if _is_fragment(request):
-        return TEMPLATES.TemplateResponse(
-            request, "child/_tutor.html", {"v": view, "task": view["task"]}
-        )
-    return JSONResponse(view)
+        resp = _fragment(request, view)
+        if headers:
+            resp.headers.update(headers)
+        return resp
+    return JSONResponse(view, headers=headers)
 
 
 def _refused(request: Request, conn, task_id: int, exc: Refused):
@@ -123,7 +153,7 @@ def _refused(request: Request, conn, task_id: int, exc: Refused):
 
 def _flow(request: Request, conn, cls=Flow) -> Flow:
     app = request.app
-    return cls(conn, app.state.model, app.state.inflight, app.state.clock)
+    return cls(conn, app.state.model, app.state.inflight, app.state.clock, app.state.steps)
 
 
 def _act(name: str, cls=Flow):
@@ -196,33 +226,16 @@ def dispute(flow: Flow, task_id, body, request):
 
 
 @router.get("/api/tasks/{task_id}/tutor", dependencies=[Depends(child_notice_gate)])
-def tutor_json(task_id: int, request: Request, conn: Db):
-    return _respond_json(request, conn, task_id)
-
-
-def _respond_json(request, conn, task_id):
-    task, material = _published(conn, task_id)
-    app = request.app
-    view = build_view(
-        conn, task, material, state.active_run(conn, task), app.state.clock(),
-        inflight=app.state.inflight,
-    )  # fmt: skip
-    return JSONResponse(view)
+def tutor_json(task_id: int, request: Request, conn: Db, step: int | None = None):
+    return JSONResponse(_view_of(request, conn, task_id, step=step))
 
 
 @router.get("/tasks/{task_id}/tutor", response_class=HTMLResponse)
-def tutor_fragment(task_id: int, request: Request, conn: Db):
-    task, material = _published(conn, task_id)
+def tutor_fragment(task_id: int, request: Request, conn: Db, step: int | None = None):
+    _published(conn, task_id)
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
-    app = request.app
-    view = build_view(
-        conn, task, material, state.active_run(conn, task), app.state.clock(),
-        inflight=app.state.inflight,
-    )  # fmt: skip
-    return TEMPLATES.TemplateResponse(
-        request, "child/_tutor.html", {"v": view, "task": view["task"]}
-    )
+    return _fragment(request, _view_of(request, conn, task_id, step=step))
 
 
 @router.get("/tasks/{task_id}", response_class=HTMLResponse)

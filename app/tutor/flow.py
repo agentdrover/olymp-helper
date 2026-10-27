@@ -12,6 +12,7 @@
 """
 
 import json
+import logging
 from datetime import datetime
 
 from app.chat import store as chat_store
@@ -19,7 +20,7 @@ from app.ingest.answers import display
 from app.ingest.publish import assist_mode
 from app.ingest.store import figure_of, get_task
 from app.model.client import MAX_REQUEST_BYTES, request_size
-from app.tutor import state
+from app.tutor import state, steps
 from app.tutor.guard import GENERIC, finish, render_markdown
 from app.tutor.panel import Inflight, failure_state, panel
 from app.tutor.prompts import (
@@ -34,12 +35,16 @@ from app.tutor.prompts import (
 )
 from app.tutor.state import DISPUTED, Refused
 
+log = logging.getLogger(__name__)
 LONG_TALK = "Слишком длинный разговор по этому заданию. Начни новое занятие или открой решение."
 
 
 class Flow:
-    def __init__(self, conn, model, inflight: Inflight, clock):
+    def __init__(self, conn, model, inflight: Inflight, clock, runner=None):
         self.conn = conn
+        self.runner = runner  # None или sync: работа шага идёт в потоке запроса
+        self.step_id: int | None = None
+        self.launched = False
         self.model = model
         self.inflight = inflight
         self.clock = clock
@@ -54,16 +59,59 @@ class Flow:
 
     # ----------------------------------------------------- шаг с обращением к модели
 
-    def _begin(self, task) -> bool:
+    def _begin(self, task, kind: str = "step") -> bool:
         """Весь шаг (генерация, судья, перегенерация) - один запрос в работе на задание."""
         last = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM event").fetchone()[0]
-        if self.inflight.acquire(task["id"], last):
-            return True
-        self.panel_state = "thinking"
-        return False
+        if not self.inflight.acquire(task["id"], last):
+            self.panel_state = "thinking"
+            return False
+        try:
+            self.step_id = steps.start(self.conn, task["id"], kind, self.now)
+        except BaseException:
+            self.inflight.release(task["id"])
+            raise
+        self.inflight.bind(task["id"], self.step_id)
+        return True
 
-    def _end(self, task) -> None:
-        self.inflight.release(task["id"])
+    def _end(self, task, error: str | None = None) -> None:
+        """Шаг закончен: итог в строку шага, потом замок (ни при каком исходе он не остаётся)."""
+        try:
+            if self.step_id is not None:
+                steps.finish(
+                    self.conn, self.step_id, "failed" if error else "done", self.now,
+                    panel_state=None if error else self.panel_state,
+                    notice=None if error else self.notice, error=error,
+                )  # fmt: skip
+        finally:
+            self.inflight.release(task["id"], self.step_id)
+
+    def _launch(self, task, name: str, *args) -> None:
+        """Работа шага с моделью: в фоне, когда есть рабочий поток, иначе тут же. Замок после
+        вызова принадлежит работе, не запросу."""
+        self.launched = True
+        if self.runner is None or self.runner.sync:
+            self.execute(task["id"], name, args, reraise=True)
+            return
+        try:
+            self.runner.submit(type(self), task["id"], self.step_id, name, args)
+        except BaseException as exc:
+            self._end(task, f"{type(exc).__name__}")
+            raise
+
+    def execute(self, task_id: int, name: str, args: tuple, *, reraise: bool) -> None:
+        """Тело шага. Любой сбой - failed в строке шага и свободный замок."""
+        task = get_task(self.conn, task_id)
+        error = None
+        failure: Exception | None = None
+        try:
+            getattr(self, name)(task, *args)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"[:300]
+            failure = exc
+            log.exception("шаг %s упал", self.step_id)
+        self._end(task, error)
+        if failure is not None and reraise:
+            raise failure
 
     def _ask(self, task, run, mode: str, **extra):
         """ModelOutput или None (тогда panel_state назван). Вызывать внутри _begin/_end."""
@@ -194,20 +242,24 @@ class Flow:
         попытка не записывается (иначе её разбор потерялся бы), ребёнок отправит снова."""
         task = get_task(self.conn, task_id)
         locked = assist_mode(task) == "hints"
-        if locked and not self._begin(task):
+        if locked and not self._begin(task, "attempt"):
             return None
         try:
             info = state.record_attempt(self.conn, task_id, raw, confidence, self.now)
             run = state.get_run(self.conn, info["run_id"])
             if locked and not (info["matched"] and not info["keyed"]):
-                if info["matched"]:
-                    self._explain_solution(task, run)
-                else:
-                    self._mistake(task, run)
+                self._launch(task, "_attempt_work", run["id"], bool(info["matched"]))
             return run["id"]
         finally:
-            if locked:
+            if locked and not self.launched:
                 self._end(task)
+
+    def _attempt_work(self, task, run_id: int, matched: bool) -> None:
+        run = state.get_run(self.conn, run_id)
+        if matched:
+            self._explain_solution(task, run)
+        else:
+            self._mistake(task, run)
 
     def _mistake(self, task, run) -> None:
         out = self._ask(task, run, "mistake")
@@ -244,29 +296,36 @@ class Flow:
             return
         run = state.begin_hint(self.conn, task_id, level, confirm, self.now)
         level = run["hints"] + 1
-        if not self._begin(task):
+        if not self._begin(task, f"hint{level}"):
             return
         try:
             if level == 3:
                 state.open_hint3(self.conn, task_id, run["id"], self.now)
-                run = state.get_run(self.conn, run["id"])
                 if state.reference(task)[1]:
-                    self._explain_solution(task, run)
+                    self._launch(task, "_solution_work", run["id"])
                 return
-            out = self._ask(task, run, f"hint{level}")
-            if out is None:
-                return
-            if self._discrepant(task, run, out):
-                html, reason, unc = (
-                    render_markdown(GENERIC[f"hint{level}"]), "discrepancy", out.uncertainty,
-                )  # fmt: skip
-            else:
-                html, reason, unc = self._vet(task, run, f"hint{level}", out)
-            state.store_hint(
-                self.conn, run["id"], level, html, reason is not None, unc, self.now, reason
-            )
+            self._launch(task, "_hint_work", run["id"], level)
         finally:
-            self._end(task)
+            if not self.launched:
+                self._end(task)
+
+    def _solution_work(self, task, run_id: int) -> None:
+        self._explain_solution(task, state.get_run(self.conn, run_id))
+
+    def _hint_work(self, task, run_id: int, level: int) -> None:
+        run = state.get_run(self.conn, run_id)
+        out = self._ask(task, run, f"hint{level}")
+        if out is None:
+            return
+        if self._discrepant(task, run, out):
+            html, reason, unc = (
+                render_markdown(GENERIC[f"hint{level}"]), "discrepancy", out.uncertainty,
+            )  # fmt: skip
+        else:
+            html, reason, unc = self._vet(task, run, f"hint{level}", out)
+        state.store_hint(
+            self.conn, run["id"], level, html, reason is not None, unc, self.now, reason
+        )
 
     def explain(self, task_id: int, mode) -> None:
         if mode not in EXPLAIN_MODES:
@@ -282,35 +341,41 @@ class Flow:
         if keyed and state.is_disputed(self.conn, task):
             self.notice = DISPUTED[0].upper() + DISPUTED[1:] + "."
             return
-        label, instruction = EXPLAIN_MODES[mode]
-        solution = json.loads(run["solution_json"])
-        if not self._begin(task):
+        if not self._begin(task, f"explain_{mode}"):
             return
         try:
-            out = self._ask(
-                task, run, f"explain_{mode}", key_text=solution["answer"], explain=instruction
-            )
-            if out is None:
-                return
-            # свежее объяснение расходится с ключом: родителю, не ребёнку
-            if self._discrepant(task, run, out):
-                state.merge_solution(self.conn, run["id"], disputed=True, explanation_html=None)
-                self.notice = DISPUTED[0].upper() + DISPUTED[1:] + "."
-                return
-            html, reason = self._safe(task, out.explanation, "explain", reveal=True)
-            if not reason and not keyed:
-                # без ключа судья отдельно проверяет утверждения о верности; без судьи - ничего
-                verdict = self._verdict(task, run, out.explanation, "claims")
-                if verdict is None:
-                    reason = "judge_unavailable"
-                elif verdict[0]:
-                    reason = "judge"
-            if reason:
-                self.notice = "Объяснение не получилось, попробуй другой способ."
-                return
-            state.add_explain(self.conn, run["id"], mode, label, html, out.uncertainty, self.now)
+            self._launch(task, "_explain_work", run["id"], mode)
         finally:
-            self._end(task)
+            if not self.launched:
+                self._end(task)
+
+    def _explain_work(self, task, run_id: int, mode: str) -> None:
+        run = state.get_run(self.conn, run_id)
+        keyed = state.reference(task)[1]
+        label, instruction = EXPLAIN_MODES[mode]
+        solution = json.loads(run["solution_json"])
+        out = self._ask(
+            task, run, f"explain_{mode}", key_text=solution["answer"], explain=instruction
+        )
+        if out is None:
+            return
+        # свежее объяснение расходится с ключом: родителю, не ребёнку
+        if self._discrepant(task, run, out):
+            state.merge_solution(self.conn, run["id"], disputed=True, explanation_html=None)
+            self.notice = DISPUTED[0].upper() + DISPUTED[1:] + "."
+            return
+        html, reason = self._safe(task, out.explanation, "explain", reveal=True)
+        if not reason and not keyed:
+            # без ключа судья отдельно проверяет утверждения о верности; без судьи - ничего
+            verdict = self._verdict(task, run, out.explanation, "claims")
+            if verdict is None:
+                reason = "judge_unavailable"
+            elif verdict[0]:
+                reason = "judge"
+        if reason:
+            self.notice = "Объяснение не получилось, попробуй другой способ."
+            return
+        state.add_explain(self.conn, run["id"], mode, label, html, out.uncertainty, self.now)
 
     def show_answer(self, task_id: int, confirm: bool) -> None:
         state.show_answer(self.conn, task_id, confirm, self.now)

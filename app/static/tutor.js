@@ -5,7 +5,9 @@
   var root = document.getElementById("tutor");
   if (!root) return;
   var base = root.getAttribute("data-url");
-  var THINKING = "Думаю… обычно 5–15 с";
+  var POLL_MS = 2500;       // опрос сервера, пока шаг идёт: цепочка setTimeout, запросы не накладываются
+  var LONG_WAIT_S = 60;
+  var LONG_TEXT = "Модель отвечает долго, жду…";
   var MODEL_ACTS = { attempt: 1, hint: 1, explain: 1, repeat: 0, chat: 1 };
   var MAX_RECORD_MS = 30000;
   var MAX_BYTES = 2 * 1024 * 1024;
@@ -24,12 +26,40 @@
     if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
   }
 
+  var BUSY_SEL = ".helper-status[data-panel='thinking'], .helper-status[data-panel='second_channel']";
+  var polling = false;
+  var tickTimer = null;
+  var tickBase = null;
+
+  function busyNode() { return root.querySelector(BUSY_SEL); }
+
   function schedule() {
     clearTimeout(timer);
-    var busy = root.querySelector(".helper-status[data-panel='thinking'], .helper-status[data-panel='second_channel']");
+    var busy = busyNode();
     var wait = root.querySelector("[data-wait]");
-    if (busy) timer = setTimeout(refresh, 2000);
+    if (busy) timer = setTimeout(refresh, POLL_MS);
     else if (wait) timer = setTimeout(refresh, (parseInt(wait.getAttribute("data-wait"), 10) + 1) * 1000);
+    startTick();
+  }
+
+  // Секунды ожидания идут по часам сервера: он отдаёт, сколько шаг уже идёт; здесь они только тикают.
+  function renderTick() {
+    var s = busyNode();
+    if (!s || s.getAttribute("data-panel") !== "thinking" || tickBase === null) return;
+    var n = tickBase.elapsed + Math.floor((Date.now() - tickBase.at) / 1000);
+    s.textContent = n >= LONG_WAIT_S ? LONG_TEXT : "Думаю… " + n + " с";
+  }
+
+  function startTick() {
+    clearTimeout(tickTimer);
+    var s = busyNode();
+    var e = s ? parseInt(s.getAttribute("data-elapsed"), 10) : NaN;
+    if (!s || isNaN(e)) { tickBase = null; return; }
+    tickBase = { elapsed: e, at: Date.now() };
+    (function loop() {
+      renderTick();
+      tickTimer = setTimeout(loop, 1000);
+    })();
   }
 
   function field() { return document.getElementById("chat-input"); }
@@ -44,13 +74,19 @@
   }
 
   function refresh() {
-    fetch(base + "/tutor", { headers: { "HX-Request": "true" } })
-      .then(function (r) { return r.text(); }).then(swap).catch(function () {});
+    if (polling) return;
+    polling = true;
+    var s = busyNode();
+    var step = s ? s.getAttribute("data-step") : null;
+    fetch(base + "/tutor" + (step ? "?step=" + encodeURIComponent(step) : ""), { headers: { "HX-Request": "true" } })
+      .then(function (r) { return r.text(); })
+      .then(function (html) { polling = false; swap(html); })
+      .catch(function () { polling = false; schedule(); });  // сеть мигнула: опрос не обрывается
   }
 
   function setThinking() {
     var s = root.querySelector(".helper-status");
-    if (s) { s.textContent = THINKING; s.setAttribute("data-panel", "thinking"); }
+    if (s) { s.textContent = "Думаю…"; s.setAttribute("data-panel", "thinking"); }
     root.querySelectorAll(".helper button").forEach(function (b) { b.disabled = true; });
   }
 
@@ -94,13 +130,17 @@
     var text = box ? box.value.trim() : "";
     if (!text) { if (box) box.focus(); return; }
     setThinking();
+    var started = false;
     fetch(base + "/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", "HX-Request": "true" },
       body: JSON.stringify({ message: text, mode: mode }),
-    }).then(function (r) { return r.text(); }).then(function (html) {
-      // вопрос ушёл и получил ответ, если панель не занята и не сообщает об отказе
-      var sent = html.indexOf('data-panel="idle"') !== -1;
+    }).then(function (r) {
+      started = r.headers.get("X-Step-Started") === "1";
+      return r.text();
+    }).then(function (html) {
+      // вопрос ушёл, если сервер начал шаг или сразу ответил и панель не сообщает об отказе
+      var sent = started || html.indexOf('data-panel="idle"') !== -1;
       if (sent && mode === "chat") draft = "";
       else if (field()) draft = field().value;
       swap(html);

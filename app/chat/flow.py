@@ -51,13 +51,17 @@ class ChatFlow(Flow):
         if assist_mode(task) == "key_only":
             self.panel_state = "no_hints"  # как у разбора: без подсказок модель не зовётся
             return
-        if not self._begin(task):
+        if not self._begin(task, mode):
             return
         try:
-            run = state.active_run(self.conn, task, self.now)
-            self._exchange(task, run, mode, message)
+            self._launch(task, "_chat_work", mode, message)
         finally:
-            self._end(task)
+            if not self.launched:
+                self._end(task)
+
+    def _chat_work(self, task, mode: str, message: str) -> None:
+        run = state.active_run(self.conn, task, self.now)
+        self._exchange(task, run, mode, message)
 
     # ------------------------------------------------------------------ обмен
 

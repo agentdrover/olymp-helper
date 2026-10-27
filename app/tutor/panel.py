@@ -7,19 +7,33 @@ T06 делает панель и состояния; T07 (чат, голос) и
 
 import threading
 
+LONG_WAIT_S = 60  # после этого срока вместо секунд - «Модель отвечает долго, жду…»
+
 TEXTS = {
     "idle": "",
-    "thinking": "Думаю… обычно 5–15 с",
+    "thinking": "Думаю…",
     "second_channel": "Основной канал не ответил, пробую второй",
     "down": "Помощник сейчас не отвечает — проверка по ключу работает.",
     "limit": "На сегодня всё: вопросы к помощнику кончились — проверка по ключу работает.",
+    "step_failed": "Помощник не ответил вовремя. Попробуй ещё раз — проверка по ключу работает.",
     "no_hints": "К этому заданию подсказок нет — проверь ответ по ключу.",
 }
 BUSY = ("thinking", "second_channel")
 
 
-def panel(state: str) -> dict:
-    return {"state": state, "text": TEXTS[state], "busy": state in BUSY}
+LONG_WAIT = "Модель отвечает долго, жду…"
+
+
+def panel(state: str, *, elapsed_s: int | None = None, started_at=None, step=None) -> dict:
+    """Состояние панели. Пока шаг идёт, ответ несёт номер шага, время его старта и сколько он
+    уже идёт (по часам сервера): «Думаю… N с», после минуты - «Модель отвечает долго, жду…»."""
+    text = TEXTS[state]
+    out = {"state": state, "text": text, "busy": state in BUSY}
+    if state in BUSY and step is not None and elapsed_s is not None:
+        if state == "thinking":
+            out["text"] = LONG_WAIT if elapsed_s >= LONG_WAIT_S else f"Думаю… {elapsed_s} с"
+        out.update(step=step, started_at=started_at, elapsed_s=elapsed_s)
+    return out
 
 
 class Inflight:
@@ -33,16 +47,31 @@ class Inflight:
         with self._lock:
             if key in self._items:
                 return False
-            self._items[key] = since_event
+            self._items[key] = [since_event, None]
             return True
 
-    def release(self, key) -> None:
+    def bind(self, key, step_id: int) -> None:
         with self._lock:
-            self._items.pop(key, None)
+            if key in self._items:
+                self._items[key][1] = step_id
+
+    def release(self, key, step_id: int | None = None) -> None:
+        """С номером шага снимает замок только если он этого шага: опоздавший поток не снимет
+        замок следующего шага."""
+        with self._lock:
+            item = self._items.get(key)
+            if item is not None and (step_id is None or item[1] in (None, step_id)):
+                del self._items[key]
 
     def since(self, key) -> int | None:
         with self._lock:
-            return self._items.get(key)
+            item = self._items.get(key)
+            return None if item is None else item[0]
+
+    def step_of(self, key) -> int | None:
+        with self._lock:
+            item = self._items.get(key)
+            return None if item is None else item[1]
 
 
 def live_state(conn, inflight: Inflight, key) -> str:

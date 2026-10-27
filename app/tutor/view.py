@@ -8,8 +8,8 @@ from datetime import datetime
 
 from app.chat import store as chat_store
 from app.ingest.publish import assist_mode, child_view, has_key
-from app.tutor import state
-from app.tutor.panel import Inflight, live_state, panel
+from app.tutor import state, steps
+from app.tutor.panel import BUSY, Inflight, live_state, panel
 
 
 def _solution(run) -> dict | None:
@@ -50,10 +50,21 @@ def build_view(
     analysis = None
     if run and not terminal and run["analysis_json"]:
         analysis = json.loads(run["analysis_json"])["html"]
+    steps.expire(conn, inflight, task["id"], now)  # зависший шаг не держит панель вечно
     live = live_state(conn, inflight, task["id"])
     shown = panel_state if panel_state and panel_state != "idle" else live
-    if assist == "key_only" and shown == "idle":
-        shown = "idle"
+    running = steps.get(conn, inflight.step_of(task["id"])) if shown in BUSY else None
+    if running is None and shown not in BUSY and not notice:
+        last_step = steps.latest(conn, task["id"])
+        if shown == "idle" and last_step and last_step["status"] == "failed":
+            shown = "step_failed"  # шаг не закончился (сбой, срок, перезапуск): не «думаю» вечно
+    extra = {}
+    if running is not None and running["status"] == "running":
+        extra = {
+            "step": running["id"],
+            "started_at": running["started_at"],
+            "elapsed_s": steps.elapsed(running, now),
+        }
     correction = None
     if not terminal and attempts == 0:
         stale = conn.execute(
@@ -97,7 +108,7 @@ def build_view(
             "needs_confirm": nxt == 3,
         },
         "can_show_answer": assist == "key_only" and not terminal and attempts >= state.BASE_CHECKS,
-        "panel": panel(shown),
+        "panel": panel(shown, **extra),
         "notice": notice,
         "task": child_view(task, material),
     }
