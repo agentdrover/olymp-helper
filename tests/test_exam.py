@@ -828,7 +828,7 @@ def test_nothing_writes_inside_a_read_snapshot(tmp_path, monkeypatch):
         a = _submitted_attempt(c)
         monkeypatch.setattr(seq, "read_snapshot", guarded)
         urls = ("/today", "/my", "/api/my", f"/api/my/sessions/{sid}", f"/api/exam/results/{a}",
-                "/api/exam", f"/tasks/{task}", f"/api/tasks/{task}/tutor")  # fmt: skip
+                "/api/exam", f"/tasks/{task}", f"/api/tasks/{task}/tutor", "/tasks", "/tasks?status=wrong")  # fmt: skip
         for url in urls:
             before = len(entered)
             r = c.get(url, headers=CHILD)
@@ -837,3 +837,36 @@ def test_nothing_writes_inside_a_read_snapshot(tmp_path, monkeypatch):
         before = len(entered)
         assert c.post("/session/finish", json={}, headers=CHILD).status_code == 200
         assert len(entered) > before
+
+
+def test_task_map_hides_statuses_of_the_running_variant(tmp_path):
+    """Карта заданий (#2110) не выдаёт «ошибся/верно» заданий идущего варианта ни в строках,
+    ни в сводке, ни через фильтр по статусу."""
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        assert attempt(c, task, "А", "sure").status_code == 200
+        before = c.get("/tasks?status=wrong", headers=CHILD)
+        assert "status-wrong" in before.text and f"/tasks/{task}" in before.text  # контроль
+        assert start_real(c).status_code == 200
+        for url in ("/tasks", "/tasks?status=wrong", "/tasks?status=ok", "/tasks?q=цитология"):
+            r = c.get(url, headers=CHILD)
+            assert r.status_code == 200, url
+            assert "status-wrong" not in r.text and "status-hint" not in r.text, url
+            if "status=" in url:
+                assert 'class="pill' not in r.text, url  # строк с заданиями нет
+
+
+def test_parent_preview_is_not_reachable_for_the_child(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        r = c.get(f"/parent/tasks/{task}/figure-preview.png", headers=CHILD)
+        assert r.status_code in (401, 403) and r.headers.get("content-type") != "image/png"
+        plain = c.get(f"/tasks/{task}", headers=CHILD)
+        for query in ("preview=1", "preview=true", "mode=preview"):
+            r = c.get(f"/tasks/{task}?{query}", headers=CHILD)
+            assert r.status_code == 200 and 'data-act="attempt"' in r.text, query
+            assert r.text.count("disabled") == plain.text.count("disabled"), query

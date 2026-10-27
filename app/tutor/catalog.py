@@ -5,6 +5,7 @@
 outcomes.outcome_label: solved, подсказок нет, попытка первая. Только опубликованные задания;
 ключей, ответов модели и заметок здесь нет."""
 
+from app import exam
 from app.ingest.publish import child_view, is_published
 from app.search.tasks import search_published_tasks
 from app.tutor import state
@@ -74,8 +75,11 @@ def _rows(conn):
     """Опубликованные задания с прогоном по текущей ревизии, статусом и блоком."""
     topics = {r["code"]: r for r in conn.execute("SELECT * FROM topic")}
     parents = {code: row["parent_code"] for code, row in topics.items()}
+    locked = exam.running_task_ids(conn)  # идёт олимпиада: статусов её заданий ребёнок не видит
     runs = {}
     for run in conn.execute("SELECT * FROM tutor_run ORDER BY id"):
+        if run["task_item_id"] in locked:
+            continue
         runs[run["task_item_id"]] = run  # последний прогон каждого задания
     materials = {m["id"]: m for m in conn.execute("SELECT * FROM material")}
     out = []
