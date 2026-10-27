@@ -13,9 +13,12 @@
 <script>
 let exam = null, pos = 1, shown = 0;
 let gen = 0;  // номер последнего отправленного запроса: ответ на более старый ничего не перерисовывает
+// Ввод на показанном задании (JSON) - для любого запроса запоминается в момент отправки.
+const inputNow = () => (exam && shown ? JSON.stringify(answerOf(exam.items[shown - 1]) ?? null) : null);
 const $ = id => document.getElementById(id);
 async function call(path, body) {
   const my = ++gen;
+  const snap = {at: shown, val: inputNow()};  // что было в поле, когда запрос ушёл
   const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
   const j = await r.json();
   if (!r.ok) {
@@ -25,8 +28,7 @@ async function call(path, body) {
   }
   if (my !== gen) j.stale = true;  // после этого запроса ушёл более новый
   else $("exam-msg").textContent = "";
-  j.sent = body.answer;
-  j.at = body.position;
+  j.snap = snap;
   return j;
 }
 function answerOf(it) {
@@ -38,6 +40,8 @@ function answerOf(it) {
 }
 function renderNav() {
   $("exam-nav").innerHTML = exam.items.map(x => `<button type="button" data-p="${x.position}"${x.position === pos ? ' aria-current="true"' : ""}>${x.position}${x.answer != null && x.answer !== "" ? " ✓" : ""}${x.marked ? " ⚑" : ""}</button>`).join(" ");
+  const cur = exam.items[shown - 1];
+  if (cur) $("exam-mark").textContent = cur.marked ? "Снять «вернусь»" : "Вернусь";
 }
 function render() {
   const it = exam.items[pos - 1];
@@ -63,35 +67,38 @@ let offset = 0, checking = false;  // сдвиг серверных часов �
 function sync(v) { if (v && v.server_now) offset = new Date(v.server_now) - Date.now(); }
 // Ответ сервера применяется, только если за ним не ушёл более новый запрос; поле, которое ребёнок
 // правил после отправки, он не трогает (исправленный ввод уйдёт при следующем сохранении).
-async function refresh(j) {
-  if (!j || !j.exam) return;
+async function refresh(j, toPos) {
+  if (!j || !j.exam) return false;
   sync(j.exam);
-  if (j.stale) return;
+  if (j.stale) return false;
   exam = j.exam;
-  if (j.sent !== undefined && j.at === shown && shown === pos
-      && JSON.stringify(answerOf(exam.items[shown - 1]) ?? null) !== JSON.stringify(j.sent ?? null)) {
-    renderNav();
-    return;
-  }
+  // Любой ответ (сохранение, отметка, переход) не трогает поле, которое ребёнок правил после
+  // отправки запроса: состояние и номера принимаются, поле и позиция остаются; правка уйдёт
+  // при следующем сохранении (saveCurrent сверяет поле с сохранённым ответом).
+  if (j.snap && j.snap.at === shown && j.snap.val !== inputNow()) { renderNav(); return false; }
+  if (toPos) pos = toPos;
   render();
+  return true;
 }
-// Несохранённый ввод на показанном задании сохраняется перед переходом, отметкой и сдачей.
+// Несохранённый ввод на показанном задании сохраняется перед переходом, отметкой и сдачей. Правка
+// во время сохранения сохраняется следующим кругом; не устоялось за три круга - действие отменяется.
 async function saveCurrent() {
   if (!exam || !shown) return true;
-  const it = exam.items[shown - 1];
-  const now = JSON.stringify(answerOf(it) ?? null);
-  const had = JSON.stringify(it.answer ?? null);
   const empty = ["null", "[]", "{}", '""'];
-  if (now === had || (empty.includes(now) && empty.includes(had))) return true;
-  const j = await call("/exam/answer", {attempt_id: exam.id, position: shown, answer: answerOf(it)});
-  if (!j) return false;
-  if (!j.stale) { exam = j.exam; sync(exam); }
-  return true;
+  for (let i = 0; i < 3; i++) {
+    const it = exam.items[shown - 1];
+    const now = inputNow();
+    const had = JSON.stringify(it.answer ?? null);
+    if (now === had || (empty.includes(now) && empty.includes(had))) return true;
+    const j = await call("/exam/answer", {attempt_id: exam.id, position: shown, answer: answerOf(it)});
+    if (!j) return false;
+    if (!j.stale) { exam = j.exam; sync(exam); }
+  }
+  return false;
 }
 async function open(p) {
   if (!(await saveCurrent())) return;
-  const j = await call("/exam/open", {attempt_id: exam.id, position: p});
-  if (j) { pos = p; await refresh(j); }
+  await refresh(await call("/exam/open", {attempt_id: exam.id, position: p}), p);
 }
 document.addEventListener("click", async e => {
   const t = e.target;

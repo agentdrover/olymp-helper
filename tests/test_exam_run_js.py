@@ -15,6 +15,10 @@ SCENARIOS = [
     "save_reply_keeps_newer_input",
     "out_of_order_replies_keep_the_last_request",
     "single_reply_still_renders",
+    "mark_reply_keeps_newer_input",
+    "navigation_reply_keeps_newer_input",
+    "navigation_without_edit_switches",
+    "mark_without_edit_renders",
 ]
 
 

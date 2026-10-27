@@ -753,3 +753,87 @@ def test_screens_with_past_work_started_between_the_check_and_the_read_hide_the_
         r = c.post("/session/finish", json={}, headers=CHILD)
         assert fired and r.status_code == 200, r.text
         assert not any(m in r.text for m in marks)
+
+
+def _start_after_first_read(tmp_path, clock, monkeypatch):
+    """Вариант коммитится ВНУТРИ снимка: сразу после чтения замка (первое чтение снимка)."""
+    real, fired = exam.running_task_ids, []
+
+    def racing(conn):
+        found = real(conn)
+        if not fired:
+            fired.append(1)
+            other = open_db(tmp_path / "olymp.db")
+            try:
+                exam.start(other, clock(), mode="real", material_id=1)
+            finally:
+                other.close()
+        return found
+
+    monkeypatch.setattr(exam, "running_task_ids", racing)
+    return fired
+
+
+def test_my_summaries_survive_a_variant_committed_inside_the_snapshot(tmp_path, monkeypatch):
+    c, clock, _ = boot(tmp_path)
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        assert attempt(c, task, "А", "sure").status_code == 200
+        sid = c.post("/session/finish", json={}, headers=CHILD).json()["session_id"]
+        for url in ("/my", "/api/my", f"/api/my/sessions/{sid}"):
+            sql(tmp_path, "UPDATE exam_attempt SET status = 'submitted', end_reason = 'manual'")
+            fired = _start_after_first_read(tmp_path, clock, monkeypatch)
+            r = c.get(url, headers=CHILD)  # запись внутри снимка упала бы «database is locked»
+            assert fired and r.status_code == 200, url
+            monkeypatch.undo()
+
+
+def test_nothing_writes_inside_a_read_snapshot(tmp_path, monkeypatch):
+    """Каждый маршрут со снимком чтения проходит с запретом INSERT/UPDATE/DELETE на время снимка:
+    запись внутри снимка падает «database is locked», если чужой коммит успел раньше."""
+    import sqlite3
+
+    from app.tutor import seq
+
+    real, entered = seq.read_snapshot, []
+
+    def guarded(conn):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def cm():
+            def deny(action, *_):
+                writes = (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE)
+                return sqlite3.SQLITE_DENY if action in writes else sqlite3.SQLITE_OK
+
+            with real(conn):
+                entered.append(1)
+                conn.set_authorizer(deny)
+                try:
+                    yield
+                finally:
+                    conn.set_authorizer(None)
+
+        return cm()
+
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        task = 1
+        save_format(c, tmp_path)
+        assert attempt(c, task, "А", "sure").status_code == 200
+        sid = c.post("/session/finish", json={}, headers=CHILD).json()["session_id"]
+        a = _submitted_attempt(c)
+        monkeypatch.setattr(seq, "read_snapshot", guarded)
+        urls = ("/today", "/my", "/api/my", f"/api/my/sessions/{sid}", f"/api/exam/results/{a}",
+                "/api/exam", f"/tasks/{task}", f"/api/tasks/{task}/tutor")  # fmt: skip
+        for url in urls:
+            before = len(entered)
+            r = c.get(url, headers=CHILD)
+            assert r.status_code == 200 and len(entered) > before, (url, r.status_code)
+        assert attempt(c, task, "А", "sure").status_code == 200
+        before = len(entered)
+        assert c.post("/session/finish", json={}, headers=CHILD).status_code == 200
+        assert len(entered) > before

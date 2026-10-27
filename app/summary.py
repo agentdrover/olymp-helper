@@ -318,9 +318,11 @@ def finish(conn: sqlite3.Connection, now: datetime) -> dict | None:
 # ------------------------------------------------------------------------- чтение
 
 
-def list_sessions(conn: sqlite3.Connection, now: datetime) -> list[dict]:
-    """Занятия, новые первыми: закрытые - с итогом, идущее - без него."""
-    ensure(conn, now)
+def list_sessions(conn: sqlite3.Connection, now: datetime, *, write: bool = True) -> list[dict]:
+    """Занятия, новые первыми: закрытые - с итогом, идущее - без него. write=False - только
+    чтение (для снимка чтения: внутри него писать нельзя, ensure вызывает вызывающий ДО снимка)."""
+    if write:
+        ensure(conn, now)
     out = []
     running = running_session(conn, now)
     for row in conn.execute(
@@ -337,8 +339,11 @@ def list_sessions(conn: sqlite3.Connection, now: datetime) -> list[dict]:
     return out
 
 
-def get_summary(conn: sqlite3.Connection, session_id: int, now: datetime) -> dict | None:
-    ensure(conn, now)
+def get_summary(
+    conn: sqlite3.Connection, session_id: int, now: datetime, *, write: bool = True
+) -> dict | None:
+    if write:  # write=False - внутри снимка чтения, ensure вызван до него
+        ensure(conn, now)
     row = conn.execute("SELECT summary FROM study_session WHERE id = ?", (session_id,)).fetchone()
     found = json.loads(row[0]) if row and row[0] else None
     return None if found and found.get("partial") else found

@@ -32,7 +32,7 @@ def _my_data(conn, now, selected_id: int | None) -> dict:
 
 def _my_data_in(conn, now, selected_id: int | None, hidden) -> dict:
     # hidden: идёт олимпиада, её задания скрыты и в прошлых занятиях
-    sessions = summary.list_sessions(conn, now)
+    sessions = summary.list_sessions(conn, now, write=False)  # внутри снимка - без записи
     for s in sessions:
         s["summary"] = summary.hide_tasks(s["summary"], hidden) if s["summary"] else None
     done = [s for s in sessions if s["summary"]]
@@ -87,7 +87,7 @@ def my_summary_json(session_id: int, request: Request, conn: Db):
     exam.expire_due(conn, now)
     summary.ensure(conn, now)  # запись - до снимка чтения
     with seq.read_snapshot(conn):
-        found = summary.get_summary(conn, session_id, now)
+        found = summary.get_summary(conn, session_id, now, write=False)
         if found is None:
             raise HTTPException(404, "Итога этого занятия нет")
         hidden = exam.running_task_ids(conn)
