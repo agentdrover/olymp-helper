@@ -292,6 +292,20 @@ const scenarios = {
     if (checkedOf("confidence").join() !== "doubt") throw new Error("confidence wiped");
     if (page.els.find((e) => e.attrs.name === "num").value !== "42") throw new Error("number wiped");
   },
+  // Олимпиада началась: версионный блок 409 применяется, опоздавший ответ до старта его не перекрывает.
+  async delayed_pre_exam_response_does_not_replace_exam_block() {
+    boot(screen("thinking", ' data-step="3" data-version="5"'));
+    const slow = deferred();
+    page.fetches.push(() => slow.p);
+    await advance(2600);  // опрос ушёл до старта олимпиады и висит
+    page.postq.push(okH('<p class="notice" role="alert" data-version="7">Сейчас идёт олимпиада.</p>'));
+    page.handlers.click[0]({ target: { closest: () => get("button") } });
+    await settle();
+    if (get(".helper-status")) throw new Error("exam block was not applied");
+    slow.res({ text: () => Promise.resolve(screen("idle", ' data-version="6"')), headers: { get: () => null } });
+    await settle();
+    if (get(".helper-status")) throw new Error("delayed pre-exam response replaced the exam block");
+  },
 };
 
 const name = process.argv[2];

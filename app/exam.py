@@ -15,6 +15,7 @@ from app.ingest.answers import display, key_value
 from app.ingest.publish import is_published
 from app.ingest.store import atomic, figure_of, options_of
 from app.tutor.check import BadAnswer, check_answer, parse_answer
+from app.tutor.seq import bump
 
 TYPES = ("single", "multiple", "match", "numeric")
 TYPE_LABELS = {
@@ -224,6 +225,7 @@ def _create(conn, now, *, mode, title, fmt, picked, reduced, read_figure=None) -
              json.dumps(_snapshot_item(task), ensure_ascii=False), png),
         )  # fmt: skip
     _open_view(conn, attempt_id, 1, now)
+    bump(conn)  # задания варианта закрылись для панели: версия растёт в той же транзакции
     return attempt_id
 
 
@@ -366,6 +368,7 @@ def _finish(conn, attempt, reason: str, at: datetime) -> None:
         "score = ?, correct_count = ? WHERE id = ? AND status = 'running'",
         (reason, iso(at), score, correct, attempt["id"]),
     )
+    bump(conn)  # задания варианта открылись для панели
 
 
 def expire_due(conn, now: datetime) -> None:
@@ -400,6 +403,19 @@ def locked_task_ids(conn, now: datetime) -> frozenset[int]:
             "SELECT task_item_id FROM exam_item WHERE attempt_id = ? AND task_item_id IS NOT NULL",
             (attempt["id"],),
         )
+    )
+
+
+def task_running(conn, task_id: int) -> bool:
+    """Только чтение, без закрытия просроченных (годится внутри снимка чтения): задание входит в
+    идущее прохождение. Просроченное, но не закрытое считается идущим - строго безопаснее."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM exam_item i JOIN exam_attempt a ON a.id = i.attempt_id "
+            "WHERE a.status = 'running' AND i.task_item_id = ?",
+            (task_id,),
+        ).fetchone()
+        is not None
     )
 
 

@@ -573,3 +573,65 @@ def test_background_step_finishing_during_the_exam_shows_nothing(tmp_path):
                 r = c.get(url, headers={**CHILD, **extra})
                 assert r.status_code == 409 and "идёт олимпиада" in r.text, url
                 assert "hints_list" not in r.text and "Подсказка" not in r.text, url
+
+
+def _start_in_between(tmp_path, clock, monkeypatch):
+    """snapshot_live (между замком маршрута и снимком чтения) запускает олимпиаду: гонка."""
+    from app.tutor import web
+
+    real, fired = web.snapshot_live, []
+
+    def racing(*a, **kw):
+        if not fired:
+            fired.append(1)
+            conn = open_db(tmp_path / "olymp.db")
+            try:
+                exam.start(conn, clock(), mode="real", material_id=1)
+            finally:
+                conn.close()
+        return real(*a, **kw)
+
+    monkeypatch.setattr(web, "snapshot_live", racing)
+    return fired
+
+
+def test_exam_started_between_the_gate_and_the_snapshot_blocks_the_view(tmp_path, monkeypatch):
+    c, clock, _ = boot(tmp_path)
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        assert attempt(c, task, "Б", "sure").status_code == 200  # решено: ответ виден на экране
+        urls = (f"/api/tasks/{task}/tutor?step=1", f"/tasks/{task}/tutor?step=1", f"/tasks/{task}")
+        for url in urls:
+            sql(tmp_path, "UPDATE exam_attempt SET status = 'submitted', end_reason = 'manual'")
+            fired = _start_in_between(tmp_path, clock, monkeypatch)
+            r = c.get(url, headers={**CHILD, "HX-Request": "true"})
+            assert fired and r.status_code == 409, url
+            assert "идёт олимпиада" in r.text and "solution" not in r.text, url
+            assert "Решение" not in r.text and "верно" not in r.text.lower(), url
+            monkeypatch.undo()
+
+
+def test_exam_start_and_finish_bump_the_version_and_the_block_carries_it(tmp_path):
+    from app.tutor import seq
+
+    c, clock, _ = boot(tmp_path)
+    with c:
+        task = seed(tmp_path, key="Б", number="1")
+        save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
+                    points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
+        before = seq.current(db(tmp_path))
+        pre = c.get(f"/api/tasks/{task}/tutor", headers=CHILD).json()
+        assert int(pre["panel"]["version"]) == before
+        assert start_real(c).status_code == 200
+        started = seq.current(db(tmp_path))
+        assert started > before
+        blocked = c.get(f"/api/tasks/{task}/tutor", headers=CHILD)
+        assert blocked.status_code == 409 and blocked.json()["version"] == started > before
+        html = c.get(f"/tasks/{task}/tutor", headers={**CHILD, "HX-Request": "true"})
+        assert html.status_code == 409 and f'data-version="{started}"' in html.text
+        clock.advance(11 * 60)
+        assert c.get("/api/exam/current", headers=CHILD).status_code in (200, 404, 409)
+        exam.expire_due(db(tmp_path), clock())
+        assert seq.current(db(tmp_path)) > started

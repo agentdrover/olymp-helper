@@ -109,17 +109,28 @@ def _is_fragment(request: Request) -> bool:
 
 
 def _exam_block(request: Request, conn, task_id: int, *, page: bool = False, force=False):
-    """Идёт олимпиада по этому заданию: 409 на любой маршрут задания (JSON, HTMX, страница)."""
+    """Идёт олимпиада по этому заданию: 409 на любой маршрут задания (JSON, HTMX, страница).
+
+    Ответ несёт версию панели (как любой ответ панели): вкладка применяет блок, а опоздавший ответ
+    с меньшей версией его не перекрывает. Версия читается ПОСЛЕ того, как замок подтверждён: старт
+    олимпиады поднял её в своей транзакции, значит она больше версии любого ответа до старта."""
     if not force and not exam.task_locked(conn, task_id, request.app.state.clock()):
         return None
+    version = seq.current(conn)
     message = exam.RUNNING_MESSAGE
     if page:
         return TEMPLATES.TemplateResponse(
             request, "child/exam_busy.html", {"message": message}, status_code=409
         )
     if _is_fragment(request) or "text/html" in request.headers.get("accept", ""):
-        return HTMLResponse(f'<p class="notice" role="alert">{message}</p>', status_code=409)
-    return JSONResponse({"ok": False, "code": "exam_running", "message": message}, status_code=409)
+        return HTMLResponse(
+            f'<p class="notice" role="alert" data-version="{version}">{message}</p>',
+            status_code=409,
+        )
+    return JSONResponse(
+        {"ok": False, "code": "exam_running", "message": message, "version": version},
+        status_code=409,
+    )
 
 
 def _step_result(conn, task_id: int, step_id: int | None):
@@ -150,6 +161,8 @@ def _view_of(
 
 def _view_in_snapshot(request: Request, conn, task_id: int, live, step, flow, notice, version):
     app = request.app
+    if exam.task_running(conn, task_id):  # олимпиада началась между замком маршрута и снимком
+        raise ExamBusy(_exam_block(request, conn, task_id, force=True))
     task, material = _published(conn, task_id)
     # Итог шага - ДО прогона: если шаг найден оконченным, прогон читается после его записи, и ответ
     # с итогом (например «помощник не ответил») не прячет подсказку, которую шаг уже записал.
@@ -338,6 +351,8 @@ def task_page(task_id: int, request: Request, conn: Db):
     with atomic(conn):  # экран открыт: с этого момента идут 60 секунд до подсказки 1
         state.ensure_run(conn, task_id, app.state.clock())
     with seq.read_snapshot(conn):
+        if exam.task_running(conn, task_id):  # олимпиада началась после замка маршрута
+            return _exam_block(request, conn, task_id, page=True, force=True)
         task, material = _published(conn, task_id)
         view = build_view(
             conn, task, material, state.active_run(conn, task), app.state.clock(),
