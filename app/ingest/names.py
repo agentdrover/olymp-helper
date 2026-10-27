@@ -10,11 +10,10 @@ def clean_original_name(filename: str | None) -> str | None:
     if not filename:
         return None
     base = filename.replace("\\", "/").rsplit("/", 1)[-1]
-    base = unicodedata.normalize("NFC", base)
     base = "".join(
         ch for ch in base if unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Zl", "Zp")
     )
-    base = base.strip()[:MAX_NAME].strip()
+    base = unicodedata.normalize("NFC", base).strip()[:MAX_NAME].strip()
     return base or None
 
 

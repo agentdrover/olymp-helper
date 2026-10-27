@@ -19,6 +19,7 @@ def test_the_original_name_is_kept_safely(tmp_path):
     assert clean_original_name("a/b\\c/Пасечник 5 кл.pdf") == "Пасечник 5 кл.pdf"
     assert clean_original_name("x\x00y\x1b\u202ez.pdf") == "xyz.pdf"
     assert clean_original_name("e\u0301.pdf") == "\u00e9.pdf"
+    assert clean_original_name("e\u200d\u0301.pdf") == "\u00e9.pdf"
     assert clean_original_name("a" * 300) == "a" * 120
     assert clean_original_name("  ") is None and clean_original_name(None) is None
     assert clean_original_name("dir/") is None
@@ -52,14 +53,23 @@ def test_citations_show_the_name_not_the_hash(tmp_path):
     assert material_label({"original_name": "Учебник.PDF"}, 2) == "Учебник, стр. 2"
     assert material_label({"original_name": None}, 3) == "Учебник, стр. 3"
 
-    from app.db import connect, migrate
+    from app.db import SCHEMA_VERSION, _migration_files, _statements, connect, migrate
 
     conn = connect(tmp_path / "old.db")
-    conn.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)")
-    migrate(conn)
+    conn.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
+        "applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    for version, path in _migration_files():
+        if version >= 13:  # 0013 is the migration under test
+            break
+        for stmt in _statements(path.read_text(encoding="utf-8")):
+            conn.execute(stmt)
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
     conn.execute(
         "INSERT INTO material (file, sha256, kind, pages_total) VALUES ('materials/abc.pdf','abc','textbook',1)"
     )
+    assert migrate(conn) == SCHEMA_VERSION
     conn.row_factory = __import__("sqlite3").Row
     m = conn.execute("SELECT * FROM material").fetchone()
     assert m["original_name"] is None
