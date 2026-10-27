@@ -59,17 +59,57 @@ def png_size(data: bytes) -> tuple[int, int]:
     return width, height
 
 
+_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+_DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
+_ADAM7 = (
+    (0, 0, 8, 8),
+    (4, 0, 8, 8),
+    (0, 4, 4, 8),
+    (2, 0, 4, 4),
+    (0, 2, 2, 4),
+    (1, 0, 2, 2),
+    (0, 1, 1, 2),
+)
+
+
+def _scanlines(width: int, height: int, bits: int, interlace: int) -> list[int]:
+    """Длины строк (без байта фильтра) в порядке следования в потоке."""
+    if not interlace:
+        return [(width * bits + 7) // 8] * height
+    rows = []
+    for x0, y0, dx, dy in _ADAM7:
+        pw, ph = (width - x0 + dx - 1) // dx, (height - y0 + dy - 1) // dy
+        if pw > 0 and ph > 0:
+            rows += [(pw * bits + 7) // 8] * ph
+    return rows
+
+
 def _check_pixels(data: bytes, width: int, height: int) -> None:
-    """IDAT - целый zlib-поток; распаковка ограничена размером строк (до 8 байт на пиксель)."""
+    """IHDR допустим, IDAT - целый zlib-поток ровно из строк с байтом фильтра 0-4 (распаковка ограничена)."""
+    ihdr = next(body for kind, body in _chunks(data) if kind == b"IHDR")
+    depth, color, compression, filtering, interlace = ihdr[8:13]
+    if (
+        depth not in _DEPTHS.get(color, ())
+        or compression != 0
+        or filtering != 0
+        or interlace not in (0, 1)
+    ):
+        raise ChannelError("bad_image")
+    rows = _scanlines(width, height, depth * _CHANNELS[color], interlace)
+    expected = sum(1 + n for n in rows)
     idat = b"".join(body for kind, body in _chunks(data) if kind == b"IDAT")
-    cap = height * (width * 8 + 1)
     unpacker = zlib.decompressobj()
     try:
-        out = unpacker.decompress(idat, cap + 1)
+        out = unpacker.decompress(idat, expected + 1)
     except zlib.error:
         raise ChannelError("bad_image") from None
-    if len(out) > cap or not unpacker.eof or unpacker.unused_data or not out:
+    if len(out) != expected or not unpacker.eof or unpacker.unused_data:
         raise ChannelError("bad_image")
+    pos = 0
+    for n in rows:
+        if out[pos] > 4:
+            raise ChannelError("bad_image")
+        pos += 1 + n
 
 
 def check_images(images: list[bytes]) -> list[bytes]:

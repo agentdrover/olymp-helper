@@ -223,3 +223,37 @@ def test_corrupt_png_data_and_rejected_images_do_not_spend_the_limit(tmp_path):
     assert svc.complete_on("claude", "s", MSG, images=[png] * 5).error_kind == "too_many_images"
     assert svc.complete_on("claude", "s", MSG, images=[b"junk"]).error_kind == "bad_image"
     assert svc.complete_on("claude", "s", MSG, images=[png]).error_kind != "limit"
+
+
+def _png(width, height, depth, color, interlace, raw):
+    def chunk(k, b):
+        return struct.pack(">I", len(b)) + k + b + struct.pack(">I", zlib.crc32(k + b))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, depth, color, 0, 0, interlace)
+    return (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )  # fmt: skip
+
+
+def test_valid_interlaced_png_passes_and_short_pixel_data_fails():
+    from app.model.images import check_images
+
+    # 8x8 RGBA16 Adam7: 527 байт после распаковки (по строкам проходов 7 с фильтром).
+    passes = [(1, 1), (1, 1), (2, 1), (2, 2), (4, 2), (4, 4), (8, 4)]  # (ширина, высота) проходов
+    raw = b"".join(b"\0" + b"\x11" * (pw * 8) for pw, ph in passes for _ in range(ph))
+    assert len(raw) == 527
+    png = _png(8, 8, 16, 6, 1, raw)
+    assert check_images([png]) == [png]
+    # полный zlib-поток, но строк не хватает / неверный байт фильтра / лишние данные
+    for bad in (
+        _png(8, 8, 8, 2, 0, b"\0"),
+        _png(8, 8, 16, 6, 1, raw[:-1]),
+        _png(8, 8, 16, 6, 1, raw + b"\0"),
+        _png(8, 8, 8, 2, 0, (b"\x07" + b"\0" * 24) * 8),
+        _png(8, 8, 7, 2, 0, b"\0" * 200),
+    ):
+        seen = []
+        assert run("claude", [bad], seen)["error_kind"] == "bad_image" and not seen
+    ok = _png(8, 8, 8, 2, 0, (b"\x04" + b"\0" * 24) * 8)
+    assert check_images([ok]) == [ok]
