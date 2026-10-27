@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.db import connect
+from app.ingest.progress import ImportProgress
 from app.ingest.render import PageCache
 from app.model.client import ExecutorChannel
 from app.model.service import ModelService
@@ -54,6 +55,7 @@ class AppContext:
     state: object  # app.state: модель берётся при каждом вызове, тест может её подменить
     page_cache: PageCache
     feed: FeedState = field(default_factory=FeedState)
+    progress: ImportProgress = field(default_factory=ImportProgress)
 
     @property
     def model(self):

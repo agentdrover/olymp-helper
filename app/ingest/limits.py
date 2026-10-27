@@ -5,12 +5,19 @@ import re
 import pymupdf
 
 from app.ingest.filters import IMAGE_CODECS, FilterError, OverBudget, canonical, decoded_chunks
+from app.model.client import REQUEST_TIMEOUT_S
 
 MB = 1024 * 1024
 MAX_PDF_BYTES = 50 * MB
 MAX_PAGES = 400
 MAX_UNPACKED_BYTES = 200 * MB
-IMPORT_TIMEOUT_S = 600
+# Импорт прерывается, когда долго нет пульса (отчёта о ходе), а не по общему сроку: сборник из
+# 24 порций по минуте честно идёт больше десяти минут. Тишина дольше одного запроса к модели
+# (REQUEST_TIMEOUT_S, в том числе с запасным каналом) - зависание.
+IMPORT_STALL_S = max(300, REQUEST_TIMEOUT_S + 60)
+# Потолок против вечного цикла, растёт с размером: база + на каждую порцию.
+IMPORT_MAX_BASE_S = 600
+IMPORT_MAX_PER_CHUNK_S = 120
 
 
 class UploadRejected(Exception):
