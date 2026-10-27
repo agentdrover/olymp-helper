@@ -47,7 +47,7 @@ _LETTER = re.compile(r"(?<![\w])[A-ZА-ЯЁ](?![\w])")
 _RANGE = re.compile(r"(\d{1,2})\s*[–—-]\s*(\d{1,2})")
 
 
-def designations(options) -> set[str]:
+def designations(options, extended: bool = False) -> set[str]:
     """Цифры и одиночные заглавные буквы в тексте вариантов (то, что обозначено на рисунке)."""
     texts: list[str] = []
     if isinstance(options, list):
@@ -58,7 +58,43 @@ def designations(options) -> set[str]:
     for text in texts:
         found.update(_DIGITS.findall(text))
         found.update(_LETTER.findall(text))
+    # extended: только для рисунков, подтверждённых после #2110 (отметка items_v2); у записей,
+    # опубликованных раньше, правило режима не меняется.
+    if extended and isinstance(options, dict):  # номер левого элемента match - обозначение
+        for item in options.get("left") or []:
+            label = str(item.get("label", "")).strip()
+            if _DIGITS.fullmatch(label) or _LETTER.fullmatch(label):
+                found.add(label)
     return found
+
+
+def ordered_designations(options, extended: bool = True) -> list[str]:
+    """Обозначения рисунка по порядку: сначала цифры, затем буквы."""
+    return sorted(
+        designations(options, extended),
+        key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s),
+    )
+
+
+ASSIST_CAPTIONS = {
+    "hints": (
+        "С подсказками",
+        "Ребёнок решает с подсказками помощника, как обычное задание.",
+    ),
+    "key_only": (
+        "Только проверка по ключу",
+        (
+            "Подсказок нет: две проверки, затем «Показать ответ». Чтобы включить подсказки, "
+            "опишите все рисунки в шаге 3 и подтвердите описание."
+        ),
+    ),
+}
+
+
+def assist_caption(mode: str | None) -> dict:
+    """Подпись режима для родителя; сам режим считает assist_mode."""
+    label, hint = ASSIST_CAPTIONS.get(mode or "key_only", ASSIST_CAPTIONS["key_only"])
+    return {"assist": mode, "label": label, "hint": hint}
 
 
 def named_in_note(note: str) -> set[str]:
@@ -69,8 +105,8 @@ def named_in_note(note: str) -> set[str]:
     return named
 
 
-def missing_designations(options, note: str) -> list[str]:
-    missing = designations(options) - named_in_note(note or "")
+def missing_designations(options, note: str, extended: bool = False) -> list[str]:
+    missing = designations(options, extended) - named_in_note(note or "")
     return sorted(missing, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s))
 
 
@@ -80,7 +116,9 @@ def assist_mode(task) -> str | None:
     figure = figure_of(task)
     if figure is None:
         return "hints"
-    missing = missing_designations(options_of(task), figure.get("teacher_note", ""))
+    missing = missing_designations(
+        options_of(task), figure.get("teacher_note", ""), bool(figure.get("items_v2"))
+    )
     if missing or not figure.get("teacher_note_ack"):
         return "key_only"
     return "hints"
@@ -90,7 +128,9 @@ def parent_notice(task) -> str | None:
     if assist_mode(task) != "key_only" or figure_of(task) is None:
         return None
     figure = figure_of(task)
-    missing = missing_designations(options_of(task), figure.get("teacher_note", ""))
+    missing = missing_designations(
+        options_of(task), figure.get("teacher_note", ""), bool(figure.get("items_v2"))
+    )
     parts = []
     if missing:
         parts.append("в пояснении к рисунку не названо: " + ", ".join(missing))

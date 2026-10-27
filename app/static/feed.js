@@ -16,8 +16,8 @@
   // Токен защиты от подделки запросов: сервер отдаёт его в <meta> страницы родителя.
   const csrf = () => { const m = document.querySelector('meta[name="csrf-token"]'); return m ? m.content : ""; };
 
-  async function post(path, body) {
-    const r = await fetch(`/parent/tasks/${taskId()}/${path}`, {
+  async function post(path, body, id) {
+    const r = await fetch(`/parent/tasks/${id || taskId()}/${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf() },
       body: JSON.stringify(body || {}),
@@ -43,7 +43,126 @@
 
   async function advance(data) { await show(data.next ? data.next.task_id : null, data.counter); }
 
-  function fail(e) { const el = document.getElementById("error"); if (el) el.textContent = e.message; }
+  function fail(e) {
+    const el = document.getElementById("error");
+    if (el) el.textContent = e.message;
+    // Сервер нашёл в вырезке текст ответа: даём явно решить, что он допустим.
+    const row = document.getElementById("leak-ack-row");
+    if (row && /напечатан текст ответа/.test(e.message)) row.hidden = false;
+  }
+
+  // ---- карточка рисунка: шаги 1-4 и одна основная кнопка
+  function teacherNote() {
+    const rows = Array.from(feed.querySelectorAll("[data-note]"));
+    if (!rows.length) return val("note_free");
+    const lines = rows.filter((i) => i.value.trim()).map((i) => `${i.dataset.note} — ${i.value.trim().replace(/[;\n]+/g, ",")}`);
+    const rest = val("note_rest");
+    if (rest) lines.push(rest);
+    return lines.join("\n");
+  }
+
+  // Ответ шага 2 строкой для действия key; "!" — для match выбраны не все рисунки.
+  function keyAnswer() {
+    const box = feed.querySelector(".key-fields");
+    if (!box) return { text: "", box: null };
+    const lefts = Array.from(box.querySelectorAll("[data-key-left]"));
+    if (!lefts.length) return { text: val("key_text").trim(), box };
+    const chosen = lefts.filter((x) => x.value);
+    if (chosen.length && chosen.length < lefts.length) return { text: "!", box };
+    return { text: chosen.map((x) => `${x.dataset.keyLeft}-${x.value}`).join(", "), box };
+  }
+
+  async function publishFigure() {
+    // Снимок на момент нажатия: id карточки и все поля. Цепочка идёт только по нему, поэтому
+    // «Пропустить» или смена карточки во время запроса не переносят шаги на другое задание.
+    const id = taskId();
+    const counter = card().dataset.counter;
+    const leak = document.querySelector('input[name="leak"]:checked');
+    if (!leak) throw new Error("Ответьте на шаг 1: есть ли ответ на картинках.");
+    if (leak.value !== "none") throw new Error("Поправьте рамку на странице слева, затем ответьте «Да, ответа нет».");
+    const key = keyAnswer();
+    if (key.text === "!") throw new Error("Выберите ответ для каждого рисунка.");
+    if (!key.text) throw new Error("Выберите правильный ответ: без ключа задание не публикуется.");
+    const snap = {
+      key: key.text,
+      body: {
+        rect_px: frame ? [frame.x0, frame.y0, frame.x1, frame.y1] : null, scale: PAGE_SCALE,
+        page: Number(card().dataset.figurePage) || null,
+        alt: val("alt"), teacher_note: teacherNote(),
+        no_answer_ack: leak.value === "none", teacher_note_ack: checked("note_ack"),
+        leak_ack: checked("leak_ack"),
+      },
+    };
+    const buttons = Array.from(feed.querySelectorAll("button"));
+    buttons.forEach((x) => { x.disabled = true; });
+    const saved = [];
+    const step = async (name, path, body) => {
+      try {
+        const r = await post(path, body, id);
+        saved.push(name);
+        return r;
+      } catch (err) {
+        const kept = saved.length ? ` Уже сохранено: ${saved.join(", ")}.` : " Ничего не сохранено.";
+        throw new Error(`Шаг «${name}»: ${err.message}.${kept}`);
+      }
+    };
+    try {
+      // Неизменённый ключ из файла сервер оставляет ключом файла: сравнивает он, не лента.
+      await step("ключ", "key", { answer: snap.key, keep_candidate: true });
+      const done = await step("рисунок", "figure", snap.body);
+      if (done.status === "draft") return await step("публикация", "confirm", {}); // следующая карточка из ответа
+      return { next: { task_id: Number(id) }, counter, reason: done.reason };
+    } finally {
+      buttons.forEach((x) => { x.disabled = false; });
+    }
+  }
+
+  // Вид ребёнка и режим подсказок обновляются по мере правок; ничего не сохраняется.
+  let modeTimer = null;
+  function refreshMode() {
+    clearTimeout(modeTimer);
+    modeTimer = setTimeout(async () => {
+      const pill = document.getElementById("mode-pill");
+      if (!pill) return;
+      try {
+        const r = await fetch(`/parent/tasks/${taskId()}/figure/mode`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf() },
+          body: JSON.stringify({ teacher_note: teacherNote(), teacher_note_ack: checked("note_ack") }),
+        });
+        const m = await r.json();
+        if (!r.ok) return;
+        pill.textContent = m.label;
+        document.getElementById("mode-hint").textContent = m.hint;
+        const rows = Array.from(feed.querySelectorAll("[data-note]"));
+        const filled = rows.filter((i) => i.value.trim()).length;
+        const status = document.getElementById("note-status");
+        if (status && rows.length) status.textContent = `Описано ${filled} из ${rows.length}.`;
+      } catch (e) { /* режим обновится при следующей правке */ }
+    }, 250);
+  }
+
+  function refreshPreview() {
+    const img = feed.querySelector("[data-figure-img]");
+    if (!img || !frame) return;
+    const slot = img.closest("figure");
+    if (slot) slot.hidden = false;  // карточка без областей: место под вырезку скрыто до первой рамки
+    img.hidden = false;
+    const q = new URLSearchParams({
+      page: card().dataset.figurePage || "", rect_px: [frame.x0, frame.y0, frame.x1, frame.y1].join(","),
+      scale: PAGE_SCALE, t: Date.now(),
+    });
+    img.src = `/parent/tasks/${taskId()}/figure-preview.png?${q}`;
+  }
+
+  feed.addEventListener("input", (e) => {
+    if (e.target.id === "alt") {
+      const img = feed.querySelector("[data-figure-img]");
+      if (img) img.alt = e.target.value;
+    }
+    if (e.target.matches("[data-note], #note_free, #note_ack")) refreshMode();
+  });
+  feed.addEventListener("change", (e) => { if (e.target.id === "note_ack") refreshMode(); });
 
   const actions = {
     confirm: () => post("confirm", { answer: val("answer") || null }),
@@ -52,13 +171,7 @@
     exclude: () => post("exclude"),
     retry: async () => { await post("retry-model"); return { next: { task_id: Number(taskId()) }, counter: card().dataset.counter }; },
     resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: val("answer") || null }),
-    figure: () => post("figure", {
-      rect_px: frame ? [frame.x0, frame.y0, frame.x1, frame.y1] : null, scale: PAGE_SCALE,
-      page: Number(card().dataset.figurePage) || null,
-      alt: val("alt"), teacher_note: val("teacher_note"),
-      no_answer_ack: checked("no_answer_ack"), teacher_note_ack: checked("teacher_note_ack"),
-      leak_ack: checked("leak_ack"),
-    }).then((d) => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter, reason: d.reason })),
+    figure: publishFigure,
     "save-edit": () => post("edit", changedEdit())
       .then(() => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter })),
   };
@@ -109,6 +222,15 @@
     }
   });
 
+  function drawFrame(img) {
+    const wrap = img.parentElement;
+    let box = document.getElementById("draft-frame");
+    if (!box) { box = document.createElement("span"); box.id = "draft-frame"; box.className = "region-frame draft"; wrap.appendChild(box); }
+    const w = img.naturalWidth, h = img.naturalHeight;
+    box.style.left = `${frame.x0 / w * 100}%`; box.style.top = `${frame.y0 / h * 100}%`;
+    box.style.width = `${(frame.x1 - frame.x0) / w * 100}%`; box.style.height = `${(frame.y1 - frame.y0) / h * 100}%`;
+  }
+
   // Ручная рамка: тянуть мышью по изображению страницы; координаты — пиксели рендера.
   function bindPage() {
     const img = document.getElementById("page-img");
@@ -124,6 +246,8 @@
       const end = natural(ev);
       frame = { x0: Math.min(start[0], end[0]), y0: Math.min(start[1], end[1]), x1: Math.max(start[0], end[0]), y1: Math.max(start[1], end[1]) };
       start = null;
+      drawFrame(img);
+      refreshPreview();
     });
   }
   bindPage();

@@ -17,7 +17,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.ingest import packs, review
-from app.ingest.figure_service import confirm_figure
+from app.ingest.figure_card import mode_for
+from app.ingest.figure_service import confirm_figure, preview_png
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
 from app.ingest.names import clean_original_name
 from app.ingest.progress import progress_text
@@ -30,6 +31,7 @@ from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, csrf_token, current_role, require_csrf, require_parent
 from app.search import search
 from app.search.tasks import search_published_tasks
+from app.tutor import catalog
 
 log = logging.getLogger("app.ingest")
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
@@ -468,6 +470,7 @@ class EditBody(BaseModel):
 
 class KeyBody(BaseModel):
     answer: str
+    keep_candidate: bool = False  # лента: ответ карточки без правки не делает ключ родительским
 
 
 class ResolveBody(BaseModel):
@@ -505,6 +508,8 @@ def _advance(request: Request, conn, task_id: int, *, stay_if_open: bool = False
 def review_page(request: Request, conn: Db):
     feed = review.open_feed(ctx_of(request), conn)
     first = feed["cards"][0] if feed["cards"] else None
+    if first is not None:  # очередь строится без PDF, первая карточка - с ним
+        first = review.card_for(ctx_of(request), conn, first["task_id"]) or first
     counter = f"1 из {feed['total']}" if first else None
     return TEMPLATES.TemplateResponse(
         request, "parent/review.html", {"card": first, "counter": counter, "total": feed["total"]}
@@ -594,7 +599,9 @@ def task_edit(task_id: int, body: EditBody, request: Request, conn: Db):
 @parent.post("/parent/tasks/{task_id}/key")
 @_action
 def task_key(task_id: int, body: KeyBody, request: Request, conn: Db):
-    return review.set_parent_key(ctx_of(request), conn, task_id, body.answer)
+    return review.set_parent_key(
+        ctx_of(request), conn, task_id, body.answer, keep_candidate=body.keep_candidate
+    )
 
 
 @parent.post("/parent/tasks/{task_id}/resolve")
@@ -636,6 +643,42 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
     )
 
 
+class ModeBody(BaseModel):
+    teacher_note: str | None = None
+    teacher_note_ack: bool = False
+
+
+@parent.post("/parent/tasks/{task_id}/figure/mode")
+@_action
+def task_figure_mode(task_id: int, body: ModeBody, request: Request, conn: Db):
+    """Какой режим получит задание при таком описании: считает assist_mode, ничего не пишет."""
+    task = get_task(conn, task_id)
+    if task is None or figure_of(task) is None:
+        raise Refusal("У этого задания нет рисунка.", 404)
+    return mode_for(task, body.teacher_note, body.teacher_note_ack)
+
+
+@parent.get("/parent/tasks/{task_id}/figure-preview.png")
+@_action
+def task_figure_preview(
+    task_id: int,
+    request: Request,
+    conn: Db,
+    page: int | None = None,
+    rect_px: str | None = None,
+    scale: float | None = None,
+):
+    """Родительский предпросмотр вырезки по текущей рамке; ребёнку недоступен."""
+    frame = None
+    if rect_px:
+        try:
+            frame = [float(v) for v in rect_px.split(",")]
+        except ValueError:
+            raise Refusal("Рамка задана неверно: нужны четыре числа.") from None
+    png = preview_png(ctx_of(request), conn, task_id, rect_px=frame, scale=scale, page=page)
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
 # ----------------------------------------------------------------------- ребёнок
 
 
@@ -668,19 +711,39 @@ def api_task(task_id: int, conn: Db):
 
 
 @public.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, conn: Db):
+def tasks_page(
+    request: Request,
+    conn: Db,
+    q: str = "",
+    block: str = "",
+    theme: str = "",
+    type: str = "",
+    source: str = "",
+    variant: str = "",
+    status: str = "",
+):
     if current_role(request) != PARENT and not notice_seen(conn):
         return notice_redirect("/tasks")
-    data = api_tasks(conn)
-    # Ребёнку — название темы из справочника, не код; список уже содержит только опубликованные.
-    topics = {
-        row["id"]: row["title"]
-        for row in conn.execute(
-            "SELECT t.id, c.title FROM task_item t JOIN topic c ON c.code = t.topic"
-        )
-    }
+    theme = theme or block
+    blocks = catalog.build_blocks(conn)
+    params = {"q": q, "theme": theme, "type": type, "source": source, "variant": variant,
+              "status": status}  # fmt: skip
+    active = any(v.strip() for v in params.values())
+    found = catalog.filter_tasks(conn, **params)
+    current = next((b for b in blocks if str(b["pos"]) == theme), None)
     return TEMPLATES.TemplateResponse(
-        request, "child/tasks.html", {**data, "topics": topics, "type_labels": TYPE_LABELS}
+        request,
+        "child/tasks.html",
+        {
+            "blocks": blocks,
+            "found": found,
+            "active": active,
+            "params": params,
+            "current": current,
+            "type_labels": TYPE_LABELS,
+            "statuses": catalog.STATUSES,
+            "generated": catalog.GENERATED,
+        },
     )
 
 
