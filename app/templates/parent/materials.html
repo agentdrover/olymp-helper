@@ -36,7 +36,13 @@
     <td>{{ m.id }}</td><td>{{ m.original_name or "" }}</td><td>{{ m.kind }}</td><td>{{ m.year or "" }}</td><td>{{ m.variant or "" }}</td>
     <td><span class="js-status">{% if m.deleted_at %}файл удалён{% else %}{{ m.import_status }}{% endif %}</span>{% if live %}<p class="hint js-progress" aria-live="polite">{{ progress.get(m.id) }}</p>{% endif %}{% if m.import_error %}{% if m.import_status == "done" %}<p class="warn-note">{{ m.import_error }}</p>{% else %}: <span class="err">{{ m.import_error }}</span>{% endif %}{% endif %}</td>
     <td class="js-tasks">{{ m.tasks }}</td>
-    <td>{% if not live %}<a href="/parent/materials/{{ m.id }}/delete">Удалить</a>{% endif %}</td>
+    <td>{% if not live %}<a href="/parent/materials/{{ m.id }}/delete">Удалить</a>{% endif %}
+      {% if m.kind == "tasks" and not m.deleted_at and (m.import_status in ("done", "failed") or m.id in stuck) %}
+        {% if m.id in touched %}<p class="hint">{{ unavailable }}</p>
+        {% else %}<form method="post" action="/parent/materials/{{ m.id }}/reparse">
+          <input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
+          <button>Разобрать заново</button></form>{% endif %}
+      {% endif %}</td>
   </tr>
   {% endfor %}
 </table></div>
