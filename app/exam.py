@@ -460,7 +460,7 @@ def act(
     """Одно действие бланка (обычная форма): в одной транзакции под замком записи сверяются
     прохождение, срок, показанная позиция и ревизия; сохраняется ответ показанного задания,
     применяется действие, ревизия растёт. Повтор принятого действия (тот же action_id) ничего не
-    меняет. Результат: "ok", "replay", "submitted" (сдано) или "time" (срок вышел). Устаревшая
+    меняет. Результат: "ok", "submitted" (сдано) или "time" (срок вышел). Устаревшая
     страница (другая ревизия или позиция) - ExamError 409 "stale": ни ответ, ни интервал
     просмотра не меняются."""
     if action not in ACTIONS:
@@ -470,8 +470,12 @@ def act(
         attempt = conn.execute("SELECT * FROM exam_attempt WHERE id = ?", (attempt_id,)).fetchone()
         if attempt is None:
             raise ExamError(404, "no_attempt", "Такого прохождения нет.")
+        done = conn.execute(
+            "SELECT outcome FROM exam_action WHERE attempt_id = ? AND action_id = ?",
+            (attempt_id, action_id),
+        ).fetchone()
         if attempt["status"] != "running":
-            if action == "submit" or attempt["last_action"] == action_id:
+            if action == "submit" or done is not None:
                 return "submitted"  # сдача идемпотентна: ответы после неё не меняются
             raise ExamError(
                 409, "not_running", "Этот вариант уже не идёт: он сдан или время вышло."
@@ -480,8 +484,8 @@ def act(
         if t >= deadline:
             _finish(conn, attempt, "time", deadline)
             return "time"
-        if attempt["last_action"] == action_id:
-            return "replay"
+        if done is not None:  # принятый идентификатор: тот же результат, действие не повторяется
+            return done[0]
         if rev != attempt["rev"] or shown != _current_position(conn, attempt_id):
             raise ExamError(
                 409, "stale",
@@ -503,9 +507,10 @@ def act(
         elif action == "submit":
             _finish(conn, attempt, "manual", t)
             outcome = "submitted"
+        conn.execute("UPDATE exam_attempt SET rev = rev + 1 WHERE id = ?", (attempt_id,))
         conn.execute(
-            "UPDATE exam_attempt SET rev = rev + 1, last_action = ? WHERE id = ?",
-            (action_id, attempt_id),
+            "INSERT INTO exam_action (attempt_id, action_id, outcome) VALUES (?, ?, ?)",
+            (attempt_id, action_id, outcome),
         )
     return outcome
 
@@ -602,6 +607,19 @@ def _overlaps_running(conn, attempt_id: int, now: datetime) -> bool:
     return _overlaps_now(conn, attempt_id)
 
 
+def stable(conn, build):
+    """Сборка экрана в снимке чтения и свежая проверка ПОСЛЕ неё, вне снимка: если во время
+    сборки стартовал вариант, экран пересобирается с новым замком. build(hidden) -> данные."""
+    for _ in range(3):
+        with seq.read_snapshot(conn):
+            hidden = running_task_ids(conn)
+            data = build(hidden)
+        if running_task_ids(conn) <= hidden:
+            return data
+    with seq.read_snapshot(conn):
+        return build(running_task_ids(conn))
+
+
 def result(conn, attempt_id: int, now: datetime) -> dict:
     """Итог сданного прохождения; идущее не показывается."""
     attempt = conn.execute("SELECT * FROM exam_attempt WHERE id = ?", (attempt_id,)).fetchone()
@@ -614,7 +632,10 @@ def result(conn, attempt_id: int, now: datetime) -> dict:
     with seq.read_snapshot(conn):  # проверка и данные - из одного состояния базы
         if _overlaps_now(conn, attempt_id):
             raise ExamError(409, "exam_running", RUNNING_MESSAGE)
-        return _result_data(conn, attempt_id)
+        data = _result_data(conn, attempt_id)
+    if _overlaps_now(conn, attempt_id):  # свежая проверка после сборки, вне снимка
+        raise ExamError(409, "exam_running", RUNNING_MESSAGE)
+    return data
 
 
 def _result_data(conn, attempt_id: int) -> dict:
@@ -671,7 +692,8 @@ def figure_png(conn, attempt_id: int, position: int) -> bytes | None:
 
 def history(conn, now: datetime) -> list[dict]:
     expire_due(conn, now)
-    with seq.read_snapshot(conn):  # скрытие и данные строк - из одного состояния базы
+
+    def build(_hidden):  # скрытие и данные строк - из одного состояния базы
         return [
             {
                 "id": r["id"], "title": r["title"], "submitted_at": r["submitted_at"],
@@ -682,3 +704,5 @@ def history(conn, now: datetime) -> list[dict]:
             ).fetchall()
             if not _overlaps_now(conn, r["id"])
         ]  # fmt: skip
+
+    return stable(conn, build)

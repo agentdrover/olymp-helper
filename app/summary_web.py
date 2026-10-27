@@ -13,7 +13,6 @@ from app import exam, privacy, summary
 from app.ingest.web import TEMPLATES, Db, child_notice_gate
 from app.notice import notice_redirect
 from app.roles import now_of, require_csrf, require_parent
-from app.tutor import seq
 from app.tutor.web import _needs_notice, child_same_origin
 
 child = APIRouter()
@@ -26,13 +25,7 @@ parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)]
 def _my_data(conn, now, selected_id: int | None) -> dict:
     exam.expire_due(conn, now)
     summary.ensure(conn, now)  # запись - до снимка чтения
-    for _ in range(3):
-        with seq.read_snapshot(conn):  # замок олимпиады и данные экрана - из одного состояния базы
-            hidden = exam.running_task_ids(conn)
-            data = _my_data_in(conn, now, selected_id, hidden)
-        if exam.running_task_ids(conn) <= hidden:  # свежая проверка после сборки, вне снимка
-            return data
-    return _my_data_in(conn, now, selected_id, exam.running_task_ids(conn))  # пересборка с фильтром
+    return exam.stable(conn, lambda hidden: _my_data_in(conn, now, selected_id, hidden))
 
 
 def _my_data_in(conn, now, selected_id: int | None, hidden) -> dict:
@@ -91,12 +84,14 @@ def my_summary_json(session_id: int, request: Request, conn: Db):
     now = now_of(request)
     exam.expire_due(conn, now)
     summary.ensure(conn, now)  # запись - до снимка чтения
-    with seq.read_snapshot(conn):
+
+    def build(hidden):
         found = summary.get_summary(conn, session_id, now, write=False)
         if found is None:
             raise HTTPException(404, "Итога этого занятия нет")
-        hidden = exam.running_task_ids(conn)
-        return JSONResponse(summary.present(conn, found, child=True, hidden=hidden))
+        return summary.present(conn, found, child=True, hidden=hidden)
+
+    return JSONResponse(exam.stable(conn, build))
 
 
 @child.post(
@@ -111,8 +106,9 @@ def finish(request: Request, conn: Db):
             status_code=409,
         )
     exam.expire_due(conn, now_of(request))
-    with seq.read_snapshot(conn):
-        shown = summary.present(conn, built, child=True, hidden=exam.running_task_ids(conn))
+    shown = exam.stable(
+        conn, lambda hidden: summary.present(conn, built, child=True, hidden=hidden)
+    )
     return JSONResponse({"ok": True, "session_id": built["session_id"], "summary": shown})
 
 

@@ -1018,3 +1018,42 @@ def test_every_child_route_is_classified(tmp_path):
                 seen.add((method, route.path))
     assert seen - set(classes) == set(), f"маршрут без класса: {sorted(seen - set(classes))}"
     assert set(classes) - seen == set(), "в таблице есть несуществующий маршрут"
+
+
+def test_any_accepted_action_id_is_idempotent_not_only_the_last(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        form_a = form_of(c)
+        assert act(c, "mark", form_a).status_code == 303  # A принято на ревизии 0
+        assert at(c, 1, "save", a="Б").status_code == 303  # B принято позже
+        rev = form_of(c)["rev"]
+        n = db(tmp_path).execute("SELECT COUNT(*) FROM exam_view").fetchone()[0]
+        again = act(c, "mark", form_a)  # повтор A
+        assert again.status_code == 303 and again.headers["location"] == "/exam/run"
+        assert form_of(c)["rev"] == rev and current(c)[1]["items"][0]["marked"]
+        assert db(tmp_path).execute("SELECT COUNT(*) FROM exam_view").fetchone()[0] == n
+
+
+def test_results_and_history_started_during_assembly_give_nothing(tmp_path, monkeypatch):
+    c, clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        a = _submitted_attempt(c)
+        real = exam._result_data
+
+        def racing(conn, attempt_id):
+            data = real(conn, attempt_id)
+            other = open_db(tmp_path / "olymp.db")
+            try:
+                exam.start(other, clock(), mode="real", material_id=1)
+            finally:
+                other.close()
+            return data
+
+        monkeypatch.setattr(exam, "_result_data", racing)
+        r = c.get(f"/api/exam/results/{a}", headers=CHILD)
+        assert r.status_code == 409 and "score" not in r.text

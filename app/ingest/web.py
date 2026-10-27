@@ -32,7 +32,7 @@ from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, csrf_token, current_role, now_of, require_csrf, require_parent
 from app.search import search
 from app.search.tasks import search_published_tasks
-from app.tutor import catalog, seq
+from app.tutor import catalog
 
 log = logging.getLogger("app.ingest")
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
@@ -730,9 +730,9 @@ def tasks_page(
               "status": status}  # fmt: skip
     active = any(v.strip() for v in params.values())
     exam.expire_due(conn, now_of(request))  # запись - до снимка чтения
-    with seq.read_snapshot(conn):  # замок олимпиады и данные карты - из одного состояния базы
-        blocks = catalog.build_blocks(conn)
-        found = catalog.filter_tasks(conn, **params)
+    blocks, found = exam.stable(  # замок олимпиады и данные карты - из одного состояния базы
+        conn, lambda _hidden: (catalog.build_blocks(conn), catalog.filter_tasks(conn, **params))
+    )
     current = next((b for b in blocks if str(b["pos"]) == theme), None)
     return TEMPLATES.TemplateResponse(
         request,

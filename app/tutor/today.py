@@ -11,7 +11,7 @@ from app import exam
 from app.exam_countdown import exam_countdown
 from app.ingest.publish import is_published
 from app.model.ledger import moscow_day
-from app.tutor import seq, state
+from app.tutor import state
 
 
 def _label(material) -> str:
@@ -50,8 +50,7 @@ def _reason(run, flags) -> str | None:
 
 def build_today(conn, now: datetime) -> dict:
     exam.expire_due(conn, now)  # запись - до снимка чтения
-    with seq.read_snapshot(conn):  # замок олимпиады и данные экрана - из одного состояния базы
-        return _today_data(conn, now, exam.running_task_ids(conn))
+    return exam.stable(conn, lambda hidden: _today_data(conn, now, hidden))
 
 
 def _today_data(conn, now: datetime, hidden) -> dict:
