@@ -21,6 +21,8 @@ from app.ingest.render import PageCache
 from app.ingest.web import parent as parent_router
 from app.ingest.web import public as public_router
 from app.sessions import utcnow
+from app.summary_web import child as summary_child
+from app.summary_web import parent as summary_parent
 from app.tutor.panel import Inflight
 from app.tutor.web import router as tutor_router
 from app.voice.service import VoiceService
@@ -137,6 +139,8 @@ def create_app(
     app.include_router(account_public)
     app.include_router(parent_router)
     app.include_router(tutor_router)
+    app.include_router(summary_child)
+    app.include_router(summary_parent)
     app.include_router(voice_router)
     app.include_router(public_router)
 
