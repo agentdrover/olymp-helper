@@ -84,16 +84,26 @@ RANK = {"pending": 1, "running": 2, "done": 3, "failed": 3}
 
 
 def version(conn, task_id: int) -> str:
-    """Версия экрана «<номер последнего шага>.<ранг>»: растёт монотонно за жизнь шага и между шагами
-    (идёт < окончен); экран без шагов - «0.0». Клиент применяет ответ, только если версия не меньше
-    уже применённой, поэтому опоздавший ответ (POST или опрос) не откатывает экран. Строка
-    «pending» живёт внутри одного запроса и может исчезнуть (discard), поэтому в версию не входит."""
+    """Версия экрана «<прогон>.<событие>.<шаг>.<ранг>», сравнивается по частям слева направо и растёт
+    монотонно при ЛЮБОМ изменении состояния панели: новый прогон (повтор), попытка, подсказка,
+    отметка ключа, объяснение (последний id события задания), новый шаг, переход шага
+    (идёт < окончен). Экран без прогонов, событий и шагов - «0.0.0.0». Клиент применяет ответ,
+    только если версия не меньше уже применённой, поэтому опоздавший ответ (POST или опрос) не
+    откатывает экран. Строка «pending» живёт внутри одного запроса и может исчезнуть (discard),
+    поэтому в версию не входит."""
+    run = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM tutor_run WHERE task_item_id = ?", (task_id,)
+    ).fetchone()[0]
+    seq = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM event WHERE task_item_id = ?", (task_id,)
+    ).fetchone()[0]
     row = conn.execute(
         "SELECT id, status FROM tutor_step WHERE task_item_id = ? AND status != 'pending' "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return "0.0" if row is None else f"{row['id']}.{RANK.get(row['status'], 3)}"
+    step, rank = (0, 0) if row is None else (row["id"], RANK.get(row["status"], 3))
+    return f"{run}.{seq}.{step}.{rank}"
 
 
 def elapsed(row, now: datetime) -> int:

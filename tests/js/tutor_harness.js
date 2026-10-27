@@ -237,6 +237,23 @@ const scenarios = {
     for (let i = 0; i < 3; i++) await advance(2600);
     if (get(".helper-status").attrs["data-version"] !== "6.3") throw new Error("loop died: " + get(".helper-status").attrs["data-version"]);
   },
+  // Codex 3: ответ на отметку ключа (старый прогон) опоздал к новому прогону того же шага: форму не затирает.
+  async older_run_response_does_not_replace_new_run_form() {
+    boot(screen("idle", ' data-version="2.9.5.3"'));
+    const dispute = deferred();
+    page.postq.push(() => dispute.p, ok(screen("idle", ' data-version="3.11.5.3"')));
+    const click = () => page.handlers.click[0]({ target: { closest: () => get("button") } });
+    click();  // «Кажется, ключ неверный»: ответ задержан
+    await settle();
+    click();  // «Разобрать ещё раз»: новый прогон
+    await settle();
+    if (get(".helper-status").attrs["data-version"] !== "3.11.5.3") throw new Error("new run not applied");
+    page.els.find((e) => e.attrs.value === "Б").checked = true;  // ребёнок выбрал ответ
+    dispute.res({ text: () => Promise.resolve(screen("idle", ' data-version="2.10.5.3"')), headers: { get: () => null } });
+    await settle();
+    if (get(".helper-status").attrs["data-version"] !== "3.11.5.3") throw new Error("old run response replaced the screen");
+    if (checkedOf("answer").join() !== "Б") throw new Error("selected answer lost");
+  },
 };
 
 const name = process.argv[2];

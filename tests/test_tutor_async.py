@@ -527,27 +527,45 @@ def test_every_panel_response_carries_a_version_that_grows_with_the_step(tmp_pat
     c, _clock = boot_bg(tmp_path, model)
     with c:
         tid = seed(tmp_path, key="Б")
-        wrong_attempt(c, tid, model)
 
         def ver(html):
-            m = re.search(r'data-version="(\d+)\.(\d+)"', html)
+            m = re.search(r'data-version="(\d+)\.(\d+)\.(\d+)\.(\d+)"', html)
             assert m, "ответ панели без версии"
-            return int(m[1]), int(m[2])
+            return tuple(int(g) for g in m.groups())
 
-        before = ver(fragment(c, tid))
-        assert ver(c.get(f"/tasks/{tid}", headers=CHILD).text) == before  # страница задания
+        seen = [ver(c.get(f"/tasks/{tid}", headers=CHILD).text)]  # страница задания
+
+        def now():
+            v = ver(fragment(c, tid))
+            assert v > seen[-1], (v, seen)  # строго растёт после КАЖДОГО изменения
+            seen.append(v)
+
+        model.release.set()
+        assert attempt(c, tid, "Б").status_code == 200  # решено
+        c.app.state.steps.join()
+        now()
+        assert post(c, tid, "dispute").status_code == 200  # отметка ключа
+        now()
+        assert post(c, tid, "repeat").status_code == 200  # новый прогон
+        now()
+        assert attempt(c, tid, "А").status_code == 200  # попытка
+        c.app.state.steps.join()
+        now()
+        model.release.clear()
+        model.entered.clear()
         r = c.post(
             f"/tasks/{tid}/hint", json={"level": 1}, headers={**CHILD, "HX-Request": "true"}
-        )  # POST отвечает фрагментом
+        )  # POST отвечает фрагментом: шаг идёт
         running = ver(r.text)
-        assert running > before and running[1] == 2  # шаг идёт
-        assert ver(fragment(c, tid)) == running  # опрос видит ту же версию
+        assert running > seen[-1] and running[3] == 2
+        assert ver(fragment(c, tid)) == running  # опрос видит ту же версию, что POST
+        seen.append(running)
         model.release.set()
         c.app.state.steps.join()
-        done = ver(fragment(c, tid))
-        assert done > running and done[0] == running[0] and done[1] == 3  # шаг окончен
+        now()
+        assert seen[-1][3] == 3
         assert c.get(f"/api/tasks/{tid}/tutor", headers=CHILD).json()["panel"]["version"] == (
-            f"{done[0]}.{done[1]}"
+            ".".join(map(str, seen[-1]))
         )
 
 

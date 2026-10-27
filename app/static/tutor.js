@@ -32,23 +32,28 @@
   var pollUntil = 0;      // до этого момента опрос идёт, даже если панель в покое (сервер мог начать шаг)
   var appliedBusy = false;    // последнее применённое состояние: шаг идёт
   var appliedPanel = "idle";
-  var lastVer = null;     // версия последнего применённого ответа: [номер шага, ранг]
+  var lastVer = null;     // версия последнего применённого ответа: числа по частям
   var tickTimer = null;
   var tickBase = null;
 
   function busyNode() { return root.querySelector(BUSY_SEL); }
 
-  // Версию отдаёт сервер в каждом ответе панели (POST и опрос): «<шаг>.<ранг>», растёт монотонно.
-  // Ответ с меньшей версии, чем уже применённая, опоздал - отбрасывается, откуда бы он ни пришёл.
+  // Версию отдаёт сервер в каждом ответе панели (POST и опрос): «<прогон>.<событие>.<шаг>.<ранг>»,
+  // растёт при любом изменении состояния. Части сравниваются слева направо; ответ с меньшей версией,
+  // чем уже применённая, опоздал - отбрасывается, откуда бы он ни пришёл. Равная версия применяется.
   function versionOf(html) {
-    var m = /data-version="(\d+)\.(\d+)"/.exec(html);
-    return m ? [parseInt(m[1], 10), parseInt(m[2], 10)] : null;
+    var m = /data-version="(\d+(?:\.\d+)*)"/.exec(html);
+    return m ? m[1].split(".").map(function (n) { return parseInt(n, 10); }) : null;
   }
 
   function isOld(html) {
     var v = versionOf(html);
     if (!v || !lastVer) return false;
-    return v[0] < lastVer[0] || (v[0] === lastVer[0] && v[1] < lastVer[1]);
+    for (var i = 0; i < Math.max(v.length, lastVer.length); i++) {
+      var a = v[i] || 0, b = lastVer[i] || 0;
+      if (a !== b) return a < b;
+    }
+    return false;
   }
 
   function nextDelay() {
