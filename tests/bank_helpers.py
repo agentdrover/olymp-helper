@@ -196,6 +196,20 @@ class BlockingModel:
         return ModelResult(None, reply(make_task(1, self.text)), "claude", "stub", 1, None)
 
 
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+        self._lock = threading.Lock()
+
+    def now(self):
+        with self._lock:
+            return self.t
+
+    def advance(self, seconds):
+        with self._lock:
+            self.t += seconds
+
+
 # ------------------------------------------------------------------ app helpers
 
 

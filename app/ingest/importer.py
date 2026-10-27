@@ -1,5 +1,6 @@
 """Импорт материала: текст по страницам, разбиение на задания моделью, запись (SPEC-1.0 1.7)."""
 
+import functools
 import json
 import logging
 import re
@@ -161,8 +162,10 @@ def _span(numbers: list[int]) -> str:
     return f"стр. {first}" if first == last else f"стр. {first}–{last}"
 
 
-def _ask(ctx, system: str, message: str, cancel: threading.Event):
+def _ask(ctx, system: str, message: str, cancel: threading.Event, pulse=None):
     _check(cancel)
+    if pulse is not None:
+        pulse()  # каждый запрос к модели - начало нового срока молчания
     result = ctx.model.complete(system, [{"role": "user", "content": message}], TASKS_SCHEMA)
     _check(cancel)
     if not getattr(result, "ok", False):
@@ -217,17 +220,17 @@ def _salvage(payload, numbers: set[int], catalog, skipped: list[str]):
     return good, _section_at_end(payload)
 
 
-def _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped):
+def _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped, pulse=None):
     """(задания порции, section_at_end). Неверная структура: одна повторная просьба с текстом
     ошибки, затем поштучный разбор; порция не валит импорт."""
     numbers = {n for n, _ in chunk}
     message = build_chunk_message(chunk, state)
-    payload = _ask(ctx, system, message, cancel)
+    payload = _ask(ctx, system, message, cancel, pulse)
     try:
         return _validate_chunk(payload, numbers, catalog)
     except InvalidStructure as exc:
         note = RETRY_NOTE.format(error=exc.safe)
-    payload = _ask(ctx, system, f"{message}\n\n{note}", cancel)
+    payload = _ask(ctx, system, f"{message}\n\n{note}", cancel, pulse)
     try:
         return _validate_chunk(payload, numbers, catalog)
     except InvalidStructure:
@@ -243,10 +246,10 @@ def skipped_note(skipped: list[str]) -> str | None:
     return text
 
 
-def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None = None):
+def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None = None, report=None):
     """Задания из всех порций. Номера повторяются по разделам: ключ дедупликации - (раздел,
     номер); состояние раздела (раздел, вариант, этап) переходит между порциями. Не разобранное
-    добавляется в skipped."""
+    добавляется в skipped. report(порция, всего порций, принято заданий) - ход разбора."""
     skipped = [] if skipped is None else skipped
     seen: dict[tuple, dict] = {}
     state = dict.fromkeys(META)  # состояние на конец предыдущей порции
@@ -256,8 +259,12 @@ def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None =
     finally:
         conn.close()
     system = SYSTEM_PROMPT + "\n" + catalog_prompt(catalog)
-    for chunk in chunk_pages(pages):
-        parsed, at_end = _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped)
+    chunks = chunk_pages(pages)
+    for index, chunk in enumerate(chunks, start=1):
+        if report is not None:
+            report(index, len(chunks), len(seen))
+        pulse = None if report is None else functools.partial(report, index, len(chunks), len(seen))
+        parsed, at_end = _chunk_tasks(ctx, system, chunk, state, catalog, cancel, skipped, pulse)
         for task in parsed:
             state = merge_labels(state, task)
             if task.get("labels_only"):
@@ -267,6 +274,8 @@ def split_tasks(ctx, pages, cancel: threading.Event, skipped: list[str] | None =
             seen[key] = merge_repeat(seen[key], task) if key in seen else task
         if at_end:  # заголовок после последнего задания важнее состояния последнего задания
             state = merge_labels(state, at_end)
+        if report is not None:
+            report(index, len(chunks), len(seen))
     return list(seen.values())
 
 
@@ -376,12 +385,17 @@ def _foreign(task: dict) -> list[str]:
     return answer_units(task.get("answer_text"))
 
 
-def _write_tasks(conn, material, tasks, pdf: bytes) -> int:
+def _write_tasks(conn, material, tasks, pdf: bytes, cancel=None, report=None) -> int:
     doc = pymupdf.open("pdf", pdf)
     try:
         located = _positions(PageIndex(doc), tasks)
         stops = _stops(located)
         for index, task in enumerate(tasks):
+            if cancel is not None:
+                # истечение не отменяет уже завершённую запись: после последнего задания done верен
+                _check(cancel)  # прерванный запуск не пишет дальше; транзакция откатится
+            if report is not None:
+                report(index + 1, len(tasks))
             reason, wants_figure = _classify(task)
             figure = None
             if wants_figure:
@@ -492,9 +506,15 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
             or material["run_id"] != run_id
         ):
             return
+        ctx.progress.begin(material_id, run_id)
         try:
             pdf = ctx.material_path(material["file"]).read_bytes()
-            pages = extract_pages(pdf)
+            pages = extract_pages(
+                pdf,
+                lambda done, total: ctx.progress.update(
+                    material_id, run_id, done, total, phase="reading"
+                ),
+            )
             if not any(text for _, text in pages):
                 raise ImportFailure(NO_TEXT)
             _check(cancel)
@@ -533,7 +553,15 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 _finish(conn, material_id, run_id, len(pages), write_key, recheck)
             else:
                 skipped: list[str] = []
-                tasks = split_tasks(ctx, pages, cancel, skipped)
+                tasks = split_tasks(
+                    ctx,
+                    pages,
+                    cancel,
+                    skipped,
+                    lambda chunk, total, accepted: ctx.progress.update(
+                        material_id, run_id, chunk, total, accepted
+                    ),
+                )
                 note = skipped_note(skipped)
                 if not tasks and not note:
                     raise ImportFailure("Модель не нашла в файле ни одного задания.")
@@ -542,7 +570,16 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                     material_id,
                     run_id,
                     len(pages),
-                    lambda: _write_tasks(conn, material, tasks, pdf),
+                    lambda: _write_tasks(
+                        conn,
+                        material,
+                        tasks,
+                        pdf,
+                        cancel,
+                        lambda done, total: ctx.progress.update(
+                            material_id, run_id, done, total, phase="writing"
+                        ),
+                    ),
                     note=note,
                 )
         except ImportAborted:
@@ -555,4 +592,5 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 conn, material_id, run_id, "Не удалось обработать PDF. Проверьте файл и повторите."
             )
     finally:
+        ctx.progress.clear(material_id, run_id)
         conn.close()
