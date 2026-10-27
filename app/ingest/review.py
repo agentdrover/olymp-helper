@@ -111,11 +111,19 @@ def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
         return {"revision": task["revision"], "key_version": task["key_version"]}
 
 
-def set_parent_key(ctx, conn, task_id: int, raw) -> dict:
+def set_parent_key(ctx, conn, task_id: int, raw, keep_candidate: bool = False) -> dict:
     task = _task(conn, task_id)
     if task["excluded"]:
         raise Refusal("Задание исключено.")
-    return set_key(ctx, conn, task_id, _parse_answer(task, raw), "parent")
+    value = _parse_answer(task, raw)
+    # keep_candidate: лента шлёт ответ карточки; если ключа ещё нет и ответ равен кандидату из файла,
+    # это не правка родителя - источник не меняется, кандидата поднимет подтверждение. Явный
+    # POST /key без флага по-прежнему ставит ключ родителя.
+    if keep_candidate and task["answer_key"] is None:
+        cand = candidate(conn, task)
+        if cand and cand["value"] == value:
+            return {"revision": task["revision"], "key_version": task["key_version"]}
+    return set_key(ctx, conn, task_id, value, "parent")
 
 
 # ------------------------------------------------------------------------ правки

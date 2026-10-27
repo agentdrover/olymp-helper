@@ -84,7 +84,7 @@
     if (key.text === "!") throw new Error("Выберите ответ для каждого рисунка.");
     if (!key.text) throw new Error("Выберите правильный ответ: без ключа задание не публикуется.");
     const snap = {
-      key: key.text, keep: key.box.dataset.candidate === "1" && key.text === key.box.dataset.current,
+      key: key.text,
       body: {
         rect_px: frame ? [frame.x0, frame.y0, frame.x1, frame.y1] : null, scale: PAGE_SCALE,
         page: Number(card().dataset.figurePage) || null,
@@ -107,10 +107,10 @@
       }
     };
     try {
-      // Ключ из загруженного файла без правки подтверждает сервер; всё остальное — ключ родителя.
-      if (!snap.keep) await step("ключ", "key", { answer: snap.key });
+      // Неизменённый ключ из файла сервер оставляет ключом файла: сравнивает он, не лента.
+      await step("ключ", "key", { answer: snap.key, keep_candidate: true });
       const done = await step("рисунок", "figure", snap.body);
-      if (done.status === "draft") await step("публикация", "confirm", {});
+      if (done.status === "draft") return await step("публикация", "confirm", {}); // следующая карточка из ответа
       return { next: { task_id: Number(id) }, counter, reason: done.reason };
     } finally {
       buttons.forEach((x) => { x.disabled = false; });
@@ -145,6 +145,9 @@
   function refreshPreview() {
     const img = feed.querySelector("[data-figure-img]");
     if (!img || !frame) return;
+    const slot = img.closest("figure");
+    if (slot) slot.hidden = false;  // карточка без областей: место под вырезку скрыто до первой рамки
+    img.hidden = false;
     const q = new URLSearchParams({
       page: card().dataset.figurePage || "", rect_px: [frame.x0, frame.y0, frame.x1, frame.y1].join(","),
       scale: PAGE_SCALE, t: Date.now(),

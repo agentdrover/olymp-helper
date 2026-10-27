@@ -8,7 +8,7 @@ const vm = require("vm");
 const SRC = fs.readFileSync(path.join(__dirname, "..", "..", "app", "static", "feed.js"), "utf8");
 const fail = (m) => { console.error("FAIL: " + m); process.exit(1); };
 
-function build() {
+function build(extra) {
   const calls = [];
   const gates = {};
   const handlers = {};
@@ -23,25 +23,31 @@ function build() {
   const box = { dataset: { candidate: "0", current: "" }, querySelectorAll: () => [] };
   const feed = {
     set innerHTML(h) { feed.html = h; }, get innerHTML() { return feed.html; },
-    querySelector(sel) { return sel === ".card" ? cardEl : sel === ".key-fields" ? box : null; },
+    querySelector(sel) { return sel === ".card" ? cardEl : sel === ".key-fields" ? box : sel === "[data-figure-img]" && extra ? extra.img : null; },
     querySelectorAll(sel) { return sel === "button" ? [figureBtn, skipBtn] : []; },
     addEventListener(t, fn) { (handlers[t] = handlers[t] || []).push(fn); },
   };
   const document = {
-    getElementById(id) { return id === "feed" ? feed : id === "counter" ? { textContent: "" } : fields[id] || null; },
+    getElementById(id) { return id === "feed" ? feed : id === "counter" ? { textContent: "" } : id === "page-img" && extra ? extra.page : id === "draft-frame" ? null : fields[id] || null; },
+    createElement() { return { style: {} }; },
     querySelector(sel) { return sel.includes("leak") ? { value: "none" } : null; },
     addEventListener() {},
   };
+  const replies = {};
+  const bodies = [];
   const fetch = (url, opts) => {
     calls.push(url);
-    const reply = () => ({ ok: true, redirected: false, status: 200, json: async () => ({ status: "draft", next: null }), text: async () => "" });
+    const hit = Object.keys(replies).find((g) => url.endsWith(g));
+    const body = hit ? replies[hit] : { status: "draft", next: null };
+    bodies.push(opts && opts.body);
+    const reply = () => ({ ok: true, redirected: false, status: 200, json: async () => body, text: async () => "" });
     const gate = Object.keys(gates).find((g) => url.endsWith(g));
     return gate ? gates[gate].then(reply) : Promise.resolve(reply());
   };
   const ctx = { document, fetch, location: {}, Number, JSON, Array, URLSearchParams, Date, setTimeout, clearTimeout, console, Error, Promise };
   vm.runInNewContext(SRC, ctx);
   const click = (btn) => { if (!btn.disabled) return handlers.click[0]({ target: { closest: (s) => (s.startsWith("button") ? btn : null) } }); };
-  return { calls, gates, cardEl, figureBtn, skipBtn, click };
+  return { calls, gates, replies, bodies, cardEl, figureBtn, skipBtn, click, feed, document, handlers };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
@@ -62,6 +68,33 @@ const scenarios = {
     const want = ["/parent/tasks/1/key", "/parent/tasks/1/figure", "/parent/tasks/1/confirm"];
     if (JSON.stringify(posts) !== JSON.stringify(want)) fail("вызовы " + JSON.stringify(posts));
   },
+};
+
+scenarios.publish_moves_to_next_card = async function () {
+  const p = build();
+  p.replies["/1/confirm"] = { next: { task_id: 2 }, counter: "2 из 2" };
+  p.click(p.figureBtn);
+  await tick(); await tick(); await tick();
+  if (!String(p.bodies[0]).includes('"keep_candidate":true')) fail("ключ без keep_candidate: " + p.bodies[0]);
+  const shown = p.calls.filter((u) => u.includes("/parent/review/"));
+  if (JSON.stringify(shown) !== JSON.stringify(["/parent/review/2?fragment=1"])) fail("показано " + JSON.stringify(shown));
+};
+
+scenarios.frame_fills_empty_preview = async function () {
+  const listeners = {};
+  const img = { src: "", hidden: true, alt: "", dataset: {}, parentElement: null };
+  const figure = { hidden: true, querySelector: () => img };
+  img.closest = (s) => (s === "figure" ? figure : null);
+  const page = {
+    naturalWidth: 900, naturalHeight: 1200, parentElement: { appendChild() {} },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 1200 }),
+    addEventListener(t, fn) { listeners[t] = fn; },
+  };
+  const p = build({ page, img });
+  listeners.mousedown({ preventDefault() {}, clientX: 100, clientY: 100 });
+  listeners.mouseup({ clientX: 400, clientY: 500 });
+  if (!img.src.includes("figure-preview.png") || !img.src.includes("rect_px=")) fail("предпросмотр не запрошен: " + img.src);
+  if (figure.hidden || img.hidden) fail("место под вырезку осталось скрытым");
 };
 
 const name = process.argv[2];

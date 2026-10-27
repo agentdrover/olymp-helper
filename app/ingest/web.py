@@ -470,6 +470,7 @@ class EditBody(BaseModel):
 
 class KeyBody(BaseModel):
     answer: str
+    keep_candidate: bool = False  # лента: ответ карточки без правки не делает ключ родительским
 
 
 class ResolveBody(BaseModel):
@@ -598,7 +599,9 @@ def task_edit(task_id: int, body: EditBody, request: Request, conn: Db):
 @parent.post("/parent/tasks/{task_id}/key")
 @_action
 def task_key(task_id: int, body: KeyBody, request: Request, conn: Db):
-    return review.set_parent_key(ctx_of(request), conn, task_id, body.answer)
+    return review.set_parent_key(
+        ctx_of(request), conn, task_id, body.answer, keep_candidate=body.keep_candidate
+    )
 
 
 @parent.post("/parent/tasks/{task_id}/resolve")

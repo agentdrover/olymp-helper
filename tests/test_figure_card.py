@@ -21,6 +21,7 @@ from tests.bank_helpers import (
     figure_pdf,
     make_task,
     reply,
+    row,
     task_ids,
     upload,
     write_lines,
@@ -245,5 +246,61 @@ def test_the_chain_works_only_on_the_snapshot_card():
         capture_output=True,
         text=True,
         timeout=60,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_an_unchanged_file_key_posted_to_key_stays_the_file_key(tmp_path):
+    """Цепочка шлёт ключ карточки в /key: если родитель его не менял, ключ остаётся ключом файла."""
+    from tests.bank_helpers import key_pdf
+
+    task = make_task(11, "Определите, где чей рот.", type="match", figure=True, options=MATCH)
+    model = StubModel(split=reply(task), answer=answer_by_number({"11": "Б"}))
+    with TestClient(build_app(tmp_path, model)) as c:
+        assert upload(c, key_pdf({"11": "1-А, 2-Б"}), kind="key").status_code == 202
+        assert upload(c, figure_pdf("raster")).status_code == 202
+        tid = task_ids(tmp_path)[0]
+        card = c.get(f"/parent/tasks/{tid}", headers=PARENT).json()["card"]
+        assert card["key_is_candidate"] is True
+        # карточка показывает ключ через «; », лента могла прислать его через «, »: это один ключ
+        for same in ("1-А; 2-Б", "1-А, 2-Б", "2-Б, 1-А"):
+            body = {"answer": same, "keep_candidate": True}
+            r = c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json=body)
+            assert r.status_code == 200, r.text
+        saved = post_figure(c, tid, rect_px=[80, 150, 400, 400], scale=1.5, page=1)
+        assert saved.status_code == 200, saved.text
+        assert c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={}).status_code == 200
+        assert row(tmp_path, tid)["key_source"] == "official"
+        # настоящая правка остаётся ключом родителя
+        body = {"answer": "1-Б, 2-А", "keep_candidate": True}
+        r = c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json=body)
+        assert r.status_code == 200
+        assert row(tmp_path, tid)["key_source"] == "parent"
+
+
+def test_card_without_regions_still_has_a_preview_image_slot(tmp_path):
+    """Нет областей (начало не найдено): в «Как увидит ребёнок» есть место под вырезку."""
+    task = make_task(11, "Рассмотрите рисунок и выберите верный ответ.", figure=True, options=CELLS)
+    c, tid = start(tmp_path, task, figure_pdf("raster"))
+    with c:
+        conn = db(tmp_path)
+        figure = json.loads(
+            conn.execute("SELECT figure FROM task_item WHERE id = ?", (tid,)).fetchone()[0]
+        )
+        figure.update(regions=[], rect=None, page=None)
+        conn.execute("UPDATE task_item SET figure = ? WHERE id = ?", (json.dumps(figure), tid))
+        conn.close()
+        html = fragment(c, tid)
+        assert html.count("data-figure-img") == 1
+        slot = re.search(r"<figure[^>]*>(?:(?!</figure>).)*data-figure-img", html, re.DOTALL)
+        assert slot and "hidden" in slot.group(0)  # пустое место не показывается до рамки
+
+
+@pytest.mark.skipif(NODE is None, reason="node не установлен")
+@pytest.mark.parametrize("scenario", ["publish_moves_to_next_card", "frame_fills_empty_preview"])
+def test_feed_scenarios(scenario):
+    harness = Path(__file__).parent / "js" / "feed_chain_harness.js"
+    r = subprocess.run(
+        [NODE, str(harness), scenario], check=False, capture_output=True, text=True, timeout=60
     )
     assert r.returncode == 0, r.stdout + r.stderr

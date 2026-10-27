@@ -12,6 +12,8 @@
     <img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}">
     <p class="hint">{{ task.source }} · рисунок к заданию {{ task.number }}</p>
   </dialog>{% endif %}
+  {% elif preview %}
+  <figure class="figure" hidden><img alt="" data-figure-img hidden></figure>
   {% endif %}
   {% if v.correction %}<p class="notice-line" role="status">{{ v.correction }}</p>{% endif %}
   <p>{{ task.text }}</p>
