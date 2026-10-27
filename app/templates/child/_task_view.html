@@ -1,7 +1,12 @@
 {# Задание глазами ребёнка: рисунок, условие, ввод ответа. Один фрагмент для экрана ребёнка и для
    предпросмотра на карточке родителя (preview): там ввод виден, но проверить ответ нельзя. #}
 <section aria-label="Задание">
-  {% if task.figure %}
+  {% if task.figure and task.figure.tiles %}
+  <figure class="figure figure-tiles">
+    {% with tiles=task.figure.tiles, editor=False, alt=task.figure.alt %}{% include "child/_tiles.html" %}{% endwith %}
+    <figcaption class="hint">Рисунок: {{ task.source }}{% if not preview %} · вырезан и проверен родителем{% endif %}</figcaption>
+  </figure>
+  {% elif task.figure %}
   <figure class="figure">
     <a href="{{ task.figure.url }}"{% if not preview %} data-zoom{% endif %}><img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}" data-figure-img></a>
     <figcaption class="hint">Рисунок: {{ task.source }}{% if not preview %} · вырезан и проверен родителем

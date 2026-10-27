@@ -145,10 +145,11 @@ def test_card_shows_child_view_and_explains_checkboxes(tmp_path):
         before = counts(tmp_path)
         html = fragment(c, tid)
         assert "Как увидит ребёнок" in html
-        # общий с ребёнком фрагмент: тот же select на каждый левый элемент
-        assert 'name="pair-1"' in html and 'name="pair-2"' in html
-        assert "На картинках выше нет ответа?" in html
-        assert "Правильный ответ" in html and "Что на рисунках" in html
+        # ввод ключа на каждый левый элемент есть только у родителя (карточка v2, #2121)
+        assert 'data-key-left="1"' in html and 'data-key-left="2"' in html
+        assert 'name="pair-1"' not in html
+        assert "На картинках нет ответа?" in html
+        assert "Описать рисунки для подсказок" in html
         assert html.count('class="region-badge"') == 2  # номера областей на рамках страницы
         assert "Подтвердить рисунок" not in html and "teacher_note_ack" not in html
         assert "Только проверка по ключу" in html
@@ -189,8 +190,9 @@ def test_card_shows_child_view_and_explains_checkboxes(tmp_path):
         assert c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={}).status_code == 200
         child = c.get(f"/tasks/{tid}", headers=CHILD)
         assert child.status_code == 200
-        pick = re.compile(r'<select name="pair-1">.*?</select>', re.DOTALL)
-        assert pick.search(child.text).group(0) == pick.search(html).group(0)
+        # ребёнок получает свой блок ответов и ни одного поля ввода ключа
+        assert 'name="pair-1"' in child.text and "data-key-left" not in child.text
+        assert re.search(r'<select name="pair-1">', child.text)
 
 
 def test_published_match_keeps_hints_and_new_rule_needs_the_mark():

@@ -39,6 +39,7 @@
     counter.textContent = count || "";
     frame = null;
     bindPage();
+    refreshReady();
   }
 
   async function advance(data) { await show(data.next ? data.next.task_id : null, data.counter); }
@@ -48,7 +49,8 @@
     if (el) el.textContent = e.message;
     // Сервер нашёл в вырезке текст ответа: даём явно решить, что он допустим.
     const row = document.getElementById("leak-ack-row");
-    if (row && /напечатан текст ответа/.test(e.message)) row.hidden = false;
+    if (row && /напечатан текст ответа/.test(e.message)) { row.hidden = false; row.dataset.need = "1"; }
+    refreshReady();
   }
 
   // ---- карточка рисунка: шаги 1-4 и одна основная кнопка
@@ -61,15 +63,76 @@
     return lines.join("\n");
   }
 
-  // Ответ шага 2 строкой для действия key; "!" — для match выбраны не все рисунки.
+  // Ответ строкой для действия key; "!" — для match выбраны не все рисунки. Поля ответа стоят
+  // под плитками или в списке .key-fields: ищем по всей карточке.
   function keyAnswer() {
     const box = feed.querySelector(".key-fields");
-    if (!box) return { text: "", box: null };
-    const lefts = Array.from(box.querySelectorAll("[data-key-left]"));
-    if (!lefts.length) return { text: val("key_text").trim(), box };
+    if (!box) return { text: "", box: null, total: 0, chosen: 0 };
+    const lefts = Array.from(feed.querySelectorAll("[data-key-left]"));
+    if (!lefts.length) {
+      const text = val("key_text").trim();
+      return { text, box, total: 1, chosen: text ? 1 : 0 };
+    }
     const chosen = lefts.filter((x) => x.value);
-    if (chosen.length && chosen.length < lefts.length) return { text: "!", box };
-    return { text: chosen.map((x) => `${x.dataset.keyLeft}-${x.value}`).join(", "), box };
+    const base = { box, total: lefts.length, chosen: chosen.length };
+    if (chosen.length && chosen.length < lefts.length) return { ...base, text: "!" };
+    return { ...base, text: chosen.map((x) => `${x.dataset.keyLeft}-${x.value}`).join(", ") };
+  }
+
+  // Плитки в порядке показа и их привязка к номерам: уходят в запрос подтверждения как есть.
+  function tilesState() {
+    return Array.from(feed.querySelectorAll("[data-tile-id]")).map((li) => ({
+      id: li.dataset.tileId, label: li.dataset.label || null,
+    }));
+  }
+
+  // Единственное состояние готовности: от него зависят и кнопка, и Enter. Сервер проверяет то же
+  // самое заново, поэтому список здесь только объясняет, чего не хватает.
+  function problems() {
+    const out = [];
+    const leak = document.querySelector('input[name="leak"]:checked');
+    if (!leak) out.push("Ответьте на вопрос: есть ли ответ на картинках.");
+    else if (leak.value !== "none") out.push("Поправьте рамку на странице слева, затем ответьте «Ответа нет».");
+    const key = keyAnswer();
+    if (key.text === "!") out.push("Выберите ответ для каждого рисунка.");
+    else if (!key.text) out.push("Выберите правильный ответ: без ключа задание не публикуется.");
+    if (!val("alt").trim()) out.push("Напишите подпись к картинке.");
+    const row = document.getElementById("leak-ack-row");
+    const known = feed.querySelector("[data-tile-leak]") || (row && row.dataset.need === "1");
+    if (row && known && !checked("leak_ack")) out.push("В рисунке напечатан текст ответа: поправьте рамку или отметьте, что так и надо.");
+    const tiles = tilesState();
+    const labels = tiles.map((t) => t.label).filter(Boolean);
+    if (new Set(labels).size !== labels.length) out.push("Два рисунка привязаны к одному номеру.");
+    const box = key.box;
+    if (box && box.dataset.bound === "1" && labels.length !== tiles.length) out.push("Привяжите каждый рисунок к номеру задания.");
+    return out;
+  }
+
+  function setSum(name, ok, text) {
+    const el = feed.querySelector(`[data-sum="${name}"]`);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle("bad", ok === false);
+  }
+
+  function refreshReady() {
+    const list = problems();
+    const btn = feed.querySelector('button[data-action="figure"]');
+    if (btn) btn.disabled = list.length > 0;
+    const leak = document.querySelector('input[name="leak"]:checked');
+    const key = keyAnswer();
+    setSum("leak", leak && leak.value === "none", leak && leak.value === "none" ? "✓ Ответа на картинках нет" : "✗ Не отмечено, что ответа на картинках нет");
+    setSum("key", key.total > 0 && key.chosen === key.total, key.total > 0 && key.chosen === key.total
+      ? `✓ Ответ задан для ${key.chosen} из ${key.total}` : `✗ Ответ задан для ${key.chosen} из ${key.total || 1} — выберите`);
+    setSum("alt", !!val("alt").trim(), val("alt").trim() ? "✓ Подпись есть" : "✗ Подписи нет");
+    const rows = Array.from(feed.querySelectorAll("[data-note]"));
+    const filled = rows.filter((i) => i.value.trim()).length;
+    const head = document.getElementById("notes-summary");
+    if (head && rows.length) head.textContent = `Описать рисунки для подсказок · ${filled} из ${rows.length}`;
+    const pill = document.getElementById("mode-pill");
+    const hints = !!(pill && /С подсказками/.test(pill.textContent || ""));
+    setSum("hints", null, hints ? "Подсказки: включены" : "Подсказки: выключены — откройте «Описать рисунки», если нужны");
+    return list;
   }
 
   async function publishFigure() {
@@ -77,12 +140,11 @@
     // «Пропустить» или смена карточки во время запроса не переносят шаги на другое задание.
     const id = taskId();
     const counter = card().dataset.counter;
+    const list = problems();
+    if (list.length) throw new Error(list[0]);
     const leak = document.querySelector('input[name="leak"]:checked');
-    if (!leak) throw new Error("Ответьте на шаг 1: есть ли ответ на картинках.");
-    if (leak.value !== "none") throw new Error("Поправьте рамку на странице слева, затем ответьте «Да, ответа нет».");
     const key = keyAnswer();
-    if (key.text === "!") throw new Error("Выберите ответ для каждого рисунка.");
-    if (!key.text) throw new Error("Выберите правильный ответ: без ключа задание не публикуется.");
+    const tiles = tilesState();
     const snap = {
       key: key.text,
       body: {
@@ -91,6 +153,7 @@
         alt: val("alt"), teacher_note: teacherNote(),
         no_answer_ack: leak.value === "none", teacher_note_ack: checked("note_ack"),
         leak_ack: checked("leak_ack"),
+        tiles: tiles.length ? tiles : null,
       },
     };
     const buttons = Array.from(feed.querySelectorAll("button"));
@@ -114,6 +177,7 @@
       return { next: { task_id: Number(id) }, counter, reason: done.reason };
     } finally {
       buttons.forEach((x) => { x.disabled = false; });
+      refreshReady();
     }
   }
 
@@ -161,8 +225,56 @@
       if (img) img.alt = e.target.value;
     }
     if (e.target.matches("[data-note], #note_free, #note_ack")) refreshMode();
+    refreshReady();
   });
-  feed.addEventListener("change", (e) => { if (e.target.id === "note_ack") refreshMode(); });
+  feed.addEventListener("change", (e) => {
+    if (e.target.id === "note_ack") refreshMode();
+    if (e.target.matches && e.target.matches("[data-tile-bind]")) {
+      const li = e.target.closest("[data-tile-id]");
+      if (li) li.dataset.label = e.target.value;
+      refreshTiles();  // ключ идёт за номером: поля под плитками собираются заново
+    }
+    refreshReady();
+  });
+
+  // Плитки и ввод ответа по текущей рамке: сервер отдаёт тот же фрагмент, что и карточка.
+  // Выбранные ответы переживают замену по номеру плитки, а не по месту.
+  async function refreshTiles() {
+    const area = document.getElementById("figure-area");
+    if (!area) return;
+    const id = taskId();
+    const kept = {};
+    feed.querySelectorAll("[data-key-left]").forEach((x) => { kept[x.dataset.keyLeft] = x.value; });
+    const single = document.getElementById("key_text");
+    const keptSingle = single ? single.value : null;
+    const q = new URLSearchParams({
+      state: tilesState().map((t) => `${t.id}:${t.label || ""}`).join(","),
+    });
+    if (frame) {
+      q.set("page", card().dataset.figurePage || "");
+      q.set("rect_px", [frame.x0, frame.y0, frame.x1, frame.y1].join(","));
+      q.set("scale", PAGE_SCALE);
+    }
+    const r = await fetch(`/parent/tasks/${id}/figure-tiles?${q}`);
+    if (!r.ok || taskId() !== id) return;  // карточка успела смениться
+    area.innerHTML = await r.text();
+    feed.querySelectorAll("[data-key-left]").forEach((x) => { if (kept[x.dataset.keyLeft]) x.value = kept[x.dataset.keyLeft]; });
+    const again = document.getElementById("key_text");
+    if (again && keptSingle) again.value = keptSingle;
+    const row = document.getElementById("leak-ack-row");
+    if (row && feed.querySelector("[data-tile-leak]")) row.hidden = false;
+    refreshReady();
+  }
+
+  function moveTile(li, dir) {
+    const other = dir < 0 ? li.previousElementSibling : li.nextElementSibling;
+    if (!other) return;
+    if (dir < 0) li.parentNode.insertBefore(li, other); else li.parentNode.insertBefore(other, li);
+    Array.from(feed.querySelectorAll("[data-tile-id]")).forEach((x, i) => {
+      const num = x.querySelector("[data-tile-num]");
+      if (num && !x.dataset.label) num.textContent = String(i + 1);
+    });
+  }
 
   const actions = {
     confirm: () => post("confirm", { answer: val("answer") || null }),
@@ -199,6 +311,11 @@
       if (shown) { shown.src = link.dataset.pageUrl; frame = null; }
       return;
     }
+    const mover = e.target.closest("[data-tile-move]");
+    if (mover) {
+      moveTile(mover.closest("[data-tile-id]"), Number(mover.dataset.tileMove));
+      return refreshReady();
+    }
     const b = e.target.closest("button[data-action]");
     if (!b) return;
     if (b.dataset.action === "edit") return toggleEdit();
@@ -206,12 +323,20 @@
   });
 
   document.addEventListener("keydown", (e) => {
-    const t = e.target;
+    // Enter на переключателе или флажке своего действия не имеет: он подтверждает карточку.
+    const choice = e.target && e.target.closest && e.target.closest("input[type=radio], input[type=checkbox]");
+    const t = choice && e.key === "Enter" ? null : e.target;
     // В поле ввода все клавиши принадлежат полю.
     if (t && t.closest && t.closest("input, textarea, select, [contenteditable]")) return;
     if (e.key === "Enter") {
       // Enter на кнопке или ссылке (например, «Выйти») нажимает её, а не подтверждает задание.
       if (t && t.closest && t.closest("button, a")) return;
+      const fig = feed.querySelector('button[data-action="figure"]');
+      if (fig) {  // карточка рисунка: Enter подчиняется тому же состоянию, что и кнопка
+        e.preventDefault();
+        if (!fig.disabled) fig.click();
+        return;
+      }
       const b = feed.querySelector('button[data-action="confirm"], button[data-action="resolve"][data-choice="key"]');
       if (b) { e.preventDefault(); b.click(); }
     } else if (e.key === "ArrowRight") {
@@ -247,8 +372,12 @@
       frame = { x0: Math.min(start[0], end[0]), y0: Math.min(start[1], end[1]), x1: Math.max(start[0], end[0]), y1: Math.max(start[1], end[1]) };
       start = null;
       drawFrame(img);
+      const row = document.getElementById("leak-ack-row");
+      if (row) row.dataset.need = "";  // прежняя находка относилась к прежней рамке
       refreshPreview();
+      refreshTiles();
     });
   }
   bindPage();
+  refreshReady();
 })();
