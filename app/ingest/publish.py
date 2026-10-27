@@ -58,7 +58,40 @@ def designations(options) -> set[str]:
     for text in texts:
         found.update(_DIGITS.findall(text))
         found.update(_LETTER.findall(text))
+    if isinstance(options, dict):  # сопоставление: номер левого элемента - обозначение на рисунке
+        for item in options.get("left") or []:
+            label = str(item.get("label", "")).strip()
+            if _DIGITS.fullmatch(label) or _LETTER.fullmatch(label):
+                found.add(label)
     return found
+
+
+def ordered_designations(options) -> list[str]:
+    """Обозначения рисунка по порядку: сначала цифры, затем буквы."""
+    return sorted(
+        designations(options), key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s)
+    )
+
+
+ASSIST_CAPTIONS = {
+    "hints": (
+        "С подсказками",
+        "Ребёнок решает с подсказками помощника, как обычное задание.",
+    ),
+    "key_only": (
+        "Только проверка по ключу",
+        (
+            "Подсказок нет: две проверки, затем «Показать ответ». Чтобы включить подсказки, "
+            "опишите все рисунки в шаге 3 и подтвердите описание."
+        ),
+    ),
+}
+
+
+def assist_caption(mode: str | None) -> dict:
+    """Подпись режима для родителя; сам режим считает assist_mode."""
+    label, hint = ASSIST_CAPTIONS.get(mode or "key_only", ASSIST_CAPTIONS["key_only"])
+    return {"assist": mode, "label": label, "hint": hint}
 
 
 def named_in_note(note: str) -> set[str]:

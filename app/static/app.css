@@ -196,3 +196,18 @@ dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max
 .summary .conclusion { margin: 16px 0 0; }
 .journal { padding-left: 20px; }
 .journal li { margin: 6px 0; }
+
+/* Карточка рисунка: страница с рамками, вид ребёнка, шаги. */
+.page-wrap { position: relative; }
+.page-wrap img { display: block; }
+.region-frame { position: absolute; border: 2px dashed #2F6B4F; background: rgba(47, 107, 79, 0.1); border-radius: 4px; pointer-events: none; box-sizing: border-box; }
+.region-frame.draft { border-style: solid; }
+.region-badge { position: absolute; left: 4px; top: 4px; width: 22px; height: 22px; border-radius: 11px; background: #2F6B4F; color: #fff; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.child-view { border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px; margin: 0 0 12px; background: var(--card); }
+.child-view-head { display: flex; justify-content: space-between; align-items: center; }
+.child-view-head h2 { margin: 0; font-size: 1rem; }
+.steps { padding-left: 1.25rem; display: grid; gap: 14px; }
+.steps h3 { margin: 0 0 4px; font-size: 1rem; }
+.steps .choices { display: flex; gap: 12px; flex-wrap: wrap; }
+.key-fields { display: grid; gap: 8px; }
+.note-row { display: block; margin: 0 0 6px; }

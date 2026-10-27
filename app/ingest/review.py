@@ -295,7 +295,7 @@ def _discrepancy(task, key, model) -> bool:
     return task["discrepancy_ack"] != json.dumps(model, ensure_ascii=False)
 
 
-def build_card(ctx, conn, task) -> dict | None:
+def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     """Карточка ленты или None, если по заданию родителю нечего делать.
 
     Только чтение: ответ модели считается лишь после подтверждения условия (POST)."""
@@ -351,7 +351,7 @@ def build_card(ctx, conn, task) -> dict | None:
             if key is not None
             else "Верно — подтвердить и дальше"
         )
-    return {
+    card = {
         "task_id": task["id"],
         "kind": kind,
         "label": LABELS[kind],
@@ -385,16 +385,22 @@ def build_card(ctx, conn, task) -> dict | None:
         "figure": figure,
         "revision": task["revision"],
     }
+    if kind == "needs_figure" and figure is not None:
+        from app.ingest.figure_card import card_extras  # figure_service импортирует review
+
+        card.update(card_extras(ctx, conn, task, figure, figure_page, deep))
+    return card
 
 
 def card_for(ctx, conn, task_id: int) -> dict | None:
-    return build_card(ctx, conn, _task(conn, task_id))
+    """Карточка одного задания; в очереди PDF не открывается, здесь открывается."""
+    return build_card(ctx, conn, _task(conn, task_id), deep=True)
 
 
 def task_detail(ctx, conn, task_id: int) -> dict:
     task = _task(conn, task_id)
     cand = candidate(conn, task)
-    card = build_card(ctx, conn, task)
+    card = build_card(ctx, conn, task, deep=True)
     task = get_task(conn, task_id)
     return {
         "task_id": task["id"],
