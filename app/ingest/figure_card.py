@@ -51,7 +51,9 @@ def preview_task(task, figure: dict | None = None, **changes) -> dict:
 
 def mode_for(task, teacher_note: str | None, ack: bool) -> dict:
     """Режим подсказок для заданных описания и подтверждения: assist_mode на копии."""
-    fake = preview_task(task, teacher_note=teacher_note or "", teacher_note_ack=bool(ack))
+    fake = preview_task(
+        task, teacher_note=teacher_note or "", teacher_note_ack=bool(ack), items_v2=True
+    )
     return assist_caption(assist_mode(fake))
 
 
@@ -60,7 +62,9 @@ def child_preview(conn, task, figure: dict, regions: list[dict]) -> tuple[dict, 
     material = conn.execute(
         "SELECT year FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
-    fake = preview_task(task, figure)
+    fake = preview_task(
+        task, figure, items_v2=True
+    )  # так задание будет оценено после подтверждения
     view = child_view(fake, material)
     view["figure"] = (
         {

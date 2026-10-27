@@ -198,6 +198,7 @@ def confirm_figure(
             leak=found,
             leak_ack=bool(found and leak_ack),
             raster_only=not lines,
+            items_v2=True,
             alt=alt.strip(),
             no_answer_ack=True,
             teacher_note_ack=bool(teacher_note_ack),

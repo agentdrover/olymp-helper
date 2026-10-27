@@ -227,6 +227,8 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     figure = figure_of(task)
     if figure is not None and not figure.get("confirmed"):
         raise Refusal("Сначала подтвердите рисунок.")
+    if figure is not None and not figure.get("no_answer_ack"):
+        raise Refusal("Отметьте: в рисунке и в описании нет ответа (шаг 1 карточки рисунка).")
     has_answer = answer is not None and str(answer).strip() != ""
     if has_answer:
         value = _parse_answer(task, answer)

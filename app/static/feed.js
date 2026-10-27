@@ -16,8 +16,8 @@
   // Токен защиты от подделки запросов: сервер отдаёт его в <meta> страницы родителя.
   const csrf = () => { const m = document.querySelector('meta[name="csrf-token"]'); return m ? m.content : ""; };
 
-  async function post(path, body) {
-    const r = await fetch(`/parent/tasks/${taskId()}/${path}`, {
+  async function post(path, body, id) {
+    const r = await fetch(`/parent/tasks/${id || taskId()}/${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf() },
       body: JSON.stringify(body || {}),
@@ -73,23 +73,48 @@
   }
 
   async function publishFigure() {
+    // Снимок на момент нажатия: id карточки и все поля. Цепочка идёт только по нему, поэтому
+    // «Пропустить» или смена карточки во время запроса не переносят шаги на другое задание.
+    const id = taskId();
+    const counter = card().dataset.counter;
     const leak = document.querySelector('input[name="leak"]:checked');
     if (!leak) throw new Error("Ответьте на шаг 1: есть ли ответ на картинках.");
     if (leak.value !== "none") throw new Error("Поправьте рамку на странице слева, затем ответьте «Да, ответа нет».");
     const key = keyAnswer();
     if (key.text === "!") throw new Error("Выберите ответ для каждого рисунка.");
     if (!key.text) throw new Error("Выберите правильный ответ: без ключа задание не публикуется.");
-    // Ключ из загруженного файла без правки подтверждает сервер; всё остальное — ключ родителя.
-    if (!(key.box.dataset.candidate === "1" && key.text === key.box.dataset.current)) await post("key", { answer: key.text });
-    const done = await post("figure", {
-      rect_px: frame ? [frame.x0, frame.y0, frame.x1, frame.y1] : null, scale: PAGE_SCALE,
-      page: Number(card().dataset.figurePage) || null,
-      alt: val("alt"), teacher_note: teacherNote(),
-      no_answer_ack: true, teacher_note_ack: checked("note_ack"),
-      leak_ack: checked("leak_ack"),
-    });
-    if (done.status === "draft") await post("confirm", {});
-    return { next: { task_id: Number(taskId()) }, counter: card().dataset.counter, reason: done.reason };
+    const snap = {
+      key: key.text, keep: key.box.dataset.candidate === "1" && key.text === key.box.dataset.current,
+      body: {
+        rect_px: frame ? [frame.x0, frame.y0, frame.x1, frame.y1] : null, scale: PAGE_SCALE,
+        page: Number(card().dataset.figurePage) || null,
+        alt: val("alt"), teacher_note: teacherNote(),
+        no_answer_ack: leak.value === "none", teacher_note_ack: checked("note_ack"),
+        leak_ack: checked("leak_ack"),
+      },
+    };
+    const buttons = Array.from(feed.querySelectorAll("button"));
+    buttons.forEach((x) => { x.disabled = true; });
+    const saved = [];
+    const step = async (name, path, body) => {
+      try {
+        const r = await post(path, body, id);
+        saved.push(name);
+        return r;
+      } catch (err) {
+        const kept = saved.length ? ` Уже сохранено: ${saved.join(", ")}.` : " Ничего не сохранено.";
+        throw new Error(`Шаг «${name}»: ${err.message}.${kept}`);
+      }
+    };
+    try {
+      // Ключ из загруженного файла без правки подтверждает сервер; всё остальное — ключ родителя.
+      if (!snap.keep) await step("ключ", "key", { answer: snap.key });
+      const done = await step("рисунок", "figure", snap.body);
+      if (done.status === "draft") await step("публикация", "confirm", {});
+      return { next: { task_id: Number(id) }, counter, reason: done.reason };
+    } finally {
+      buttons.forEach((x) => { x.disabled = false; });
+    }
   }
 
   // Вид ребёнка и режим подсказок обновляются по мере правок; ничего не сохраняется.

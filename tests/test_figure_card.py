@@ -2,6 +2,7 @@
 
 import json
 import re
+from pathlib import Path
 
 import pymupdf
 from fastapi.testclient import TestClient
@@ -185,3 +186,56 @@ def test_card_shows_child_view_and_explains_checkboxes(tmp_path):
         assert child.status_code == 200
         pick = re.compile(r'<select name="pair-1">.*?</select>', re.DOTALL)
         assert pick.search(child.text).group(0) == pick.search(html).group(0)
+
+
+def test_published_match_keeps_hints_and_new_rule_needs_the_mark():
+    from app.ingest.publish import assist_mode
+
+    plain = {**MATCH, "left": [{"label": "1", "text": "первый"}, {"label": "2", "text": "второй"}]}
+
+    def task(figure):
+        return {"options": json.dumps(plain), "figure": json.dumps(figure)}
+
+    old = {"teacher_note": "", "teacher_note_ack": True, "confirmed": True}
+    # запись, опубликованная до #2110: правило режима не меняется
+    assert assist_mode(task(old)) == "hints"
+    # рисунок, подтверждённый после правки, отмечен items_v2: левые номера match нужно описать
+    assert assist_mode(task({**old, "items_v2": True})) == "key_only"
+    described = {**old, "items_v2": True, "teacher_note": "1 — а\n2 — б"}
+    assert assist_mode(task(described)) == "hints"
+
+
+def test_publishing_needs_the_explicit_step_one_on_the_server(tmp_path):
+    task = make_task(11, "Рассмотрите рисунок и выберите верный ответ.", figure=True, options=CELLS)
+    c, tid = start(tmp_path, task, figure_pdf("raster"))
+    with c:
+        # рисунок не подтверждён: публикация другого шага цепочки невозможна
+        assert c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={}).status_code == 422
+        assert (
+            c.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": "Б"}).status_code
+            == 200
+        )
+        assert post_figure(c, tid, no_answer_ack=False).status_code == 422
+        ok = post_figure(c, tid)
+        assert ok.status_code == 200, ok.text
+        # подтверждённый рисунок без записанного шага 1 (старая или чужая запись) не публикуется
+        conn = db(tmp_path)
+        figure = json.loads(
+            conn.execute("SELECT figure FROM task_item WHERE id = ?", (tid,)).fetchone()[0]
+        )
+        figure["no_answer_ack"] = False
+        conn.execute("UPDATE task_item SET figure = ? WHERE id = ?", (json.dumps(figure), tid))
+        conn.close()
+        refused = c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={})
+        assert refused.status_code == 422 and "нет ответа" in refused.json()["error"]
+        assert c.get("/api/tasks", headers=CHILD).json()["tasks"] == []
+
+
+def test_the_chain_works_only_on_the_snapshot_card():
+    js = Path("app/static/feed.js").read_text(encoding="utf-8")
+    start_at = js.index("async function publishFigure")
+    chain = js[start_at : js.index("// Вид ребёнка", start_at)]
+    assert "const id = taskId()" in chain and "post(path, body, id)" in js
+    assert "no_answer_ack: leak.value" in chain and "no_answer_ack: true" not in chain
+    assert "disabled = true" in chain and "Уже сохранено" in chain
+    assert 'post("' not in chain  # ни одного шага цепочки по «текущей» карточке
