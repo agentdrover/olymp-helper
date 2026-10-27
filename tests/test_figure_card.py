@@ -2,9 +2,12 @@
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pymupdf
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.bank_helpers import (
@@ -23,6 +26,7 @@ from tests.bank_helpers import (
     write_lines,
 )
 
+NODE = shutil.which("node")
 WARNING = "Текст внутри картинок не проверяется автоматически"
 CELLS = [
     {"label": "А", "text": "митохондрия"},
@@ -231,11 +235,15 @@ def test_publishing_needs_the_explicit_step_one_on_the_server(tmp_path):
         assert c.get("/api/tasks", headers=CHILD).json()["tasks"] == []
 
 
+@pytest.mark.skipif(NODE is None, reason="node не установлен")
 def test_the_chain_works_only_on_the_snapshot_card():
-    js = Path("app/static/feed.js").read_text(encoding="utf-8")
-    start_at = js.index("async function publishFigure")
-    chain = js[start_at : js.index("// Вид ребёнка", start_at)]
-    assert "const id = taskId()" in chain and "post(path, body, id)" in js
-    assert "no_answer_ack: leak.value" in chain and "no_answer_ack: true" not in chain
-    assert "disabled = true" in chain and "Уже сохранено" in chain
-    assert 'post("' not in chain  # ни одного шага цепочки по «текущей» карточке
+    """Ключ задерживается, «Пропустить» нажимают, карточка меняется на B: шаги идут только для A."""
+    harness = Path(__file__).parent / "js" / "feed_chain_harness.js"
+    r = subprocess.run(
+        [NODE, str(harness), "skip_during_delayed_key"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
