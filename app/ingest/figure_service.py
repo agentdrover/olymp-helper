@@ -8,7 +8,6 @@ import pymupdf
 
 from app.ingest import figures
 from app.ingest.answers import key_value
-from app.ingest.figures import crop_leaks
 from app.ingest.keys import candidate
 from app.ingest.leaks import answer_units, crop_units, norm, significant
 from app.ingest.review import Refusal
@@ -104,6 +103,53 @@ def _rect_from(figure: dict, page, rect, rect_px, scale):
     return stored
 
 
+def figure_regions(doc, figure: dict, *, rect=None, rect_px=None, scale=None, page=None):
+    """Области рисунка с учётом ручной рамки (правит область ОДНОЙ страницы, остальные остаются).
+    Общая для подтверждения и предпросмотра: родитель видит ровно ту вырезку, что будет сохранена."""
+    page_no = figure["page"]
+    regions = figures.regions_of(figure)
+    pages = {r["page"] for r in regions} | {page_no}
+    if rect_px is not None and page is None:
+        raise Refusal("Для нарисованной рамки нужна страница, на которой она нарисована.")
+    if rect is not None or rect_px is not None:
+        target = page if page is not None else page_no
+        if target not in pages:
+            raise Refusal(
+                f"Рамка нарисована на странице {target}, а рисунок задания на "
+                f"страницах {', '.join(map(str, sorted(pages)))}.",
+                409,
+            )
+        frame = _rect_from(figure, doc[target - 1], rect, rect_px, scale)
+        return sorted(
+            [r for r in regions if r["page"] != target] + [{"page": target, "rect": frame}],
+            key=lambda r: r["page"],
+        )
+    if not regions:
+        frame = _rect_from(figure, doc[page_no - 1], None, None, None)
+        regions = [{"page": page_no, "rect": frame}]
+    return regions
+
+
+def preview_png(
+    ctx, conn, task_id: int, *, rect=None, rect_px=None, scale=None, page=None
+) -> bytes:
+    """Вырезка по текущей рамке для родителя: только чтение, ничего не сохраняется и не
+    публикуется. У неподтверждённого рисунка PNG ещё нет, поэтому он рендерится из PDF."""
+    task = get_task(conn, task_id)
+    figure = figure_of(task) if task is not None else None
+    if figure is None or task["excluded"]:
+        raise Refusal("У этого задания нет рисунка.", 404)
+    material = conn.execute(
+        "SELECT file FROM material WHERE id = ?", (task["material_id"],)
+    ).fetchone()
+    source = ctx.material_path(material["file"]) if material else None
+    if source is None or not source.exists():
+        raise Refusal("Файл материала удалён: вырезку уже не показать.", 409)
+    with contextlib.closing(pymupdf.open(str(source))) as doc:
+        regions = figure_regions(doc, figure, rect=rect, rect_px=rect_px, scale=scale, page=page)
+        return figures.render_regions_png(doc, regions)
+
+
 def confirm_figure(
     ctx,
     conn,
@@ -133,34 +179,14 @@ def confirm_figure(
         raise Refusal("Файл материала удалён: рамку рисунка уже не поправить.", 409)
     doc = pymupdf.open(str(source))
     try:
-        page_no = figure["page"]
-        regions = figures.regions_of(figure)
-        pages = {r["page"] for r in regions} | {page_no}
-        if rect_px is not None and page is None:
-            raise Refusal("Для нарисованной рамки нужна страница, на которой она нарисована.")
-        manual = rect is not None or rect_px is not None
-        if manual:  # ручная рамка правит область ОДНОЙ страницы, остальные остаются
-            target = page if page is not None else page_no
-            if target not in pages:
-                raise Refusal(
-                    f"Рамка нарисована на странице {target}, а рисунок задания на "
-                    f"страницах {', '.join(map(str, sorted(pages)))}.",
-                    409,
-                )
-            frame = _rect_from(figure, doc[target - 1], rect, rect_px, scale)
-            regions = sorted(
-                [r for r in regions if r["page"] != target] + [{"page": target, "rect": frame}],
-                key=lambda r: r["page"],
-            )
-        elif not regions:
-            frame = _rect_from(figure, doc[page_no - 1], None, None, None)
-            regions = [{"page": page_no, "rect": frame}]
+        regions = figure_regions(doc, figure, rect=rect, rect_px=rect_px, scale=scale, page=page)
         problem = figures.alt_problem(alt or "", options_of(task), _correct_labels(conn, task))
         if problem:
             raise Refusal(problem)
         if not no_answer_ack:
             raise Refusal(NO_ANSWER_REFUSAL)
-        found = crop_leaks(doc, regions, leak_units(conn, task))
+        lines = figures.region_lines(doc, regions)
+        found = figures.leaks_in_lines(lines, leak_units(conn, task))
         if found and not leak_ack:
             raise Refusal(
                 "В вырезке напечатан текст ответа или вариантов: «" + "», «".join(found) + "». "
@@ -171,6 +197,8 @@ def confirm_figure(
             regions=regions,
             leak=found,
             leak_ack=bool(found and leak_ack),
+            raster_only=not lines,
+            items_v2=True,
             alt=alt.strip(),
             no_answer_ack=True,
             teacher_note_ack=bool(teacher_note_ack),
@@ -198,7 +226,7 @@ def confirm_figure(
         new_revision(conn, task_id, figure=figure, import_status="draft", unsupported_reason=None)
         if old and old != relative:
             ctx.material_path(old).unlink(missing_ok=True)
-        return {"status": "draft", "revision": revision}
+        return {"status": "draft", "revision": revision, "raster_only": not lines}
     finally:
         doc.close()
 

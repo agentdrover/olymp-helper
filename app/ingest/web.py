@@ -17,7 +17,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.ingest import packs, review
-from app.ingest.figure_service import confirm_figure
+from app.ingest.figure_card import mode_for
+from app.ingest.figure_service import confirm_figure, preview_png
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
 from app.ingest.names import clean_original_name
 from app.ingest.progress import progress_text
@@ -469,6 +470,7 @@ class EditBody(BaseModel):
 
 class KeyBody(BaseModel):
     answer: str
+    keep_candidate: bool = False  # лента: ответ карточки без правки не делает ключ родительским
 
 
 class ResolveBody(BaseModel):
@@ -506,6 +508,8 @@ def _advance(request: Request, conn, task_id: int, *, stay_if_open: bool = False
 def review_page(request: Request, conn: Db):
     feed = review.open_feed(ctx_of(request), conn)
     first = feed["cards"][0] if feed["cards"] else None
+    if first is not None:  # очередь строится без PDF, первая карточка - с ним
+        first = review.card_for(ctx_of(request), conn, first["task_id"]) or first
     counter = f"1 из {feed['total']}" if first else None
     return TEMPLATES.TemplateResponse(
         request, "parent/review.html", {"card": first, "counter": counter, "total": feed["total"]}
@@ -595,7 +599,9 @@ def task_edit(task_id: int, body: EditBody, request: Request, conn: Db):
 @parent.post("/parent/tasks/{task_id}/key")
 @_action
 def task_key(task_id: int, body: KeyBody, request: Request, conn: Db):
-    return review.set_parent_key(ctx_of(request), conn, task_id, body.answer)
+    return review.set_parent_key(
+        ctx_of(request), conn, task_id, body.answer, keep_candidate=body.keep_candidate
+    )
 
 
 @parent.post("/parent/tasks/{task_id}/resolve")
@@ -635,6 +641,42 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
         teacher_note_ack=body.teacher_note_ack,
         leak_ack=body.leak_ack,
     )
+
+
+class ModeBody(BaseModel):
+    teacher_note: str | None = None
+    teacher_note_ack: bool = False
+
+
+@parent.post("/parent/tasks/{task_id}/figure/mode")
+@_action
+def task_figure_mode(task_id: int, body: ModeBody, request: Request, conn: Db):
+    """Какой режим получит задание при таком описании: считает assist_mode, ничего не пишет."""
+    task = get_task(conn, task_id)
+    if task is None or figure_of(task) is None:
+        raise Refusal("У этого задания нет рисунка.", 404)
+    return mode_for(task, body.teacher_note, body.teacher_note_ack)
+
+
+@parent.get("/parent/tasks/{task_id}/figure-preview.png")
+@_action
+def task_figure_preview(
+    task_id: int,
+    request: Request,
+    conn: Db,
+    page: int | None = None,
+    rect_px: str | None = None,
+    scale: float | None = None,
+):
+    """Родительский предпросмотр вырезки по текущей рамке; ребёнку недоступен."""
+    frame = None
+    if rect_px:
+        try:
+            frame = [float(v) for v in rect_px.split(",")]
+        except ValueError:
+            raise Refusal("Рамка задана неверно: нужны четыре числа.") from None
+    png = preview_png(ctx_of(request), conn, task_id, rect_px=frame, scale=scale, page=page)
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 # ----------------------------------------------------------------------- ребёнок
