@@ -12,6 +12,7 @@ from app.ingest.filters import FilterError, LzwDecoder, OverBudget, decoded_chun
 from tests.bank_helpers import (
     PARENT,
     BlockingModel,
+    FakeClock,
     build_app,
     db,
     raw_pdf,
@@ -46,10 +47,18 @@ def test_ac6(tmp_path):
     assert limits.MAX_PDF_BYTES == 50 * MB
     assert limits.MAX_PAGES == 400
     assert limits.MAX_UNPACKED_BYTES == 200 * MB
-    assert limits.IMPORT_TIMEOUT_S == 600
+    assert limits.IMPORT_STALL_S == 300
 
     blocker = BlockingModel()
-    app = build_app(tmp_path, blocker, sync_imports=False, import_timeout=0.4)
+    clock = FakeClock()  # the stall verdict depends on this clock, not on the runner's speed
+    app = build_app(
+        tmp_path,
+        blocker,
+        sync_imports=False,
+        import_stall=1.0,
+        import_clock=clock.now,
+        import_poll=0.01,
+    )
     with TestClient(app) as c:
         # Over 50 MB: refused before anything is parsed.
         r = upload(c, b"%PDF-1.4\n" + b"0" * (50 * MB + 1))
@@ -81,6 +90,7 @@ def test_ac6(tmp_path):
         mid = hung.json()["material_id"]
         assert blocker.entered.wait(5)
         assert c.get("/healthz").status_code == 200
+        clock.advance(2.0)  # the hung model call is silent past the stall limit
         st = _wait_status(c, mid, "failed")
         assert "время" in st["import_error"]
         assert c.get("/healthz").status_code == 200
