@@ -21,5 +21,7 @@ SCENARIOS = [
 @pytest.mark.skipif(NODE is None, reason="node не установлен")
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_tutor_js_scenario(scenario):
-    r = subprocess.run([NODE, str(HARNESS), scenario], check=False, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(
+        [NODE, str(HARNESS), scenario], check=False, capture_output=True, text=True, timeout=60
+    )
     assert r.returncode == 0, r.stdout + r.stderr
