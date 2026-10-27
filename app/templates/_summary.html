@@ -23,11 +23,11 @@
       <td>{% if t.task_id %}<a href="/tasks/{{ t.task_id }}">№ {{ t.number }}</a>{% else %}—{% endif %}{% if t.topic %}<br><span class="hint">{{ t.topic }}</span>{% endif %}{% if t.repeat %}<br><span class="pill">повтор</span>{% endif %}</td>
       <td>
         {% for a in t.attempts %}
-        <div>{{ a.n }}-я попытка: {{ a.answer }} — {{ a.result }}{% if a.confidence %} ({{ conf[a.confidence] }}){% endif %}{% if a.note %} <span class="pill">{{ a.note }}</span>{% endif %}</div>
+        <div>{{ a.n }}-я попытка: {% if a.answer is not none %}{{ a.answer }} — {% endif %}{{ a.result }}{% if a.confidence %} ({{ conf[a.confidence] }}){% endif %}{% if a.note %} <span class="pill">{{ a.note }}</span>{% endif %}</div>
         {% endfor %}
         {% if t.hints %}<div>Подсказок: {{ t.hints }}</div>{% endif %}
       </td>
-      <td>{{ t.outcome }}</td>
+      <td>{{ t.outcome }}{% if t.key_note %}<br><span class="pill">{{ t.key_note }}</span>{% endif %}</td>
     </tr>
     {% endfor %}
     </tbody>

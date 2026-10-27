@@ -13,17 +13,20 @@ import json
 import sqlite3
 from datetime import datetime
 
+from app.ingest.attempts import KEY_CORRECTED_NOTE
 from app.ingest.store import atomic
 from app.sessions import IDLE_TIMEOUT
 from app.tutor.guard import render_markdown
 from app.tutor.outcomes import outcome_label
-from app.tutor.state import UNVERIFIED, iso
+from app.tutor.state import TERMINAL, UNVERIFIED, iso
 
 JOURNAL_TYPES = ("parent_opened_chat", "shown_to_parent")
 MESSAGE_TYPES = ("chat", "voice")
 NOT_ANALYZED = ", не разобрано"
 SURE_WRONG = "был уверен, но ошибся"
 WAS_WRONG = "была ошибка"
+KEYLESS_MISS = "не совпало с ответом модели · не проверено"
+SOLVED_BEFORE = "решено в прошлый раз"
 
 
 # ---------------------------------------------------------------------- построение
@@ -55,6 +58,9 @@ def _attempt_line(data: dict) -> dict:
         "answer": data.get("answer"),
         "confidence": data.get("confidence"),
         "correctness": correctness,
+        "matched": bool(data.get("matched_model")) if correctness == "unknown" else None,
+        "revision": data.get("revision"),
+        "key_version": data.get("key_version"),
         "note": None,
     }
     if correctness == "unknown":
@@ -94,13 +100,16 @@ def _misses(attempts: list[dict]) -> list[dict]:
 
 def _revisit_item(task_id, info, group, outcome) -> dict | None:
     misses = _misses(group["attempts"])
+    keyed_misses = [a for a in misses if a.get("correctness") == "incorrect"]
     sure = any(a.get("confidence") == "sure" for a in misses)
-    if sure:
+    if any(a.get("confidence") == "sure" for a in keyed_misses):
         reason = SURE_WRONG
     elif group["shown"] is not None or group["hint3"] is not None:
         reason = outcome
-    elif misses:
+    elif keyed_misses:
         reason = WAS_WRONG
+    elif misses:
+        reason = KEYLESS_MISS  # без ключа «ошибся» не говорим (SPEC 1.2)
     elif group["attempts"] and group["attempts"][-1].get("correctness") == "unknown":
         reason = UNVERIFIED
     else:
@@ -242,6 +251,10 @@ def build_summary(conn: sqlite3.Connection, session_id: int) -> dict:
 
 def _store(conn: sqlite3.Connection, session_id: int) -> dict:
     summary = build_summary(conn, session_id)
+    row = conn.execute("SELECT summary FROM study_session WHERE id = ?", (session_id,)).fetchone()
+    prior = json.loads(row[0]) if row and row[0] else {}
+    if prior.get("partial"):  # сообщения, удалённые до закрытия занятия
+        summary["messages"] += prior.get("messages", 0)
     conn.execute(
         "UPDATE study_session SET summary = ? WHERE id = ?",
         (json.dumps(summary, ensure_ascii=False), session_id),
@@ -302,6 +315,8 @@ def list_sessions(conn: sqlite3.Connection, now: datetime) -> list[dict]:
         "SELECT id, started_at, ended_at, end_reason, summary FROM study_session ORDER BY id DESC"
     ):
         summary = json.loads(row["summary"]) if row["summary"] else None
+        if summary and summary.get("partial"):
+            summary = None
         out.append({
             "id": row["id"], "started_at": row["started_at"], "ended_at": row["ended_at"],
             "end_reason": row["end_reason"], "running": row["id"] == running,
@@ -313,7 +328,8 @@ def list_sessions(conn: sqlite3.Connection, now: datetime) -> list[dict]:
 def get_summary(conn: sqlite3.Connection, session_id: int, now: datetime) -> dict | None:
     ensure(conn, now)
     row = conn.execute("SELECT summary FROM study_session WHERE id = ?", (session_id,)).fetchone()
-    return json.loads(row[0]) if row and row[0] else None
+    found = json.loads(row[0]) if row and row[0] else None
+    return None if found and found.get("partial") else found
 
 
 def overall_revisit(sessions: list[dict]) -> list[dict]:
@@ -413,4 +429,72 @@ def chat_of(conn: sqlite3.Connection, session_id: int) -> list[dict]:
                 "question": data.get("question", ""),
                 "reply_html": render_markdown(data.get("reply") or ""),
             })  # fmt: skip
+    return out
+
+
+def preserve_message_counts(
+    conn: sqlite3.Connection, session_id: int | None = None, before: str | None = None
+) -> None:
+    """Перед удалением переписки: число удаляемых сообщений запоминается в занятии. Закрытое
+    занятие уже с итогом; у идущего итога ещё нет - факт ждёт закрытия и вливается в итог."""
+    marks = ",".join("?" for _ in MESSAGE_TYPES)
+    sql = (
+        f"SELECT session_id, COUNT(*) FROM event WHERE type IN ({marks})"
+        + (" AND session_id = ?" if session_id is not None else "")
+        + (" AND created_at < ?" if before is not None else "")
+        + " GROUP BY session_id"
+    )
+    args = [*MESSAGE_TYPES, *([session_id] if session_id is not None else []),
+            *([before] if before is not None else [])]  # fmt: skip
+    with atomic(conn):
+        for sid, count in conn.execute(sql, args).fetchall():
+            row = conn.execute(
+                "SELECT ended_at, summary FROM study_session WHERE id = ?", (sid,)
+            ).fetchone()
+            if row[0] is not None and row[1] is not None and not json.loads(row[1]).get("partial"):
+                continue  # итог закрытого занятия уже хранит число
+            prior = json.loads(row[1]) if row[1] else {}
+            total = prior.get("messages", 0) if prior.get("partial") else 0
+            conn.execute(
+                "UPDATE study_session SET summary = ? WHERE id = ?",
+                (json.dumps({"partial": True, "messages": total + count}), sid),
+            )
+
+
+# --------------------------------------------------------- представление для показа
+
+
+def _current_terminal(conn: sqlite3.Connection, task_id: int | None) -> bool:
+    if task_id is None:
+        return True
+    row = conn.execute(
+        "SELECT state FROM tutor_run WHERE task_item_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
+    ).fetchone()
+    return row is not None and row[0] in TERMINAL
+
+
+def present(conn: sqlite3.Connection, found: dict, *, child: bool) -> dict:
+    """Итог для показа. Ключ могли исправить после попытки (SPEC 1.1) - пометка. Ребёнку, пока
+    текущий прогон задания не закрыт (повтор), верные ответы старых попыток не показываются
+    (SPEC 1.3, правило 3): остаётся формулировка «решено в прошлый раз»."""
+    out = json.loads(json.dumps(found))
+    for task in out["tasks"]:
+        task["key_note"] = None
+        current = None
+        if task["task_id"] is not None:
+            row = conn.execute(
+                "SELECT key_version FROM task_item WHERE id = ?", (task["task_id"],)
+            ).fetchone()
+            current = row[0] if row else None
+        if current is not None and any(
+            a.get("key_version") is not None and a["key_version"] < current
+            for a in task["attempts"]
+        ):
+            task["key_note"] = KEY_CORRECTED_NOTE
+        if child and not _current_terminal(conn, task["task_id"]):
+            for a in task["attempts"]:
+                if a["correctness"] == "correct" or a.get("matched"):
+                    a["answer"], a["result"] = None, SOLVED_BEFORE
+            if task["outcome"].startswith(("верно", "совпало")):
+                task["outcome"] = SOLVED_BEFORE
     return out

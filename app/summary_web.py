@@ -28,6 +28,8 @@ def _my_data(conn, now, selected_id: int | None) -> dict:
     if selected_id is None and done:
         selected_id = done[0]["id"]
     selected = next((s["summary"] for s in done if s["id"] == selected_id), None)
+    if selected is not None:
+        selected = summary.present(conn, selected, child=True)
     return {
         "sessions": [
             {k: v for k, v in s.items() if k != "summary"}
@@ -73,7 +75,7 @@ def my_summary_json(session_id: int, request: Request, conn: Db):
     found = summary.get_summary(conn, session_id, now_of(request))
     if found is None:
         raise HTTPException(404, "Итога этого занятия нет")
-    return JSONResponse(found)
+    return JSONResponse(summary.present(conn, found, child=True))
 
 
 @child.post(
@@ -87,7 +89,9 @@ def finish(request: Request, conn: Db):
             {"ok": False, "code": "no_session", "message": "Идущего занятия нет."},
             status_code=409,
         )
-    return JSONResponse({"ok": True, "session_id": built["session_id"], "summary": built})
+    return JSONResponse({"ok": True, "session_id": built["session_id"],
+         "summary": summary.present(conn, built, child=True)}
+    )  # fmt: skip
 
 
 @child.post(
@@ -113,6 +117,7 @@ def _list(request: Request, conn, selected_id: int | None):
         selected = summary.get_summary(conn, selected_id, now)
         if selected is None:
             raise HTTPException(404, "Итога этого занятия нет")
+        selected = summary.present(conn, selected, child=False)
     return TEMPLATES.TemplateResponse(
         request,
         "parent/summaries.html",
