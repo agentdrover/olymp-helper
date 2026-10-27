@@ -8,7 +8,6 @@ import threading
 
 import pymupdf
 
-from app.ingest.autopublish import publish_pending
 from app.ingest.extract import chunk_pages, extract_pages
 from app.ingest.figures import PageIndex, crop_leaks, suggest_regions
 from app.ingest.keys import parse_key_text
@@ -486,7 +485,7 @@ def _finish(
 def _auto_publish(ctx, conn, material_id: int | None) -> None:
     """Автопубликация (K5b) идёт после status=done и не влияет на итог импорта."""
     try:
-        publish_pending(ctx, conn, material_id)
+        ctx.autorun.run_inline(ctx, conn, material_id)
     except Exception:
         log.exception("auto publish after import %s failed", material_id)
 

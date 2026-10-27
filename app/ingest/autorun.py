@@ -23,6 +23,9 @@ class AutoRun:
     def __init__(self, sync: bool = False):
         self.sync = sync
         self._lock = threading.Lock()
+        # Один обход черновиков за раз на всё приложение: хук импорта и ручной запуск
+        # не гонят модель и подтверждение одного задания параллельно.
+        self._exec = threading.Lock()
         self._state: dict = {"state": "idle", "text": ""}
 
     def snapshot(self) -> dict:
@@ -32,6 +35,13 @@ class AutoRun:
     def _set(self, **kw) -> None:
         with self._lock:
             self._state.update(kw)
+
+    def run_inline(self, ctx, conn, material_id: int | None) -> int:
+        """Обход после импорта (в потоке импорта): ждёт своей очереди на общем замке."""
+        from app.ingest.autopublish import publish_pending
+
+        with self._exec:
+            return publish_pending(ctx, conn, material_id)
 
     def start(self, ctx, material_id: int | None) -> bool:
         with self._lock:
@@ -52,7 +62,8 @@ class AutoRun:
 
         conn = open_db(ctx.db_path)
         try:
-            publish_pending(ctx, conn, material_id, force=True, report=report)
+            with self._exec:
+                publish_pending(ctx, conn, material_id, force=True, report=report)
             with self._lock:
                 if self._state["text"] == "начинаем…":
                     self._state["text"] = "Черновиков для проверки нет."
