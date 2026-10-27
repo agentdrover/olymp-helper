@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from app import exam
 from app.chat.flow import ChatFlow
 from app.ingest.publish import is_published
 from app.ingest.store import atomic, get_task, open_db
@@ -95,6 +96,20 @@ def _is_fragment(request: Request) -> bool:
     return request.headers.get("hx-request") == "true"
 
 
+def _exam_block(request: Request, conn, task_id: int, *, page: bool = False):
+    """Идёт олимпиада по этому заданию: 409 на любой маршрут задания (JSON, HTMX, страница)."""
+    if not exam.task_locked(conn, task_id, request.app.state.clock()):
+        return None
+    message = exam.RUNNING_MESSAGE
+    if page:
+        return TEMPLATES.TemplateResponse(
+            request, "child/exam_busy.html", {"message": message}, status_code=409
+        )
+    if _is_fragment(request) or "text/html" in request.headers.get("accept", ""):
+        return HTMLResponse(f'<p class="notice" role="alert">{message}</p>', status_code=409)
+    return JSONResponse({"ok": False, "code": "exam_running", "message": message}, status_code=409)
+
+
 def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, notice=None):
     app = request.app
     task, material = _published(conn, task_id)
@@ -134,6 +149,8 @@ def _act(name: str, cls=Flow):
         )
         def route(task_id: int, request: Request, conn: Db, body: Body | None = None):
             _published(conn, task_id)
+            if (blocked := _exam_block(request, conn, task_id)) is not None:
+                return blocked
             flow = _flow(request, conn, cls)
             try:
                 fn(flow, task_id, body or Body(), request)
@@ -197,6 +214,9 @@ def dispute(flow: Flow, task_id, body, request):
 
 @router.get("/api/tasks/{task_id}/tutor", dependencies=[Depends(child_notice_gate)])
 def tutor_json(task_id: int, request: Request, conn: Db):
+    _published(conn, task_id)
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked
     return _respond_json(request, conn, task_id)
 
 
@@ -213,6 +233,8 @@ def _respond_json(request, conn, task_id):
 @router.get("/tasks/{task_id}/tutor", response_class=HTMLResponse)
 def tutor_fragment(task_id: int, request: Request, conn: Db):
     task, material = _published(conn, task_id)
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
     app = request.app
@@ -228,6 +250,8 @@ def tutor_fragment(task_id: int, request: Request, conn: Db):
 @router.get("/tasks/{task_id}", response_class=HTMLResponse)
 def task_page(task_id: int, request: Request, conn: Db):
     task, material = _published(conn, task_id)
+    if (blocked := _exam_block(request, conn, task_id, page=True)) is not None:
+        return blocked
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
     app = request.app

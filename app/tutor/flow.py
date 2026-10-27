@@ -14,6 +14,7 @@
 import json
 from datetime import datetime
 
+from app import exam
 from app.chat import store as chat_store
 from app.ingest.answers import display
 from app.ingest.publish import assist_mode
@@ -52,6 +53,11 @@ class Flow:
     def now(self) -> datetime:
         return self.clock()
 
+    def _exam_check(self, task) -> None:
+        """Ответ помощника, запрошенный до старта олимпиады, после старта не выдаётся."""
+        if exam.task_locked(self.conn, task["id"], self.now):
+            raise Refused(409, "exam_running", exam.RUNNING_MESSAGE)
+
     # ----------------------------------------------------- шаг с обращением к модели
 
     def _begin(self, task) -> bool:
@@ -87,6 +93,7 @@ class Flow:
         except Exception:  # noqa: BLE001 - модель любого вида: ребёнку «не отвечает»
             self.panel_state = "down"
             return None
+        self._exam_check(task)
         if not getattr(result, "ok", False):
             self.panel_state = failure_state(result)
             return None

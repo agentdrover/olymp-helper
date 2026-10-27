@@ -1,0 +1,77 @@
+{% extends "base_child.html" %}
+{% block title %}Олимпиада{% endblock %}
+{% block content %}
+<header>
+  <div class="kicker" id="exam-title"></div>
+  <h1>Олимпиада: осталось <span id="exam-left">…</span></h1>
+</header>
+<nav id="exam-nav" aria-label="Задания варианта"></nav>
+<section class="card" id="exam-task" aria-live="polite"></section>
+<p id="exam-msg" class="err" role="alert"></p>
+<p><button class="btn" id="exam-mark" type="button">Вернусь</button>
+   <button class="btn primary" id="exam-submit" type="button">Сдать вариант</button></p>
+<script>
+let exam = null, pos = 1;
+const $ = id => document.getElementById(id);
+async function call(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!r.ok) {
+    $("exam-msg").textContent = j.message || "Не получилось.";
+    if (j.code === "time_up" || j.code === "not_running") location.href = "/exam";
+    return null;
+  }
+  $("exam-msg").textContent = "";
+  return j;
+}
+function answerOf(it) {
+  const box = $("exam-task");
+  if (it.type === "single") return (box.querySelector("input[name=a]:checked") || {}).value || null;
+  if (it.type === "multiple") return [...box.querySelectorAll("input[name=a]:checked")].map(x => x.value);
+  if (it.type === "match") return Object.fromEntries([...box.querySelectorAll("select[data-l]")].filter(s => s.value).map(s => [s.dataset.l, s.value]));
+  return box.querySelector("input[name=n]").value;
+}
+function render() {
+  const it = exam.items[pos - 1];
+  $("exam-title").textContent = exam.title + " · " + exam.stage + " этап";
+  $("exam-nav").innerHTML = exam.items.map(x => `<button type="button" data-p="${x.position}"${x.position === pos ? ' aria-current="true"' : ""}>${x.position}${x.answer != null && x.answer !== "" ? " ✓" : ""}${x.marked ? " ⚑" : ""}</button>`).join(" ");
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+  let body = `<p>${esc(it.text)}</p>`;
+  if (it.figure) body += `<img src="${it.figure.url}" alt="${esc(it.figure.alt)}">`;
+  const cur = it.answer;
+  if (it.type === "single" || it.type === "multiple") {
+    const kind = it.type === "single" ? "radio" : "checkbox";
+    body += it.options.map(o => `<label><input type="${kind}" name="a" value="${esc(o.label)}"${[].concat(cur || []).includes(o.label) ? " checked" : ""}> ${esc(o.label)}) ${esc(o.text)}</label><br>`).join("");
+  } else if (it.type === "match") {
+    body += it.options.left.map(l => `<p>${esc(l.label)}) ${esc(l.text)} → <select data-l="${esc(l.label)}"><option value="">—</option>${it.options.right.map(r => `<option value="${esc(r.label)}"${cur && cur[l.label] === r.label ? " selected" : ""}>${esc(r.label)}) ${esc(r.text)}</option>`).join("")}</select></p>`).join("");
+  } else {
+    body += `<label>Число <input name="n" inputmode="decimal" value="${cur == null ? "" : esc(cur)}"></label>`;
+  }
+  $("exam-task").innerHTML = body + `<p><button class="btn" type="button" id="exam-save">Сохранить ответ</button></p>`;
+  $("exam-mark").textContent = it.marked ? "Снять «вернусь»" : "Вернусь";
+}
+async function refresh(j) { if (j && j.exam) { exam = j.exam; render(); } }
+async function open(p) { pos = p; await refresh(await call("/exam/open", {position: p})); }
+document.addEventListener("click", async e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.p) open(+t.dataset.p);
+  if (t.id === "exam-save") refresh(await call("/exam/answer", {position: pos, answer: answerOf(exam.items[pos - 1])}));
+  if (t.id === "exam-mark") refresh(await call("/exam/mark", {position: pos, marked: !exam.items[pos - 1].marked}));
+  if (t.id === "exam-submit" && confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) {
+    const j = await call("/exam/submit", {attempt_id: exam.id, confirm: true});
+    if (j) location.href = j.url;
+  }
+});
+setInterval(() => {
+  if (!exam) return;
+  const s = Math.max(0, Math.round((new Date(exam.deadline_at) - Date.now()) / 1000));
+  $("exam-left").textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  if (s === 0) location.href = "/exam";
+}, 1000);
+(async () => {
+  const r = await fetch("/api/exam/current");
+  if (!r.ok) { location.href = "/exam"; return; }
+  exam = await r.json(); pos = exam.current; await open(pos);
+})();
+</script>
+{% endblock %}

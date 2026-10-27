@@ -492,11 +492,36 @@ def _current_terminal(conn: sqlite3.Connection, task_id: int | None) -> bool:
     return row[0] in TERMINAL and (row[1], row[2]) == (row[3], row[4])
 
 
-def present(conn: sqlite3.Connection, found: dict, *, child: bool) -> dict:
+def hide_tasks(found: dict, hidden) -> dict:
+    """Итог без заданий идущей олимпиады (в том числе прошлых занятий): ни ответов, ни результатов,
+    ни признаков верности; счётчики и вывод пересчитаны по оставшимся."""
+    if not hidden or not found:
+        return found
+    out = json.loads(json.dumps(found))
+    out["tasks"] = [t for t in out["tasks"] if t["task_id"] not in hidden]
+    out["revisit"] = [r for r in out["revisit"] if r["task_id"] not in hidden]
+    out["answer_shown"] = [a for a in out["answer_shown"] if a["task_id"] not in hidden]
+    out["disputed"] = [d for d in out["disputed"] if d["task_id"] not in hidden]
+    totals = {"correct": 0, "wrong": 0, "unknown": 0}
+    for task in out["tasks"]:
+        for a in task["attempts"]:
+            c = a.get("correctness")
+            totals["correct" if c == "correct" else "wrong" if c == "incorrect" else "unknown"] += 1
+    out.update(totals)
+    out["attempts"] = sum(totals.values())
+    out["hints"] = sum(t["hints"] for t in out["tasks"])
+    out["explains"] = sum(t["explains"] for t in out["tasks"])
+    out["topics"] = list(dict.fromkeys(t["topic"] for t in out["tasks"] if t["topic"]))
+    out["conclusion"] = _conclusion(out["revisit"], out["attempts"])
+    return out
+
+
+def present(conn: sqlite3.Connection, found: dict, *, child: bool, hidden=frozenset()) -> dict:
     """Итог для показа. Ключ могли исправить после попытки (SPEC 1.1) - пометка. Ребёнку, пока
     текущий прогон задания не закрыт (повтор), верные ответы старых попыток не показываются
     (SPEC 1.3, правило 3): остаётся формулировка «решено в прошлый раз»."""
-    out = json.loads(json.dumps(found))
+    out = hide_tasks(found, hidden) if child else found
+    out = json.loads(json.dumps(out))
     for task in out["tasks"]:
         task["key_note"] = None
         current = None

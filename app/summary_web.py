@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from app import privacy, summary
+from app import exam, privacy, summary
 from app.ingest.web import TEMPLATES, Db, child_notice_gate
 from app.notice import notice_redirect
 from app.roles import now_of, require_csrf, require_parent
@@ -23,13 +23,18 @@ parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)]
 
 
 def _my_data(conn, now, selected_id: int | None) -> dict:
+    hidden = exam.locked_task_ids(
+        conn, now
+    )  # идёт олимпиада: её задания скрыты и в прошлых занятиях
     sessions = summary.list_sessions(conn, now)
+    for s in sessions:
+        s["summary"] = summary.hide_tasks(s["summary"], hidden) if s["summary"] else None
     done = [s for s in sessions if s["summary"]]
     if selected_id is None and done:
         selected_id = done[0]["id"]
     selected = next((s["summary"] for s in done if s["id"] == selected_id), None)
     if selected is not None:
-        selected = summary.present(conn, selected, child=True)
+        selected = summary.present(conn, selected, child=True, hidden=hidden)
     return {
         "sessions": [
             {k: v for k, v in s.items() if k != "summary"}
@@ -75,7 +80,8 @@ def my_summary_json(session_id: int, request: Request, conn: Db):
     found = summary.get_summary(conn, session_id, now_of(request))
     if found is None:
         raise HTTPException(404, "Итога этого занятия нет")
-    return JSONResponse(summary.present(conn, found, child=True))
+    hidden = exam.locked_task_ids(conn, now_of(request))
+    return JSONResponse(summary.present(conn, found, child=True, hidden=hidden))
 
 
 @child.post(
@@ -90,7 +96,8 @@ def finish(request: Request, conn: Db):
             status_code=409,
         )
     return JSONResponse({"ok": True, "session_id": built["session_id"],
-         "summary": summary.present(conn, built, child=True)}
+         "summary": summary.present(
+             conn, built, child=True, hidden=exam.locked_task_ids(conn, now_of(request)))}
     )  # fmt: skip
 
 

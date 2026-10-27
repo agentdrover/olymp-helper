@@ -7,6 +7,7 @@
 import json
 from datetime import date, datetime
 
+from app import exam
 from app.exam_countdown import exam_countdown
 from app.ingest.publish import is_published
 from app.model.ledger import moscow_day
@@ -49,9 +50,15 @@ def _reason(run, flags) -> str | None:
 
 def build_today(conn, now: datetime) -> dict:
     day = moscow_day(now)
-    tasks = [t for t in conn.execute("SELECT * FROM task_item ORDER BY id") if is_published(t)]
+    hidden = exam.locked_task_ids(conn, now)  # идёт олимпиада: её задания в «Сегодня» не видны
+    tasks = [
+        t for t in conn.execute("SELECT * FROM task_item ORDER BY id")
+        if is_published(t) and t["id"] not in hidden
+    ]  # fmt: skip
     runs = {}
     for run in conn.execute("SELECT * FROM tutor_run ORDER BY id"):
+        if run["task_item_id"] in hidden:
+            continue
         runs[run["task_item_id"]] = run  # последний прогон каждого задания
     by_id = {t["id"]: t for t in tasks}
 
@@ -67,8 +74,8 @@ def build_today(conn, now: datetime) -> dict:
         if r["closed_at"] and moscow_day(datetime.fromisoformat(r["closed_at"])) == day
     ]  # fmt: skip
     hints_today = sum(
-        1 for e in conn.execute("SELECT created_at FROM event WHERE type = 'hint'")
-        if moscow_day(datetime.fromisoformat(e["created_at"])) == day
+        1 for e in conn.execute("SELECT created_at, task_item_id FROM event WHERE type = 'hint'")
+        if e["task_item_id"] not in hidden and moscow_day(datetime.fromisoformat(e["created_at"])) == day
     )  # fmt: skip
 
     revisit = []

@@ -12,6 +12,8 @@ from app import auth, privacy
 from app.account_web import parent as account_parent
 from app.account_web import public as account_public
 from app.db import connect, migrate, schema_version
+from app.exam_web import child as exam_child
+from app.exam_web import parent as exam_parent
 from app.ingest.context import AppContext, ExecutorModel
 from app.ingest.jobs import ImportJobs
 from app.ingest.limits import IMPORT_MAX_BASE_S, IMPORT_MAX_PER_CHUNK_S, IMPORT_STALL_S
@@ -139,6 +141,8 @@ def create_app(
     app.include_router(account_public)
     app.include_router(parent_router)
     app.include_router(tutor_router)
+    app.include_router(exam_child)
+    app.include_router(exam_parent)
     app.include_router(summary_child)
     app.include_router(summary_parent)
     app.include_router(voice_router)

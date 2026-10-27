@@ -1,0 +1,21 @@
+{% extends "base_child.html" %}
+{% block title %}Итог олимпиады{% endblock %}
+{% block content %}
+<header>
+  <div class="kicker">{{ r.title }}</div>
+  <h1>{{ r.score }} из {{ r.max_score }} баллов</h1>
+</header>
+<section class="card">
+  <p>Верно: {{ r.correct }} из {{ r.total }}.{% if r.end_reason == "time" %} Вариант закрыт по времени.{% endif %}{% if r.reduced %} Это был уменьшенный вариант.{% endif %}</p>
+</section>
+<section aria-label="Задания">
+  {% for it in r["items"] %}
+  <div class="card">
+    <strong>Задание {{ it.number or it.position }}</strong> · {{ it.points }} из {{ it.max_points }} · время {{ it.seconds // 60 }}:{{ "%02d"|format(it.seconds % 60) }}
+    · {% if it.correct %}верно{% elif it.answered %}неверно{% else %}пропущено{% endif %}
+    {% if it.review_url %}<br><a href="{{ it.review_url }}">Разобрать с подсказками →</a>{% endif %}
+  </div>
+  {% endfor %}
+</section>
+<p><a class="btn" href="/exam">К олимпиаде</a></p>
+{% endblock %}
