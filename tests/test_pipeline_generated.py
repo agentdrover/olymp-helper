@@ -147,6 +147,8 @@ def test_a_disagreement_or_a_failed_gate_goes_to_the_parent(tmp_path):
             return {"solution": "А", "issues": [issue]}
         if Q2 in content:
             return {"solution": "А", "issues": [{"kind": "ambiguous", "text": "мутно"}]}
+        if "ОРГАНОИД КЛЕТКИ" in content:  # the second pass sees the editor's bank copy
+            return agree("А")
         if "поглощает свет" in content:
             return agree("Г")
         return agree("В")
@@ -243,6 +245,8 @@ def test_an_editor_that_fixes_the_question_gets_it_published_in_its_final_form(t
     fixed = good("Какой органоид растительной клетки содержит хлорофилл и ведёт фотосинтез?", "Г")
 
     def critic(content):
+        if "ведёт фотосинтез" in content:  # the second pass sees the fixed question: clean
+            return agree("Г")
         return {"solution": "Г", "issues": [{"kind": "level", "text": "слишком сложно"}]}
 
     c, model = make_pipeline(
@@ -326,3 +330,95 @@ def test_the_pack_page_counts_published_and_waiting(tmp_path):
         page = c.get(r.headers["location"], headers=PARENT).text
         assert "без вашей проверки (прошло двух моделей и проверки кода): <b>1</b>" in page
         assert "Принято в ленту проверки: <b>1</b>" in page
+
+
+def test_an_edit_that_moves_the_key_is_caught_by_the_second_critic_pass(tmp_path):
+    swapped = good(NEW[0]["text"], "Г")
+    swapped["options"] = [
+        {"label": "А", "text": "пластида"},
+        {"label": "Б", "text": "рибосома"},
+        {"label": "В", "text": "вакуоль"},
+        {"label": "Г", "text": "ядро"},
+    ]
+    seen = []
+
+    def critic(content):
+        seen.append(content)
+        if len(seen) == 1:  # the original: solves it, but finds a level issue
+            return {"solution": "Г", "issues": [{"kind": "level", "text": "сложно"}]}
+        return agree("А")  # the edited question: the right option is now А
+
+    c, model = make_pipeline(
+        tmp_path,
+        {"questions": NEW[:1]},
+        critic=critic,
+        editor={"unfixable": False, "reason": "", "question": swapped},
+    )
+    with c:
+        request_pack(c, 1)
+        (task,) = rows(tmp_path)
+        assert task["import_status"] == "draft" and task["auto_checked"] == 0
+        assert "критик не согласен" in reason_of(task)
+        assert model.channels_of("question_critic") == ["cursor", "cursor"]  # not the author's
+        assert model.channels_of("tutor_judge") == []
+        for _, _, content in model.log:  # the second pass gets no key and no explanation
+            assert "answer_key" not in content and "потому что так" not in content
+
+
+def test_an_editor_that_returns_the_question_unchanged_after_issues_goes_to_the_parent(tmp_path):
+    c, model = make_pipeline(
+        tmp_path,
+        {"questions": NEW[:1]},
+        critic=lambda content: {
+            "solution": "Г",
+            "issues": [{"kind": "second_correct", "text": "вариант А тоже верен"}],
+        },
+        editor={"unfixable": False, "reason": "", "question": NEW[0]},
+    )
+    with c:
+        request_pack(c, 1)
+        (task,) = rows(tmp_path)
+        assert task["import_status"] == "draft"
+        assert "не сняты" in reason_of(task) and "вариант А тоже верен" in reason_of(task)
+        assert model.channels_of("question_critic") == ["cursor"]  # no second pass needed
+
+
+def test_issues_that_survive_the_edit_keep_the_question_from_publishing(tmp_path):
+    fixed = good("Какой органоид растительной клетки содержит хлорофилл и ведёт фотосинтез?", "Г")
+    c, _ = make_pipeline(
+        tmp_path,
+        {"questions": NEW[:1]},
+        critic=lambda content: {
+            "solution": "Г",
+            "issues": [{"kind": "ambiguous", "text": "всё ещё мутно"}],
+        },
+        editor={"unfixable": False, "reason": "", "question": fixed},
+    )
+    with c:
+        request_pack(c, 1)
+        (task,) = rows(tmp_path)
+        assert task["import_status"] == "draft" and "не сняты" in reason_of(task)
+
+
+def test_the_limit_stops_the_pack_at_the_second_pass_too(tmp_path):
+    fixed = good("Какой органоид растительной клетки содержит хлорофилл и ведёт фотосинтез?", "Г")
+    calls = []
+
+    def critic(content):
+        calls.append(content)
+        if len(calls) == 1:
+            return {"solution": "Г", "issues": [{"kind": "level", "text": "сложно"}]}
+        return ModelResult.failure("cursor", "stub", "limit")
+
+    c, model = make_pipeline(
+        tmp_path,
+        {"questions": NEW[:2]},
+        critic=critic,
+        editor={"unfixable": False, "reason": "", "question": fixed},
+    )
+    with c:
+        request_pack(c, 2)
+        made = rows(tmp_path)
+        assert [r["import_status"] for r in made] == ["draft", "draft"]
+        assert all("лимит" in reason_of(r) for r in made)
+        assert len(model.channels_of("question_critic")) == 2  # the second question was not asked

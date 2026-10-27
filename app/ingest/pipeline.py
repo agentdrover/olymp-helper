@@ -267,11 +267,36 @@ def vet_item(run: PackRun, task: dict, kind: str, topic: str, catalog: dict, kno
     return Verdict(True, box["task"])
 
 
+def _same_question(a: dict, b: dict) -> bool:
+    return all(a[k] == b[k] for k in ("text", "type", "options", "value"))
+
+
+def _recheck(run, box, kind, title) -> Critique:
+    """Замечания были: правка не принимается на слово. Второй проход критика (тот же другой
+    канал, без ключа) по ИТОГОВОМУ вопросу: решение должно совпасть с ключом, замечаний нет."""
+    original = box["task"]
+    edited = _edit(run, original, kind, box["critique"])
+    if _same_question(original, edited):
+        raise Stop("замечания критика не сняты: редактор вернул вопрос без изменений")
+    box["task"] = edited
+    again = _critic(run, edited, kind, title)
+    if again.issues:
+        box["critique"] = again
+        raise Stop("замечания критика не сняты после правки")
+    if normalize_answer(again.solution, KINDS[kind][0]) != edited["value"]:
+        raise Stop(
+            f"после правки критик не согласен: ответ «{again.solution}», "
+            f"ключ «{display(edited['value'])}»"
+        )
+    return again
+
+
 def _vet(run, box, kind, topic, catalog, known) -> None:
     if topic not in catalog:
         raise Stop("тема не найдена в каталоге")
-    box["critique"] = critique = _critic(run, box["task"], kind, catalog[topic]["title"])
+    title = catalog[topic]["title"]
+    box["critique"] = critique = _critic(run, box["task"], kind, title)
     if critique.issues:
-        box["task"] = _edit(run, box["task"], kind, critique)
+        critique = _recheck(run, box, kind, title)
     _gates(box["task"], critique, kind, known)
     _no_leak(run, box["task"])
