@@ -58,7 +58,7 @@ def test_png_attachment_reaches_both_adapters_within_limits(tmp_path):
     reply = run("claude", [png], seen)
     assert reply["error"] is None and reply["json"] == {"shape": "triangle"}
     call = seen[0]
-    assert "stream-json" in call.argv
+    assert call.argv.count("stream-json") == 2 and "--verbose" in call.argv
     line = json.loads(call.input)
     block = line["message"]["content"][0]
     assert block["type"] == "image" and block["source"]["media_type"] == "image/png"
@@ -160,3 +160,32 @@ def test_family_is_pinned_and_no_fallback(tmp_path):
     assert not res.ok and res.channel == "claude"
     assert down.calls == 1 and spare.calls == 0
     assert svc.complete_on("zzz", "s", MSG).error_kind == "bad_channel"
+
+
+def test_stream_output_truncated_png_oversize_text_and_facade(tmp_path):
+    from app.ingest.context import ExecutorModel
+    from app.model.adapters import ClaudeAdapter
+    from app.model.client import MAX_REQUEST_BYTES
+
+    init = '{"type":"system","subtype":"init"}'
+    final = '{"type":"result","is_error":false,"result":"{\\"a\\":1}","usage":{"input_tokens":1,"output_tokens":2}}'
+    stream = f"{init}\n{final}"
+    parsed = ClaudeAdapter().parse(stream, {"type": "object"})
+    assert parsed.json == {"a": 1} and parsed.usage["output_tokens"] == 2
+
+    png = make_png()
+    for bad in (png[:24], png[:-5], png[:-12], png[:40] + b"\x00" + png[41:]):
+        seen = []
+        assert run("claude", [bad], seen)["error_kind"] == "bad_image" and not seen
+
+    calls = []
+    huge = [{"role": "user", "content": "я" * MAX_REQUEST_BYTES}]
+    res = ExecutorChannel("claude", "http://x", key="k", post=make_post(calls)).complete("s", huge)
+    assert res.error_kind == "request_too_large" and not calls
+
+    db = tmp_path / "o.db"
+    migrate(connect(db))
+    model = ExecutorModel(db)
+    assert model.family("claude") == "anthropic"
+    res = model.complete_on("claude", "s", MSG, None, None, [png, png, png, png, png])
+    assert res.error_kind == "too_many_images"

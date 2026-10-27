@@ -80,14 +80,15 @@ class ExecutorChannel:
             "schema": schema,
         }
         try:
-            if images:
-                # Предел по числу, байтам, пикселям и полному размеру запроса - до обращения к сети.
-                try:
+            try:
+                if images:
                     payload["images"] = encode_images(list(images))
-                    if len(encode_payload(payload)) > MAX_IMAGE_REQUEST_BYTES:
-                        raise ChannelError("request_too_large")
-                except ChannelError as exc:
-                    return ModelResult.failure(self.channel, model, exc.kind)
+                # Полный размер тела - до обращения к сети, с вложениями и без.
+                limit = MAX_IMAGE_REQUEST_BYTES if images else MAX_REQUEST_BYTES
+                if len(encode_payload(payload)) > limit:
+                    raise ChannelError("request_too_large")
+            except ChannelError as exc:
+                return ModelResult.failure(self.channel, model, exc.kind)
             body = self.post(self.url, payload, self.timeout, headers={"X-Executor-Key": self.key})
             if not isinstance(body, dict):
                 raise TypeError("not an object")

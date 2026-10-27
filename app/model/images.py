@@ -3,6 +3,7 @@
 import base64
 import binascii
 import struct
+import zlib
 
 from app.model.types import ChannelError
 
@@ -20,14 +21,34 @@ UNTRUSTED_IMAGE_RULE = (
 )
 
 
+def _chunks(data: bytes):
+    """Куски PNG (тип, данные) с проверкой длины и CRC; обрыв или порча - ChannelError."""
+    pos = 8
+    while pos < len(data):
+        if pos + 12 > len(data):
+            raise ChannelError("bad_image")
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        end = pos + 8 + length
+        if end + 4 > len(data):
+            raise ChannelError("bad_image")
+        kind, body = data[pos + 4 : pos + 8], data[pos + 8 : end]
+        if struct.unpack(">I", data[end : end + 4])[0] != zlib.crc32(kind + body):
+            raise ChannelError("bad_image")
+        yield kind, body
+        pos = end + 4
+
+
 def png_size(data: bytes) -> tuple[int, int]:
-    """(ширина, высота) из заголовка IHDR; не PNG - ChannelError('bad_image')."""
+    """(ширина, высота) из IHDR; не целый PNG (IHDR, IDAT, IEND, CRC) - ChannelError('bad_image')."""
     if (
         not isinstance(data, bytes | bytearray)
-        or len(data) < 24
+        or len(data) < 33
         or data[:8] != PNG_SIGNATURE
         or data[12:16] != b"IHDR"
     ):
+        raise ChannelError("bad_image")
+    kinds = [kind for kind, _ in _chunks(bytes(data))]
+    if kinds[0] != b"IHDR" or b"IDAT" not in kinds or kinds[-1] != b"IEND":
         raise ChannelError("bad_image")
     width, height = struct.unpack(">II", data[16:24])
     if width <= 0 or height <= 0:

@@ -79,6 +79,21 @@ def _unfence(text: str) -> str:
     return match.group(1) if match else text
 
 
+def _result_event(stdout: str):
+    """Поток stream-json: по строке на событие; ответ - последнее событие type=result."""
+    found = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            found = event
+    if found is None:
+        raise ChannelError("bad_json")
+    return found
+
+
 def parse_cli_json(stdout: str, schema: dict | None) -> Parsed:
     """Общий разбор: ошибка CLI, пустой или битый JSON - ChannelError, а не ответ."""
     if not stdout or not stdout.strip():
@@ -86,7 +101,7 @@ def parse_cli_json(stdout: str, schema: dict | None) -> Parsed:
     try:
         obj = json.loads(stdout)
     except ValueError:
-        raise ChannelError("bad_json") from None
+        obj = _result_event(stdout)
     if not isinstance(obj, dict):
         raise ChannelError("bad_json")
     if obj.get("is_error"):
@@ -118,8 +133,9 @@ class ClaudeAdapter:
             "claude",
             "-p",
             "--output-format",
-            "json",
-            *(("--input-format", "stream-json") if images else ()),
+            "stream-json" if images else "json",
+            # Потоковый ввод требует потокового вывода (и --verbose): ответ - строка type=result.
+            *(("--input-format", "stream-json", "--verbose") if images else ()),
             "--model",
             _check_model(model),
             "--tools",
