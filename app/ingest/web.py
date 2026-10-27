@@ -3,6 +3,7 @@
 import functools
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 import threading
@@ -30,6 +31,7 @@ from app.roles import PARENT, csrf_token, current_role, require_csrf, require_pa
 from app.search import search
 from app.search.tasks import search_published_tasks
 
+log = logging.getLogger("app.ingest")
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 TEMPLATES.env.globals["csrf_token"] = csrf_token
 KINDS = ("tasks", "key", "textbook")
@@ -138,6 +140,11 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
     ).fetchall()
     progress = ctx_of(request).progress
     touched = touched_materials(conn)
+    stuck = {  # queued без хода разбора: запуск потерян
+        m["id"]
+        for m in rows
+        if m["import_status"] == "queued" and progress.get(m["id"], m["run_id"]) is None
+    }
     page = TEMPLATES.TemplateResponse(
         request,
         "parent/materials.html",
@@ -150,6 +157,7 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
                 for m in rows
             },
             "touched": touched,
+            "stuck": stuck,
             "unavailable": UNAVAILABLE,
             "flash": flash,
             "error": error,
@@ -192,6 +200,32 @@ def upload_material(
     )
 
 
+class StartFailed(Exception):
+    """Разбор после сброса не запущен; материал уже помечен failed."""
+
+
+START_FAILED = "Не удалось запустить разбор. Нажмите «Разобрать заново» ещё раз."
+
+
+def _submit_or_fail(request: Request, material_id: int) -> None:
+    """Запуск после сброса: сбой не оставляет материал queued без задания - он становится
+    failed (отдельной короткой транзакцией), и та же кнопка повторяет разбор."""
+    try:
+        request.app.state.imports.submit(material_id)
+    except Exception:
+        log.exception("reparse %s: import not started", material_id)
+        conn = open_db(ctx_of(request).db_path)
+        try:
+            conn.execute(
+                "UPDATE material SET import_status = 'failed', import_error = ? "
+                "WHERE id = ? AND import_status IN ('queued', 'running')",
+                (START_FAILED, material_id),
+            )
+        finally:
+            conn.close()
+        raise StartFailed(START_FAILED) from None
+
+
 @parent.post("/parent/materials/{material_id}/reparse")
 def reparse_material(material_id: int, request: Request, conn: Db):
     """«Разобрать заново»: только пока ни одно задание не тронуто (reparse.reset_material)."""
@@ -200,13 +234,13 @@ def reparse_material(material_id: int, request: Request, conn: Db):
         with REPARSE_LOCK:  # сброс и запуск - одно действие: второй щелчок видит ход разбора
             started = reset_material(ctx_of(request), conn, material_id)
             if started:
-                request.app.state.imports.submit(material_id)
+                _submit_or_fail(request, material_id)
     except Refusal as exc:
         if html:
             return _materials_view(request, conn, error=exc.message, status=exc.status)
         return _refusal(exc)
-    except sqlite3.Error:
-        message = "Не удалось начать разбор заново: база занята или повреждена. Повторите позже."
+    except (sqlite3.Error, StartFailed):
+        message = "Не удалось начать разбор заново. Повторите позже."
         if html:
             return _materials_view(request, conn, error=message, status=500)
         return JSONResponse({"error": message}, status_code=500)

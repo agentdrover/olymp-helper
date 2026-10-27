@@ -322,3 +322,40 @@ def test_reparse_resubmits_a_queued_material_without_a_running_job(tmp_path):
         assert got.status_code == 202 and got.json()["started"] is True
         assert len(model.calls) == calls + 1
         assert _status(tmp_path) == ("done", None)
+
+
+def test_reparse_failed_submit_marks_the_material_failed_and_keeps_the_button(tmp_path):
+    client, model = _start(tmp_path)
+    with client as c:
+        assert upload(c, text_pdf([["1. вопрос"]])).status_code == 202
+        jobs = c.app.state.imports
+        real = jobs.submit
+
+        def broken(material_id):
+            raise RuntimeError("no thread")
+
+        jobs.submit = broken
+        quiet = TestClient(c.app, raise_server_exceptions=False)
+        got = quiet.post("/parent/materials/1/reparse", headers=API)
+        assert got.status_code == 500
+        status, error = _status(tmp_path)
+        assert status == "failed" and error
+        assert _count(tmp_path, "task_item") == 0
+        assert "/parent/materials/1/reparse" in c.get("/parent/materials", headers=HTML).text
+        jobs.submit = real
+        calls = len(model.calls)
+        assert c.post("/parent/materials/1/reparse", headers=API).status_code == 202
+        assert len(model.calls) == calls + 1
+        assert _status(tmp_path) == ("done", None)
+        assert _count(tmp_path, "task_item") == 2
+
+
+def test_button_shown_for_a_queued_material_without_a_job(tmp_path):
+    client, _ = _start(tmp_path)
+    with client as c:
+        assert upload(c, text_pdf([["1. вопрос"]])).status_code == 202
+        conn = db(tmp_path)
+        conn.execute("DELETE FROM task_item")
+        conn.execute("UPDATE material SET import_status = 'queued'")
+        conn.close()
+        assert "/parent/materials/1/reparse" in c.get("/parent/materials", headers=HTML).text
