@@ -8,8 +8,11 @@
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from app import summary
+from app.ingest.store import atomic
 
 RETENTION_DAYS = 180
 MESSAGE_TYPES = ("chat", "voice")
@@ -50,21 +53,32 @@ def session_exists(conn: sqlite3.Connection, session_id: int) -> bool:
     )
 
 
-def delete_messages(conn: sqlite3.Connection, session_id: int | None = None) -> int:
+def delete_messages(
+    conn: sqlite3.Connection, session_id: int | None = None, now: datetime | None = None
+) -> int:
+    # Итоги, которых ещё нет, строятся до удаления: число сообщений берётся из событий.
+    now = now or datetime.now(UTC)
+    summary.ensure(conn, now)
     sql = f"DELETE FROM event WHERE type IN ({_IN})"
     args: list = list(MESSAGE_TYPES)
     if session_id is not None:
         sql += " AND session_id = ?"
         args.append(session_id)
-    return conn.execute(sql, args).rowcount
+    with atomic(conn):  # счёт и удаление - одна транзакция: сообщение между ними не теряется
+        summary.preserve_message_counts(conn, session_id)
+        return conn.execute(sql, args).rowcount
 
 
 def cleanup_retention(conn: sqlite3.Connection, now: datetime) -> int:
     """Сообщения старше 180 дней удаляются; занятия, итоги и прочие события остаются."""
+    summary.ensure(conn, now)
     cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
-    return conn.execute(
-        f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?", (*MESSAGE_TYPES, cutoff)
-    ).rowcount
+    with atomic(conn):
+        summary.preserve_message_counts(conn, before=cutoff)
+        return conn.execute(
+            f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?",
+            (*MESSAGE_TYPES, cutoff),
+        ).rowcount
 
 
 # -------------------------------------------------------------------------- материалы

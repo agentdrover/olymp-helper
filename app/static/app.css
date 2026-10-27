@@ -208,3 +208,9 @@ dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max
 @media (max-width: 600px) { .filter-grid { grid-template-columns: minmax(0, 1fr); } }
 .empty-blocks { margin-top: 16px; color: var(--ink-3); }
 .empty-blocks .chip { color: var(--ink-3); }
+/* итоги занятий */
+.facts { padding-left: 20px; margin: 8px 0 16px; }
+.facts li { margin: 4px 0; }
+.summary .conclusion { margin: 16px 0 0; }
+.journal { padding-left: 20px; }
+.journal li { margin: 6px 0; }
