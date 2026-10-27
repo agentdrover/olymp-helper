@@ -455,6 +455,23 @@ def review_auto(conn: Db):
     return {"tasks": review.auto_published(conn)}
 
 
+class AutoRunBody(BaseModel):
+    material_id: int | None = None
+
+
+@parent.post("/parent/review/auto/run")
+def review_auto_run(request: Request, body: AutoRunBody | None = None):
+    """Проверить и опубликовать черновики с официальным ключом (фоном: запрос не ждёт)."""
+    ctx = ctx_of(request)
+    started = ctx.autorun.start(ctx, (body or AutoRunBody()).material_id)
+    return {"started": started, **ctx.autorun.snapshot()}
+
+
+@parent.get("/parent/review/auto/status")
+def review_auto_status(request: Request):
+    return ctx_of(request).autorun.snapshot()
+
+
 @parent.get("/parent/review/{task_id}", response_class=HTMLResponse)
 def review_card(task_id: int, request: Request, conn: Db, fragment: int = 0):
     ctx = ctx_of(request)

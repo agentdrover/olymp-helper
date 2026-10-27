@@ -76,24 +76,30 @@ def try_publish(ctx, conn, task_id: int, state: dict) -> str | None:
     return None
 
 
-def publish_pending(ctx, conn, material_id: int | None = None) -> int:
+def publish_pending(
+    ctx, conn, material_id: int | None = None, *, force: bool = False, report=None
+) -> int:
     """Пройти черновики (одного материала или все); вернуть число опубликованных.
-    Сбой одного задания не прерывает остальные и не роняет импорт."""
-    if not getattr(ctx, "auto_publish", False):
+    Сбой одного задания не прерывает остальные и не роняет импорт. force - явное действие
+    родителя: работает и при выключенной автопубликации. report(checked, total, published,
+    limit) вызывается после каждого задания."""
+    if not force and not getattr(ctx, "auto_publish", False):
         return 0
     sql = "SELECT id FROM task_item WHERE import_status = 'draft' AND excluded = 0"
     args: tuple = ()
     if material_id is not None:
         sql += " AND material_id = ?"
         args = (material_id,)
+    ids = [r[0] for r in conn.execute(sql + " ORDER BY id", args).fetchall()]
     state: dict = {}
     published = 0
-    for (task_id,) in conn.execute(sql + " ORDER BY id", args).fetchall():
+    for index, task_id in enumerate(ids, 1):
         try:
             try_publish(ctx, conn, task_id, state)
         except Exception:
             log.exception("auto publish of task %s failed", task_id)
-            continue
         if get_task(conn, task_id)["auto_published"]:
             published += 1
+        if report is not None:
+            report(index, len(ids), published, bool(state.get("limit")))
     return published

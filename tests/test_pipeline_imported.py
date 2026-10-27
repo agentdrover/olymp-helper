@@ -188,3 +188,52 @@ def test_a_task_with_a_figure_is_never_auto_published(tmp_path):
         assert autopublish.publish_pending(c.app.state.ctx, conn) == 0
         conn.close()
         assert row(tmp_path, tid)["import_status"] == "draft" and child_ids(c) == []
+
+
+def drafts_with_keys(tmp_path, model):
+    """Drafts that exist BEFORE auto-publication is shipped: imported with it switched off."""
+    tasks = [make_task(1), make_task(2), make_task(3)]
+    c = TestClient(build_app(tmp_path, model, auto_publish=False))
+    c.__enter__()
+    upload(c, key_pdf({"1": "Б", "2": "Б"}), kind="key", name="key.pdf")
+    upload(c, text_pdf([[f"{t['number']}. вопрос" for t in tasks]]))
+    return c, task_ids(tmp_path)
+
+
+def run_action(c, **body):
+    r = c.post("/parent/review/auto/run", headers=PARENT, json=body)
+    assert r.status_code == 200, r.text
+    return c.get("/parent/review/auto/status", headers=PARENT).json()
+
+
+def test_the_parent_action_publishes_existing_drafts_with_keys_once(tmp_path):
+    model = StubModel(
+        split=reply(make_task(1), make_task(2), make_task(3)),
+        answer=answer_by_number({"1": "Б", "2": "В", "3": "Б"}),
+    )
+    c, (agree, differ, keyless) = drafts_with_keys(tmp_path, model)
+    with c:
+        assert child_ids(c) == []
+        status = run_action(c)
+        assert status["state"] == "done"
+        assert status["text"] == "проверено 3 из 3, опубликовано 1, оставлено вам 2."
+        assert child_ids(c) == [agree] and row(tmp_path, agree)["auto_published"] == 1
+        assert row(tmp_path, differ)["import_status"] == "draft"
+        assert row(tmp_path, keyless)["import_status"] == "draft"  # no key: parent's path
+        calls = len(model.calls_of("task_answer"))
+        assert calls == 2  # the keyless task never reaches the model
+
+        again = run_action(c, material_id=row(tmp_path, agree)["material_id"])
+        assert again["state"] == "done" and child_ids(c) == [agree]
+        assert len(model.calls_of("task_answer")) == calls  # nothing is asked twice
+        assert row(tmp_path, agree)["revision"] == 1
+
+
+def test_the_parent_action_stops_at_the_model_limit_and_says_so(tmp_path):
+    model = LimitModel(split=reply(make_task(1), make_task(2), make_task(3)))
+    c, _ids = drafts_with_keys(tmp_path, model)
+    with c:
+        status = run_action(c)
+        assert status["state"] == "done" and "лимит" in status["text"]
+        assert status["text"].startswith("проверено 3 из 3, опубликовано 0, оставлено вам 3")
+        assert model.calls.count(None) == 1 and child_ids(c) == []

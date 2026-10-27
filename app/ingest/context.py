@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.db import connect
+from app.ingest.autorun import AutoRun
 from app.ingest.progress import ImportProgress
 from app.ingest.render import PageCache
 from app.model.client import ExecutorChannel
@@ -56,6 +57,7 @@ class AppContext:
     page_cache: PageCache
     feed: FeedState = field(default_factory=FeedState)
     progress: ImportProgress = field(default_factory=ImportProgress)
+    autorun: AutoRun = field(default_factory=AutoRun)
     auto_publish: bool = True  # K5b: задания с официальным ключом публикуются без родителя
 
     @property

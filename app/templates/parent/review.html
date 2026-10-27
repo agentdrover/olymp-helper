@@ -6,7 +6,10 @@
   <h1>Проверка заданий <span class="hint" id="counter">{{ counter or "" }}</span></h1>
 </header>
 <div id="feed">{% include "parent/card.html" %}</div>
+<p><button id="autorun" data-material-id="">Проверить и опубликовать задания с ключом</button>
+  <span class="hint" id="autorun-status" aria-live="polite"></span></p>
 <p><a href="/parent/generate">Составить пачку вопросов</a></p>
 <p class="hint"><kbd>Enter</kbd> — верно и подтвердить, <kbd>→</kbd> — пропустить, <kbd>E</kbd> — поправить.</p>
 <script src="/static/feed.js"></script>
+<script src="/static/autorun.js" defer></script>
 {% endblock %}

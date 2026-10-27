@@ -123,6 +123,7 @@ def create_app(
         progress=ImportProgress(import_clock or time.monotonic),
         auto_publish=auto_publish,
     )
+    ctx.autorun.sync = sync_imports
     app.state.ctx = ctx
     app.state.page_cache = ctx.page_cache
     app.state.imports = ImportJobs(
