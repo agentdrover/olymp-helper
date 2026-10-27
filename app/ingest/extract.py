@@ -56,11 +56,17 @@ def _page_text(page) -> str:
     return "\n".join(text for _, _, text in sorted(items, key=lambda i: (i[0], i[1])))
 
 
-def extract_pages(data: bytes) -> list[tuple[int, str]]:
-    """[(номер страницы с 1, текст)]; страница без текста даёт пустую строку."""
+def extract_pages(data: bytes, on_page=None) -> list[tuple[int, str]]:
+    """[(номер страницы с 1, текст)]; страница без текста даёт пустую строку.
+    on_page(номер, всего) - после каждой страницы: пульс для сторожка импорта."""
     doc = pymupdf.open(stream=data, filetype="pdf")
     try:
-        return [(i, _page_text(page)) for i, page in enumerate(doc, 1)]
+        out = []
+        for i, page in enumerate(doc, 1):
+            out.append((i, _page_text(page)))
+            if on_page is not None:
+                on_page(i, doc.page_count)
+        return out
     finally:
         doc.close()
 
