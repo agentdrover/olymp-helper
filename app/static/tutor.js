@@ -74,10 +74,32 @@
     return !isNaN(now) && m !== null && parseInt(m[1], 10) < now;
   }
 
-  function swap(html) {
+  // Несохранённый ответ ребёнка (вариант, число, пары, «насколько уверен») переживает замену фрагмента опросом.
+  function formState() {
+    var out = [];
+    root.querySelectorAll(".answer-form input, .answer-form select").forEach(function (e) {
+      out.push({ name: e.getAttribute("name"), type: e.getAttribute("type"), value: e.value, checked: e.checked });
+    });
+    return out;
+  }
+
+  function restoreForm(saved) {
+    var fresh = root.querySelectorAll(".answer-form input, .answer-form select");
+    saved.forEach(function (s) {
+      fresh.forEach(function (e) {
+        if (e.getAttribute("name") !== s.name) return;
+        if (s.type === "radio" || s.type === "checkbox") { if (e.value === s.value) e.checked = s.checked; }
+        else e.value = s.value;
+      });
+    });
+  }
+
+  function swap(html, keepForm) {
     var wasOpen = zoomDialog() && zoomDialog().open;
+    var saved = keepForm ? formState() : null;
     if (field()) draft = field().value;  // недописанный вопрос не пропадает при обновлении панели
     root.innerHTML = html;
+    if (saved) restoreForm(saved);
     if (field()) field().value = draft;
     if (wasOpen) openZoom({ preventDefault: function () {} });
     schedule();
@@ -94,9 +116,17 @@
       .then(function (html) {
         polling = false;
         if (stale(mine, html)) return schedule();  // опоздавший ответ не затирает экран
-        swap(html);
+        swap(html, true);
       })
       .catch(function () { polling = false; schedule(); });  // сеть мигнула: опрос не обрывается
+  }
+
+  // Ответ на POST не дошёл, но сервер мог начать шаг: кнопки свободны, опрос покажет, что есть на самом деле.
+  function lostReply() {
+    var s = root.querySelector(".helper-status");
+    if (s) s.textContent = "Помощник сейчас не отвечает — проверка по ключу работает.";
+    root.querySelectorAll(".helper button").forEach(function (b) { b.disabled = false; });
+    schedule();
   }
 
   function setThinking() {
@@ -114,10 +144,7 @@
       body: JSON.stringify(body || {}),
     }).then(function (r) { return r.text(); }).then(function (html) {
       if (!stale(mine, html)) swap(html);
-    }).catch(function () {
-      var s = root.querySelector(".helper-status");
-      if (s) s.textContent = "Помощник сейчас не отвечает — проверка по ключу работает.";
-    });
+    }).catch(lostReply);
   }
 
   function collect(form) {
@@ -165,10 +192,7 @@
       else if (field()) draft = field().value;
       swap(html);
       if (sent && mode === "chat" && field()) field().value = "";
-    }).catch(function () {
-      var s = root.querySelector(".helper-status");
-      if (s) s.textContent = "Помощник сейчас не отвечает — проверка по ключу работает.";
-    });
+    }).catch(lostReply);
   }
 
   // ------------------------------------------------------------------------ голос
