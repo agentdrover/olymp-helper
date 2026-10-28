@@ -38,6 +38,7 @@
     feed.innerHTML = await r.text();
     counter.textContent = count || "";
     frame = null;
+    tilesSeq += 1;
     bindPage();
     refreshReady();
   }
@@ -264,10 +265,14 @@
 
   // Плитки и ввод ответа по текущей рамке: сервер отдаёт тот же фрагмент, что и карточка.
   // Выбранные ответы переживают замену по номеру плитки, а не по месту.
+  // Номер последнего действия над плитками. Ответ применяется, только если после запроса
+  // не было ни другого запроса, ни ручной перестановки: иначе он вернул бы прежние номера.
+  let tilesSeq = 0;
   async function refreshTiles() {
     const area = document.getElementById("figure-area");
     if (!area) return;
     const id = taskId();
+    const seq = ++tilesSeq;
     const kept = {};
     feed.querySelectorAll("[data-key-left]").forEach((x) => { kept[x.dataset.keyLeft] = x.value; });
     const single = document.getElementById("key_text");
@@ -281,9 +286,11 @@
       q.set("scale", PAGE_SCALE);
     }
     const r = await fetch(`/parent/tasks/${id}/figure-tiles?${q}`);
-    if (!r.ok || taskId() !== id) return;  // карточка успела смениться
+    if (!r.ok || taskId() !== id || seq !== tilesSeq) return;  // карточка или ответ устарели
+    const html = await r.text();
+    if (seq !== tilesSeq) return;
     const before = currentDigest();
-    area.innerHTML = await r.text();
+    area.innerHTML = html;
     if (currentDigest() !== before) clearLeakAck();  // рамка или состав плиток другие
     feed.querySelectorAll("[data-key-left]").forEach((x) => { if (kept[x.dataset.keyLeft]) x.value = kept[x.dataset.keyLeft]; });
     const again = document.getElementById("key_text");
@@ -296,6 +303,7 @@
   function moveTile(li, dir) {
     const other = dir < 0 ? li.previousElementSibling : li.nextElementSibling;
     if (!other) return;
+    tilesSeq += 1;  // ответ, ушедший до перестановки, порядок не вернёт
     if (dir < 0) li.parentNode.insertBefore(li, other); else li.parentNode.insertBefore(other, li);
     Array.from(feed.querySelectorAll("[data-tile-id]")).forEach((x, i) => {
       const num = x.querySelector("[data-tile-num]");

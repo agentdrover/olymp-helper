@@ -9,7 +9,7 @@ const SRC = fs.readFileSync(path.join(__dirname, "..", "..", "app", "static", "f
 const fail = (m) => { console.error("FAIL: " + m); process.exit(1); };
 
 function build(extra, opts) {
-  opts = Object.assign({ leak: "none", tiles: [], keySelects: [], lefts: "" }, opts || {});
+  opts = Object.assign({ leak: "none", tiles: [], keySelects: [], lefts: "", area: null, fetch: null }, opts || {});
   const calls = [];
   const docHandlers = {};
   const gates = {};
@@ -42,14 +42,14 @@ function build(extra, opts) {
     addEventListener(t, fn) { (handlers[t] = handlers[t] || []).push(fn); },
   };
   const document = {
-    getElementById(id) { return id === "feed" ? feed : id === "counter" ? { textContent: "" } : id === "page-img" && extra ? extra.page : id === "draft-frame" ? null : fields[id] || null; },
+    getElementById(id) { return id === "feed" ? feed : id === "counter" ? { textContent: "" } : id === "page-img" && extra ? extra.page : id === "draft-frame" ? null : id === "figure-area" ? opts.area : fields[id] || null; },
     createElement() { return { style: {} }; },
     querySelector(sel) { return sel.includes("leak") && opts.leak ? { value: opts.leak } : null; },
     addEventListener(t, fn) { (docHandlers[t] = docHandlers[t] || []).push(fn); },
   };
   const replies = {};
   const bodies = [];
-  const fetch = (url, opts) => {
+  const fetch = opts.fetch ? (url) => { calls.push(url); return opts.fetch(url); } : (url, opts) => {
     calls.push(url);
     const hit = Object.keys(replies).find((g) => url.endsWith(g));
     const body = hit ? replies[hit] : { status: "draft", next: null };
@@ -215,6 +215,25 @@ scenarios.leak_ack_digest_is_sent = async function () {
   await tick(); await tick(); await tick();
   const sent = JSON.parse(p.bodies[1]);
   if (sent.leak_digest !== "abc123") fail("слепок рамки не ушёл с подтверждением: " + p.bodies[1]);
+};
+
+scenarios.stale_tiles_response_is_dropped = async function () {
+  const li = { dataset: { tileId: "ta", label: "" }, querySelector: () => null };
+  const area = { innerHTML: "" };
+  const release = {};
+  const answer = (html) => ({ ok: true, status: 200, text: async () => html, json: async () => ({}) });
+  const fetch = (url) => new Promise((resolve) => {
+    const n = decodeURIComponent(url).match(/ta:(\d*)/)[1];
+    release[n] = () => resolve(answer("R" + n));
+  });
+  const p = build(null, { tiles: [li], area, fetch });
+  const pick = (value) => p.handlers.change[0]({ target: { id: "", value, matches: (s) => s === "[data-tile-bind]", closest: () => li } });
+  pick("1"); pick("2");   // два выбора подряд: оба запроса в полёте
+  release["2"](); await tick(); await tick();
+  if (area.innerHTML !== "R2") fail("свежий ответ не применён: " + area.innerHTML);
+  release["1"](); await tick(); await tick();
+  if (area.innerHTML !== "R2") fail("устаревший ответ затёр новую привязку: " + area.innerHTML);
+  if (li.dataset.label !== "2") fail("привязка плитки изменилась: " + li.dataset.label);
 };
 
 const name = process.argv[2];

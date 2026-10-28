@@ -889,6 +889,7 @@ def test_child_tiles_open_in_the_large_view(tmp_path):
         "unbound_tile_blocks_publish",
         "frame_change_clears_leak_ack",
         "leak_ack_digest_is_sent",
+        "stale_tiles_response_is_dropped",
     ],
 )
 def test_feed_tile_scenarios(scenario):
