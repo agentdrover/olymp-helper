@@ -845,3 +845,44 @@ def test_a_decimal_comma_next_to_a_label_before_points_is_ambiguous():
     assert fit("1, 3 (5 балла)", "multiple", DIGITS).value == ["1", "3"]
     assert fit("1, 3, 5 баллов", "multiple", DIGITS).value == ["1", "3"]
     assert fit("Б, 2,5 балла", "single", LETTERS).value == "Б"  # «2» - не обозначение
+
+
+@pytest.mark.parametrize(
+    ("raw", "kind", "want"),
+    [
+        ("1, 3 2,5 балла", "multiple", ["1", "3"]),
+        ("1, 3 1,5 балла", "multiple", ["1", "3"]),
+        ("1;3 2.5 балла", "multiple", ["1", "3"]),
+        ("2 1,5 балла", "single", "2"),
+        ("1, 3 (2,5 балла)", "multiple", ["1", "3"]),  # скобки: обозначение 2 не затронуто
+        ("1, 3 2 балла", "multiple", ["1", "3"]),
+    ],
+)
+def test_an_ordinary_points_tail_with_a_decimal_is_accepted(raw, kind, want):
+    got = fit(raw, kind, DIGITS)
+    assert got.value == want, raw
+
+
+@pytest.mark.parametrize("raw", ["1, 3,5 балла", "1;3,5 балла", "1, 3, 2,5 балла"])
+def test_a_decimal_right_after_a_list_separator_is_ambiguous(raw):
+    got = fit(raw, "multiple", DIGITS)
+    assert got.value is None and got.reason == "ambiguous", raw
+
+
+def test_editing_option_texts_of_a_match_task_does_not_call_the_model_again(tmp_path):
+    pairs = [{"left": "1", "right": "А"}, {"left": "2", "right": "Б"}]
+    client, model, tid = start(
+        tmp_path, "см. рисунок", "match", MATCH, {"status": "ok", "pairs": pairs}
+    )
+    with client:
+        assert normalize(client)["stored"] == 1
+        conn = db(tmp_path)
+        options = json.loads(conn.execute("SELECT options FROM task_item").fetchone()[0])
+        edited = {
+            side: [{**o, "text": o["text"] + " (правка)"} for o in items]
+            for side, items in options.items()
+        }
+        conn.execute("UPDATE task_item SET options = ?", (json.dumps(edited, ensure_ascii=False),))
+        conn.close()
+        assert detail(client, tid)["key_candidate"]["answer"] == "1-А; 2-Б"
+        assert normalize(client)["stored"] == 0 and len(model.norm_calls) == 1

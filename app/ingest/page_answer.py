@@ -261,9 +261,10 @@ def _fit_choice(raw: str, task_type: str, options) -> tuple[object, str | None]:
 
 
 def _decimal_points_look_like_a_label(tail: str, options) -> bool:
-    """«1, 3,5 балла»: «3,5 балла» - баллы или обозначение 3 и «5 балла»? Скобки снимают вопрос."""
-    found = re.search(r"(\d+)[.,]\d+", tail)
-    if not found or "(" in tail or not isinstance(options, list):
+    """«1, 3,5 балла»: после разделителя списка стоит «3,5» - баллы 3,5 или обозначение 3 и «5»?
+    Только такая запись неоднозначна. «1, 3 2,5 балла» и «(2,5 балла)» - обычный хвост с баллами."""
+    found = re.match(r"\s*[;,]\s*(\d+)[.,]\d+\s*балл", tail, re.IGNORECASE)
+    if not found or not isinstance(options, list):
         return False
     return label_key(found.group(1)) in set(_texts(options))
 
