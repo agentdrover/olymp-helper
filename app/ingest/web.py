@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from app.ingest import packs, review
+from app.ingest import packs, page_normalizer, review
 from app.ingest.figure_card import mode_for
 from app.ingest.figure_service import confirm_figure, preview_png
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
@@ -573,6 +573,37 @@ def _action(handler):
 def task_confirm(task_id: int, request: Request, conn: Db, body: ConfirmBody | None = None):
     review.confirm(ctx_of(request), conn, task_id, (body or ConfirmBody()).answer)
     return _advance(request, conn, task_id, stay_if_open=True)
+
+
+@parent.post("/parent/page-answers/normalize")
+@_action
+def page_answers_normalize(request: Request, conn: Db):
+    """Явный пакетный шаг: нормализовать ответы со страниц моделью. Карточки модель не зовут.
+    В работе - фоновый поток со своим соединением (один за раз); в тестах (sync) - в запросе."""
+    ctx = ctx_of(request)
+    if not page_normalizer.LOCK.acquire(blocking=False):
+        return {"started": False, "message": "Нормализация уже идёт."}
+
+    def run(db):
+        try:
+            return page_normalizer.normalize_pending(ctx, db)
+        finally:
+            page_normalizer.LOCK.release()
+
+    if request.app.state.imports.sync:
+        return {"started": True, "counts": run(conn)}
+
+    def background():
+        db = open_db(ctx.db_path)
+        try:
+            run(db)
+        except Exception:
+            log.exception("page answer normalization failed")
+        finally:
+            db.close()
+
+    threading.Thread(target=background, daemon=True, name="page-answers").start()
+    return {"started": True}
 
 
 @parent.post("/parent/tasks/{task_id}/skip")

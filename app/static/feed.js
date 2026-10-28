@@ -165,7 +165,7 @@
   feed.addEventListener("change", (e) => { if (e.target.id === "note_ack") refreshMode(); });
 
   const actions = {
-    confirm: () => post("confirm", { answer: val("answer") || null }),
+    confirm: (b) => post("confirm", { answer: val("answer") || (b && b.dataset.answer) || null }),
     "confirm-no-key": () => post("confirm", {}),
     skip: () => post("skip"),
     exclude: () => post("exclude"),

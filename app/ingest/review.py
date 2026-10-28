@@ -49,12 +49,26 @@ def _task(conn, task_id: int):
 # ------------------------------------------------------------------------- ключ
 
 
+UNVERIFIED_SOURCES = {
+    "page": "page_rule",
+    "page_model": "page_model",
+}
+SOURCE_LABELS = {
+    "page_rule": "кандидат со страницы по правилу, не проверен",
+    "page_model": "кандидат со страницы через модель, не проверен",
+}
+
+
 def key_info(conn, task):
-    """(значение, источник, это кандидат из загруженного ключа). Кандидат ещё не ключ."""
+    """(значение, источник, это кандидат). Кандидат ещё не ключ. Источник "official" только у
+    загруженного ключа и у формы со страницы, которую принимал прежний разбор; непроверенные
+    кандидаты получают источник page_rule / page_model и official не называются."""
     if task["answer_key"] is not None:
         return key_value(task["answer_key"]), task["key_source"], False
     cand = candidate(conn, task)
     if cand:
+        if cand.get("unverified"):
+            return cand["value"], UNVERIFIED_SOURCES[cand["source"]], True
         return cand["value"], "official", True
     return None, None, False
 
@@ -121,7 +135,7 @@ def set_parent_key(ctx, conn, task_id: int, raw, keep_candidate: bool = False) -
     # POST /key без флага по-прежнему ставит ключ родителя.
     if keep_candidate and task["answer_key"] is None:
         cand = candidate(conn, task)
-        if cand and cand["value"] == value:
+        if cand and cand["value"] == value and not cand.get("unverified"):
             return {"revision": task["revision"], "key_version": task["key_version"]}
     return set_key(ctx, conn, task_id, value, "parent")
 
@@ -244,6 +258,11 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
             set_key(ctx, conn, task_id, value, "parent")
     elif task["answer_key"] is None:
         cand = candidate(conn, task)
+        if cand and cand.get("unverified"):
+            raise Refusal(
+                "Ответ со страницы не проверен: подтвердите его явно "
+                f"(«{cand['answer']}») или впишите свой."
+            )
         if cand:
             set_key(ctx, conn, task_id, cand["value"], "official")
     task = _task(conn, task_id)
@@ -355,6 +374,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     catalog = load_catalog(conn)
     topic = task["topic"] if task["topic"] in catalog else None
     button = None
+    unverified = source in SOURCE_LABELS
     if kind == "confirm":
         button = (
             f"Верно, ответ {display(key)} — подтвердить и дальше"
@@ -386,7 +406,9 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "page_url": f"/materials/{material}/pages/{shown}.png" if shown else None,
         "page_urls": [{"page": p, "url": f"/materials/{material}/pages/{p}.png"} for p in pages],
         "key": None if key is None else display(key),
-        "key_source": source,
+        "key_source": SOURCE_LABELS.get(source, source),
+        "key_unverified": unverified,
+        "button_answer": display(key) if unverified else None,
         "model_answer": None if model is None else display(model),
         "model_explanation": json.loads(task["model_answer"]).get("explanation")
         if task["model_answer"]
@@ -430,6 +452,8 @@ def task_detail(ctx, conn, task_id: int) -> dict:
             "answer": cand["answer"],
             "material_id": cand["material_id"],
             "source": cand["source"],
+            "reason": cand.get("reason"),
+            "unverified": bool(cand.get("unverified")),
         },
         "answer_text": task["answer_text"],
         "parent_note": task["parent_note"],
