@@ -1194,3 +1194,33 @@ def test_save_one_second_before_deadline_is_taken_and_template_autosaves(tmp_pat
     assert "Math.round" not in script and "Math.ceil" in script
     assert 'data.set("action", "save")' in script and 'fetch("/exam/act"' in script
     assert 'location.href = "/exam/results/' in script and "location.reload();\n  }" not in script
+
+
+def test_page_stays_valid_after_its_own_autosave(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        old_tab = form_of(c)
+        # автосохранение: свой action_id, ответ - страница с новой ревизией
+        auto = c.post(
+            "/exam/act", data={**old_tab, "action_id": "auto-1", "action": "save", "a": "Б"},
+            headers={**CHILD, "Origin": "http://testserver"}, follow_redirects=True,
+        )  # fmt: skip
+        fresh = re.search(r'name="rev" value="(\d+)"', auto.text).group(1)
+        assert int(fresh) == int(old_tab["rev"]) + 1
+        # та же страница с новой ревизией в форме: сдача проходит
+        r = act(c, "submit", {**old_tab, "rev": fresh}, a="Б")
+        assert r.status_code == 303 and "/exam/results/" in r.headers["location"]
+    c2, _clock2, _ = boot(tmp_path / "b")
+    with c2:
+        four(tmp_path / "b")
+        save_format(c2, tmp_path / "b")
+        start_real(c2)
+        tab = form_of(c2)
+        act(c2, "save", {**tab, "action_id": "auto-2"}, a="Б")
+        # вкладка без автосохранения со старой ревизией по-прежнему получает 409
+        assert act(c2, "submit", tab, a="А").status_code == 409
+    page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
+    assert 'form.elements["rev"].value' in page and '"auto-"' in page

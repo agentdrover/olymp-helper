@@ -43,6 +43,7 @@
 // Только отображение. Срок решает сервер; бланк не перезагружается, пока идёт ввод.
 // Счёт от серверного срока (ceil: нуль только когда срок наступил). За ~1,5 с до срока бланк один
 // раз отправляет форму действием save тем же POST /exam/act (сервер принимает её до срока).
+// Ответ несёт новую ревизию, скрипт кладёт её в форму: «Сдать» с этой же страницы проходит.
 // После срока - переход на страницу итога, без reload с потерей ввода.
 const left = document.getElementById("exam-left"), form = document.getElementById("exam-form");
 const offset = new Date(left.dataset.now) - Date.now();
@@ -55,7 +56,12 @@ setInterval(() => {
     autosaved = true;
     const data = new FormData(form);
     data.set("action", "save");
-    fetch("/exam/act", {method: "POST", body: data, keepalive: true}).catch(() => {});
+    data.set("action_id", "auto-" + Math.random().toString(36).slice(2));
+    // Автосохранение продвигает ревизию: страница берёт новую из ответа и остаётся действующей.
+    fetch("/exam/act", {method: "POST", body: data, keepalive: true}).then(r => r.text()).then(t => {
+      const rev = new DOMParser().parseFromString(t, "text/html").querySelector('input[name="rev"]');
+      if (rev) form.elements["rev"].value = rev.value;
+    }).catch(() => {});
   }
   if (ms <= 0) location.href = "/exam/results/{{ v.id }}";
 }, 250);
