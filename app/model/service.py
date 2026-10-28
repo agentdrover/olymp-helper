@@ -91,6 +91,22 @@ class ModelService:
             return None
         return model_family(self._models()[channel])
 
+    def fits(
+        self,
+        system: str,
+        messages: list[dict],
+        schema: dict | None = None,
+        channel: str | None = None,
+    ) -> bool:
+        """Помещается ли запрос в лимит исполнителя с фактической моделью канала. Без названного
+        канала - на обоих: запрос, который не лезет на запасной, нельзя считать пригодным."""
+        models = self._models()
+        names = [channel] if channel in models else list(models)
+        return all(
+            request_size(system, messages, schema, (), n, models[n]) <= MAX_REQUEST_BYTES
+            for n in names
+        )
+
     def _models(self) -> dict:
         claude_model, cursor_model = self.conn.execute(
             "SELECT claude_model, cursor_model FROM settings WHERE id = 1"

@@ -374,3 +374,15 @@ def test_boundary_request_is_rejected_before_reserve_and_fallback(db):
     assert svc.complete(SYSTEM, ok).error is None
     assert len(claude.calls) == 1
     assert db.execute("SELECT count(*) FROM model_run").fetchone()[0] == before + 1
+
+
+def test_fits_uses_the_real_model_of_every_channel(db):
+    svc = ModelService(db, {}, clock)
+    edge = _pad_for(MAX_REQUEST_BYTES, "claude", "sonnet")
+    assert svc.fits(SYSTEM, edge, None, "claude")
+    over = _pad_for(MAX_REQUEST_BYTES + 1, "claude", "sonnet")
+    assert request_size(SYSTEM, over, None) <= MAX_REQUEST_BYTES  # мерка по умолчанию слепа
+    assert not svc.fits(SYSTEM, over, None, "claude")
+    # Без названного канала должен помещаться на обоих: у cursor имя модели иное.
+    db.execute("UPDATE settings SET cursor_model = ?", ("m" * 40,))
+    assert not svc.fits(SYSTEM, edge, None)

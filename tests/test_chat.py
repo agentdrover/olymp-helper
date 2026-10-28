@@ -409,3 +409,38 @@ def test_a_huge_task_text_never_reaches_the_model(tmp_path):
         r = post(c, tid, "attempt", answer="А")
         hint = post(c, tid, "hint", level=1)
         assert model.calls == [] and hint.status_code == 200 and not hint.json()["hints_list"]
+
+
+class Measured(Scripted):
+    """Scripted, который, как ModelService, меряет запрос по фактической модели канала."""
+
+    def __init__(self, fits, **kw):
+        super().__init__(**kw)
+        self.fits_calls = []
+        self._fits = fits
+
+    def fits(self, system, messages, schema=None, channel=None):
+        self.fits_calls.append(channel)
+        return self._fits
+
+
+def test_chat_measures_with_the_real_model_not_with_defaults(tmp_path):
+    # Мерка по умолчанию (пустое имя модели) считала бы запрос годным; модель канала - нет.
+    c, model, _v, _a = boot_chat(tmp_path, Measured(False, default=chat_reply("Ответ.")))
+    with c:
+        tid = seed(tmp_path, key="Б")
+        r = say(c, tid, "вопрос")
+        assert model.fits_calls and model.calls == []
+        assert "Слишком длинный разговор" in r.json()["notice"]
+        assert r.json()["panel"]["state"] == "idle"
+
+
+def test_request_too_large_from_the_model_is_a_long_talk_not_a_failure(tmp_path):
+    big = ModelResult.failure("claude", "sonnet", "request_too_large")
+    c, model, _v, _a = boot_chat(tmp_path, Measured(True, default=big))
+    with c:
+        tid = seed(tmp_path, key="Б")
+        r = say(c, tid, "вопрос")
+        assert len(model.calls) == 1
+        assert "Слишком длинный разговор" in r.json()["notice"]
+        assert r.json()["panel"]["state"] == "idle"
