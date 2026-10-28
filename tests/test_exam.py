@@ -1257,9 +1257,26 @@ def test_action_without_the_answer_marker_keeps_the_saved_answer(tmp_path):
         assert act(c, "mark", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
         assert current(c)[1]["items"][0]["marked"] is False
         assert act(c, "open:2", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
-        assert current(c)[1]["items"][1]["position"] == 2
+        assert (
+            current(c)[1]["current"] == 2 and form_of(c)["shown"] == "2"
+        )  # открыт именно второй вопрос
         assert act(c, "open:1", _bare(c)).status_code == 303
+        assert current(c)[1]["current"] == 1 and form_of(c)["shown"] == "1"
         assert act(c, "submit", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
+        att = (
+            db(tmp_path)
+            .execute("SELECT status, end_reason, submitted_at FROM exam_attempt")
+            .fetchone()
+        )  # сдача без метки закрыла попытку и посчитала баллы
+        assert (
+            att["status"] == "submitted" and att["end_reason"] == "manual" and att["submitted_at"]
+        )
+        scored = (
+            db(tmp_path)
+            .execute("SELECT is_correct, earned FROM exam_item WHERE position = 1")
+            .fetchone()
+        )
+        assert scored["is_correct"] is not None and scored["earned"] is not None
 
 
 def test_empty_answer_with_the_marker_still_clears_it(tmp_path):

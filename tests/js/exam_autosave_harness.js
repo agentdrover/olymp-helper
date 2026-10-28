@@ -112,6 +112,7 @@ const scenarios = {
     if (p.posts.length) fail("POST раньше окна");
     p.at(1400); await flush();
     if (p.posts.length !== 1) fail("автосохранений " + p.posts.length);
+    if (JSON.stringify(p.posts[0].data.getAll("answer_present")) !== '["1"]') fail("метка потеряна: " + JSON.stringify(p.posts[0].data.pairs));
     if (!Object.values(p.controls).every((c) => c.disabled)) fail("бланк не закрыт");
     if (p.press(p.controls.submit) || p.press(p.controls.save)) fail("кнопка отправила форму");
     if (p.forceSubmit(p.controls.submit) || p.forceSubmit(p.controls.mark) || p.forceSubmit(p.controls.save)) fail("обход кнопок отправил форму");
@@ -147,6 +148,7 @@ const scenarios = {
     if (d.data.get("n") !== "28" || d.data.get("m.1") !== "B") fail("в POST нет ответа ребёнка: " + JSON.stringify(d.data.pairs));
     if (JSON.stringify(d.data.getAll("a")) !== '["A","C"]') fail("multiple-ответ в POST: " + JSON.stringify(d.data.pairs));
     if (JSON.stringify(d.data.getAll("r")) !== '["Y"]') fail("радио в POST: " + JSON.stringify(d.data.pairs));
+    if (JSON.stringify(d.data.getAll("answer_present")) !== '["1"]') fail("метка «ответ в форме есть» в POST: " + JSON.stringify(d.data.pairs));
     if (p.form.elements.rev.value !== "5") fail("rev в форме изменился: " + p.form.elements.rev.value);
     if (alerts(p).length || !p.notes.some((n) => n.textContent === "Ответы сохранены")) fail("сообщение об успехе: " + JSON.stringify(p.notes));
     if (p.loc.href) fail("ушли со страницы до срока");
@@ -172,6 +174,7 @@ const scenarios = {
     if (p.press(p.controls.submit)) fail("клик прошёл в окне без тика");
     if (p.forceSubmit(p.controls.mark)) fail("submit прошёл в окне без тика");
     if (p.posts.length !== 1 || p.posts[0].data.get("action") !== "save") fail("POST " + p.posts.length);
+    if (JSON.stringify(p.posts[0].data.getAll("answer_present")) !== '["1"]') fail("метка потеряна: " + JSON.stringify(p.posts[0].data.pairs));
   },
   async save_click_in_window_before_the_tick_keeps_the_answer() {
     const p = build(ok());
@@ -182,6 +185,7 @@ const scenarios = {
     const d = p.posts[0].data;
     if (d.get("n") !== "28" || JSON.stringify(d.getAll("a")) !== '["A","C"]') fail("ответ потерян: " + JSON.stringify(d.pairs));
     if (d.get("action") !== "save" || !String(d.get("action_id")).startsWith("auto-")) fail("не автосохранение");
+    if (JSON.stringify(d.getAll("answer_present")) !== '["1"]') fail("метка потеряна у автосохранения: " + JSON.stringify(d.pairs));
     if (!Object.values(p.controls).every((c) => c.disabled)) fail("бланк не закрыт");
   },
   async normal_submit_then_window_tick_sends_no_autosave() {
