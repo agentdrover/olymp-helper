@@ -22,6 +22,9 @@
     var d = zoomDialog();
     if (!d) return;
     ev.preventDefault();
+    var from = ev.target.closest("[data-zoom-src]");  // плитка: в окне крупно её картинка
+    var big = d.querySelector("img");
+    if (from && big) big.src = from.getAttribute("data-zoom-src");
     if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
   }
 

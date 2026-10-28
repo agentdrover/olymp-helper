@@ -1,13 +1,17 @@
-{% if card %}
+{% if card and card.kind == "needs_figure" %}
+{% include "parent/_figure_card.html" %}
+{% elif card %}
 <article class="card" data-task-id="{{ card.task_id }}" data-kind="{{ card.kind }}"
          data-counter="{{ counter or '' }}" data-figure-page="{{ card.figure_page or '' }}">
   <p><span class="badge">{{ card.label }}</span></p>
   <div class="split">
     <div class="source">
-      {% if card.page_url %}<img id="page-img" src="{{ card.page_url }}" alt="Исходная страница">{% endif %}
+      {% if card.page_url %}<div class="page-wrap"><img id="page-img" src="{{ card.page_url }}" alt="Исходная страница">
+        {% for o in card.overlays or [] %}<span class="region-frame" data-region="{{ o.number }}" style="left:{{ o.left }}%;top:{{ o.top }}%;width:{{ o.width }}%;height:{{ o.height }}%"><span class="region-badge">{{ o.number }}</span></span>{% endfor %}
+      </div>{% endif %}
       {# Ссылки на страницы - только у карточек проверки текста: на карточке рисунка рамка
          привязана к одной странице, переключать её нельзя. #}
-      {% if card.kind != "needs_figure" and card.page_urls|length > 1 %}
+      {% if card.page_urls|length > 1 %}
       <p class="hint">Страницы:
         {% for p in card.page_urls %}<a class="page-link" href="{{ p.url }}" data-page-url="{{ p.url }}">стр. {{ p.page }}</a> {% endfor %}
       </p>
@@ -48,20 +52,6 @@
         <button class="primary" data-action="retry">Повторить запрос к модели</button>
       {% elif card.kind == "open_exclude" %}
         <button class="primary" data-action="exclude">Исключить</button>
-      {% elif card.kind == "needs_figure" %}
-        <fieldset>
-          <legend>Рисунок</legend>
-          <p class="hint">Рамка: {% if card.figure and card.figure.rect %}найдена автоматически{% else %}нарисуйте её мышью на странице слева{% endif %}.</p>
-          <p><label>Описание для ребёнка (alt)<br><input id="alt" size="50" value="{{ card.figure.alt if card.figure else '' }}"></label></p>
-          <p><label>Пояснение для модели (ребёнку не показывается)<br><textarea id="teacher_note" rows="3" cols="50">{{ card.figure.teacher_note if card.figure else '' }}</textarea></label></p>
-          {% if card.figure and card.figure.leak %}
-          <p class="err" role="alert">В рамке напечатан текст ответа или вариантов: {{ card.figure.leak|join(", ") }}.</p>
-          {% endif %}
-          <p><label><input type="checkbox" id="leak_ack"> если в рамку попал текст ответа или вариантов, так и надо</label></p>
-          <p><label><input type="checkbox" id="no_answer_ack"> в рисунке и в описании нет ответа</label></p>
-          <p><label><input type="checkbox" id="teacher_note_ack"> в пояснении названо, что обозначено</label></p>
-          <button class="primary" data-action="figure">Подтвердить рисунок</button>
-        </fieldset>
       {% endif %}
       <p>
         <button data-action="skip">Пропустить (→)</button>

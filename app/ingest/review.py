@@ -33,8 +33,9 @@ LABELS = {
 class Refusal(Exception):
     """Действие отклонено; message читает родитель."""
 
-    def __init__(self, message: str, status: int = 422):
+    def __init__(self, message: str, status: int = 422, extra: dict | None = None):
         super().__init__(message)
+        self.extra = extra or {}
         self.message = message
         self.status = status
 
@@ -57,6 +58,21 @@ def key_info(conn, task):
     if cand:
         return cand["value"], "official", True
     return None, None, False
+
+
+def uncovered_lefts(task, key) -> list[str]:
+    """Номера левых элементов match, для которых в ключе нет ответа; у других типов пусто.
+    Ключ без пары для рисунка нельзя публиковать: ребёнок получил бы задание без проверки."""
+    options = options_of(task)
+    if task["type"] != "match" or not isinstance(options, dict) or key is None:
+        return []
+    named = key if isinstance(key, dict) else {}
+    return [
+        str(x.get("label", "")) for x in options.get("left") or [] if not named.get(x.get("label"))
+    ]
+
+
+UNCOVERED_KEY = "В ключе нет ответа для рисунков: {}. Выберите ответ для каждого рисунка."
 
 
 def _labels_of(task) -> set[str]:
@@ -111,11 +127,19 @@ def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
         return {"revision": task["revision"], "key_version": task["key_version"]}
 
 
-def set_parent_key(ctx, conn, task_id: int, raw) -> dict:
+def set_parent_key(ctx, conn, task_id: int, raw, keep_candidate: bool = False) -> dict:
     task = _task(conn, task_id)
     if task["excluded"]:
         raise Refusal("Задание исключено.")
-    return set_key(ctx, conn, task_id, _parse_answer(task, raw), "parent")
+    value = _parse_answer(task, raw)
+    # keep_candidate: лента шлёт ответ карточки; если ключа ещё нет и ответ равен кандидату из файла,
+    # это не правка родителя - источник не меняется, кандидата поднимет подтверждение. Явный
+    # POST /key без флага по-прежнему ставит ключ родителя.
+    if keep_candidate and task["answer_key"] is None:
+        cand = candidate(conn, task)
+        if cand and cand["value"] == value:
+            return {"revision": task["revision"], "key_version": task["key_version"]}
+    return set_key(ctx, conn, task_id, value, "parent")
 
 
 # ------------------------------------------------------------------------ правки
@@ -227,6 +251,8 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     figure = figure_of(task)
     if figure is not None and not figure.get("confirmed"):
         raise Refusal("Сначала подтвердите рисунок.")
+    if figure is not None and not figure.get("no_answer_ack"):
+        raise Refusal("Отметьте: в рисунке и в описании нет ответа (шаг 1 карточки рисунка).")
     has_answer = answer is not None and str(answer).strip() != ""
     if has_answer:
         value = _parse_answer(task, answer)
@@ -239,6 +265,10 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     task = _task(conn, task_id)
     if task["import_status"] == "unsupported":  # новый ключ вернул рисунок на проверку
         raise Refusal(task["unsupported_reason"])
+    if figure_of(task) is not None:
+        missing = uncovered_lefts(task, key_value(task["answer_key"]))
+        if missing:
+            raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
     update_task(conn, task_id, import_status="checked")
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
@@ -295,7 +325,7 @@ def _discrepancy(task, key, model) -> bool:
     return task["discrepancy_ack"] != json.dumps(model, ensure_ascii=False)
 
 
-def build_card(ctx, conn, task) -> dict | None:
+def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     """Карточка ленты или None, если по заданию родителю нечего делать.
 
     Только чтение: ответ модели считается лишь после подтверждения условия (POST)."""
@@ -351,7 +381,7 @@ def build_card(ctx, conn, task) -> dict | None:
             if key is not None
             else "Верно — подтвердить и дальше"
         )
-    return {
+    card = {
         "task_id": task["id"],
         "kind": kind,
         "label": LABELS[kind],
@@ -385,16 +415,22 @@ def build_card(ctx, conn, task) -> dict | None:
         "figure": figure,
         "revision": task["revision"],
     }
+    if kind == "needs_figure" and figure is not None:
+        from app.ingest.figure_card import card_extras  # figure_service импортирует review
+
+        card.update(card_extras(ctx, conn, task, figure, figure_page, deep))
+    return card
 
 
 def card_for(ctx, conn, task_id: int) -> dict | None:
-    return build_card(ctx, conn, _task(conn, task_id))
+    """Карточка одного задания; в очереди PDF не открывается, здесь открывается."""
+    return build_card(ctx, conn, _task(conn, task_id), deep=True)
 
 
 def task_detail(ctx, conn, task_id: int) -> dict:
     task = _task(conn, task_id)
     cand = candidate(conn, task)
-    card = build_card(ctx, conn, task)
+    card = build_card(ctx, conn, task, deep=True)
     task = get_task(conn, task_id)
     return {
         "task_id": task["id"],

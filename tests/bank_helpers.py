@@ -29,6 +29,17 @@ OPTS4 = [{"label": c, "text": f"вариант {c.lower()}"} for c in "АБВГ"
 # ---------------------------------------------------------------- PDF builders
 
 
+def post_figure_acked(client, task_id, body):
+    """POST рисунка; leak_ack действует только со слепком текущей рамки, и сервер отдаёт его в
+    отказе о находке. Так родитель и получает слепок: видит находку, затем отмечает."""
+    url = f"/parent/tasks/{task_id}/figure"
+    first = client.post(url, headers=PARENT, json=body)
+    digest = first.json().get("leak_digest") if first.status_code == 422 else None
+    if not body.get("leak_ack") or "leak_digest" in body or not digest:
+        return first
+    return client.post(url, headers=PARENT, json={**body, "leak_digest": digest})
+
+
 def write_lines(page, lines, x=50, y=80, size=11, step=16):
     tw = pymupdf.TextWriter(page.rect)
     for i, line in enumerate(lines):

@@ -6,12 +6,11 @@ import json
 
 import pymupdf
 
-from app.ingest import figures
+from app.ingest import figures, tiles
 from app.ingest.answers import key_value
-from app.ingest.figures import crop_leaks
 from app.ingest.keys import candidate
 from app.ingest.leaks import answer_units, crop_units, norm, significant
-from app.ingest.review import Refusal
+from app.ingest.review import UNCOVERED_KEY, Refusal, key_info, uncovered_lefts
 from app.ingest.store import (
     figure_of,
     get_task,
@@ -104,6 +103,165 @@ def _rect_from(figure: dict, page, rect, rect_px, scale):
     return stored
 
 
+def figure_regions(doc, figure: dict, *, rect=None, rect_px=None, scale=None, page=None):
+    """Области рисунка с учётом ручной рамки (правит область ОДНОЙ страницы, остальные остаются).
+    Общая для подтверждения и предпросмотра: родитель видит ровно ту вырезку, что будет сохранена."""
+    page_no = figure["page"]
+    regions = figures.regions_of(figure)
+    pages = {r["page"] for r in regions} | {page_no}
+    if rect_px is not None and page is None:
+        raise Refusal("Для нарисованной рамки нужна страница, на которой она нарисована.")
+    if rect is not None or rect_px is not None:
+        target = page if page is not None else page_no
+        if target not in pages:
+            raise Refusal(
+                f"Рамка нарисована на странице {target}, а рисунок задания на "
+                f"страницах {', '.join(map(str, sorted(pages)))}.",
+                409,
+            )
+        frame = _rect_from(figure, doc[target - 1], rect, rect_px, scale)
+        return sorted(
+            [r for r in regions if r["page"] != target] + [{"page": target, "rect": frame}],
+            key=lambda r: r["page"],
+        )
+    if not regions:
+        frame = _rect_from(figure, doc[page_no - 1], None, None, None)
+        regions = [{"page": page_no, "rect": frame}]
+    return regions
+
+
+def edited_page(figure: dict, *, rect=None, rect_px=None, page=None, scale=None) -> int | None:
+    """Страница, чью рамку правят в этом запросе; None - рамку не трогали."""
+    if rect is None and rect_px is None:
+        return None
+    return page if page is not None else figure["page"]
+
+
+def tile_plan(doc, task, figure: dict, regions, edited: int | None, state=None):
+    """(план плиток, номера левых элементов): предпросмотр и подтверждение берут границы,
+    состав и порядок плиток отсюда и только отсюда."""
+    plan = tiles.plan_tiles(doc, figure, regions, edited_page=edited, state=state)
+    lefts = tiles.left_labels(options_of(task), task["type"])
+    if state is None:
+        tiles.bind_defaults(plan, lefts)
+    return plan, lefts
+
+
+def leak_digest(regions, plan) -> str:
+    """Слепок рамки и состава плиток: отметка leak_ack действует только для него. Метки и порядок
+    в слепок не входят - на утечку они не влияют."""
+    import hashlib
+
+    def box(rect):
+        return [round(float(v), 1) for v in rect]
+
+    parts = {
+        "regions": [[r["page"], box(r["rect"])] for r in regions],
+        "tiles": sorted([t["id"], t["page"], box(t["rect"])] for t in plan["tiles"]),
+    }
+    return hashlib.sha1(json.dumps(parts).encode()).hexdigest()[:16]
+
+
+def column_digest(regions, plan) -> str:
+    """Слепок всей колонки плиток: рамка (страница и границы), состав плиток, их номера и порядок
+    показа. Карточка берёт его из ответа figure-tiles и присылает с публикацией: сервер считает
+    слепок заново из присланных рамки и плиток, и любое расхождение - отказ, ничего не сохраняется.
+    Так публикация со старой колонкой невозможна при любом порядке событий в браузере."""
+    import hashlib
+
+    def box(rect):
+        return [round(float(v), 1) for v in rect]
+
+    by_id = {t["id"]: t for t in plan["tiles"]}
+    parts = {
+        "regions": [[r["page"], box(r["rect"])] for r in regions],
+        "tiles": [
+            [i, by_id[i]["page"], box(by_id[i]["rect"]), by_id[i].get("label") or ""]
+            for i in plan["order"]
+            if i in by_id
+        ],
+    }
+    return hashlib.sha1(json.dumps(parts).encode()).hexdigest()[:16]
+
+
+STALE_COLUMN = "Карточка изменилась — проверьте плитки и опубликуйте снова."
+
+
+def _tile_state(raw) -> list[dict] | None:
+    """Плитки из запроса: [{id, label}] в порядке показа; None - карточка их не присылала."""
+    if raw is None:
+        return None
+    state = [
+        {"id": str(t["id"]), "label": (str(t["label"]) if t.get("label") else None)} for t in raw
+    ]
+    if len({t["id"] for t in state}) != len(state):
+        raise Refusal("Одна плитка указана дважды.")
+    return state
+
+
+def _tile_record(tile: dict, old_file) -> dict:
+    return {
+        "id": tile["id"],
+        "page": tile["page"],
+        "rect": tile["rect"],
+        "file": old_file,
+        "label": tile.get("label"),
+    }
+
+
+def preview_tile_png(
+    ctx,
+    conn,
+    task_id: int,
+    tile_id: str,
+    *,
+    rect=None,
+    rect_px=None,
+    scale=None,
+    page=None,
+    state=None,
+) -> bytes:
+    """PNG одной плитки по текущей рамке: тот же план, что и при подтверждении."""
+    task = get_task(conn, task_id)
+    figure = figure_of(task) if task is not None else None
+    if figure is None or task["excluded"]:
+        raise Refusal("У этого задания нет рисунка.", 404)
+    material = conn.execute(
+        "SELECT file FROM material WHERE id = ?", (task["material_id"],)
+    ).fetchone()
+    source = ctx.material_path(material["file"]) if material else None
+    if source is None or not source.exists():
+        raise Refusal("Файл материала удалён: плитку уже не показать.", 409)
+    with contextlib.closing(pymupdf.open(str(source))) as doc:
+        regions = figure_regions(doc, figure, rect=rect, rect_px=rect_px, scale=scale, page=page)
+        edited = edited_page(figure, rect=rect, rect_px=rect_px, page=page)
+        plan, _lefts = tile_plan(doc, task, figure, regions, edited, _tile_state(state))
+        found = next((t for t in plan["tiles"] if t["id"] == tile_id), None)
+        if found is None:
+            raise Refusal("Такой плитки нет.", 404)
+        return tiles.render_tile_png(doc, found)
+
+
+def preview_png(
+    ctx, conn, task_id: int, *, rect=None, rect_px=None, scale=None, page=None
+) -> bytes:
+    """Вырезка по текущей рамке для родителя: только чтение, ничего не сохраняется и не
+    публикуется. У неподтверждённого рисунка PNG ещё нет, поэтому он рендерится из PDF."""
+    task = get_task(conn, task_id)
+    figure = figure_of(task) if task is not None else None
+    if figure is None or task["excluded"]:
+        raise Refusal("У этого задания нет рисунка.", 404)
+    material = conn.execute(
+        "SELECT file FROM material WHERE id = ?", (task["material_id"],)
+    ).fetchone()
+    source = ctx.material_path(material["file"]) if material else None
+    if source is None or not source.exists():
+        raise Refusal("Файл материала удалён: вырезку уже не показать.", 409)
+    with contextlib.closing(pymupdf.open(str(source))) as doc:
+        regions = figure_regions(doc, figure, rect=rect, rect_px=rect_px, scale=scale, page=page)
+        return figures.render_regions_png(doc, regions)
+
+
 def confirm_figure(
     ctx,
     conn,
@@ -118,6 +276,9 @@ def confirm_figure(
     no_answer_ack=False,
     teacher_note_ack=False,
     leak_ack=False,
+    leak_digest_ack=None,
+    column_digest_ack=None,
+    tile_state=None,
 ) -> dict:
     task = get_task(conn, task_id)
     if task is None:
@@ -133,52 +294,75 @@ def confirm_figure(
         raise Refusal("Файл материала удалён: рамку рисунка уже не поправить.", 409)
     doc = pymupdf.open(str(source))
     try:
-        page_no = figure["page"]
-        regions = figures.regions_of(figure)
-        pages = {r["page"] for r in regions} | {page_no}
-        if rect_px is not None and page is None:
-            raise Refusal("Для нарисованной рамки нужна страница, на которой она нарисована.")
-        manual = rect is not None or rect_px is not None
-        if manual:  # ручная рамка правит область ОДНОЙ страницы, остальные остаются
-            target = page if page is not None else page_no
-            if target not in pages:
-                raise Refusal(
-                    f"Рамка нарисована на странице {target}, а рисунок задания на "
-                    f"страницах {', '.join(map(str, sorted(pages)))}.",
-                    409,
-                )
-            frame = _rect_from(figure, doc[target - 1], rect, rect_px, scale)
-            regions = sorted(
-                [r for r in regions if r["page"] != target] + [{"page": target, "rect": frame}],
-                key=lambda r: r["page"],
-            )
-        elif not regions:
-            frame = _rect_from(figure, doc[page_no - 1], None, None, None)
-            regions = [{"page": page_no, "rect": frame}]
+        regions = figure_regions(doc, figure, rect=rect, rect_px=rect_px, scale=scale, page=page)
         problem = figures.alt_problem(alt or "", options_of(task), _correct_labels(conn, task))
         if problem:
             raise Refusal(problem)
         if not no_answer_ack:
             raise Refusal(NO_ANSWER_REFUSAL)
-        found = crop_leaks(doc, regions, leak_units(conn, task))
+        missing = uncovered_lefts(task, key_info(conn, task)[0])
+        if missing:
+            raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
+        before_files = tiles.figure_files(figure)
+        before_tiles = {t["id"]: t.get("file") for t in tiles.stored_tiles(figure) or []}
+        state = _tile_state(tile_state)
+        edited = edited_page(figure, rect=rect, rect_px=rect_px, page=page)
+        plan, lefts = tile_plan(doc, task, figure, regions, edited, state)
+        shown_ids = {t["id"] for t in plan["tiles"]}
+        digest_now = leak_digest(regions, plan)
+        column_now = column_digest(regions, plan)
+        needs_digest = state is not None and bool(plan["tiles"])  # карточка показывала плитки
+        if (column_digest_ack or needs_digest) and column_digest_ack != column_now:
+            raise Refusal(STALE_COLUMN, 409)  # колонка в карточке не та, что на сервере
+        if leak_ack and leak_digest_ack != digest_now:
+            leak_ack = False  # слепка нет или он для другой рамки или других плиток
+        if state is None:  # клиент плиток не показывал: сохраняется только то, что видел родитель
+            plan, shown_ids = {"tiles": [], "order": []}, set()
+        elif {t["id"] for t in state} != shown_ids:
+            raise Refusal(
+                "Набор плиток изменился после предпросмотра: обновите карточку и проверьте "
+                "плитки ещё раз.",
+                409,
+            )
+        bad_binding = tiles.check_labels(plan, lefts)
+        if bad_binding:
+            raise Refusal(bad_binding)
+        shown = tiles.ordered(plan)
+        units = leak_units(conn, task)
+        lines = figures.region_lines(doc, regions)
+        found = figures.leaks_in_lines(lines, units)
+        checks = tiles.check_tiles(doc, shown, units)
+        for check in checks.values():  # каждая плитка отдельно: найденное в плитке тоже утечка
+            found += [x for x in check["leak"] if x not in found]
         if found and not leak_ack:
             raise Refusal(
                 "В вырезке напечатан текст ответа или вариантов: «" + "», «".join(found) + "». "
-                "Сдвиньте рамку или подтвердите явно, что так и надо."
+                "Сдвиньте рамку или подтвердите явно, что так и надо.",
+                extra={"leak_digest": digest_now},
             )
         figure.update(
             rect=regions[0]["rect"],
             regions=regions,
             leak=found,
             leak_ack=bool(found and leak_ack),
+            raster_only=not lines,
+            items_v2=True,
             alt=alt.strip(),
             no_answer_ack=True,
             teacher_note_ack=bool(teacher_note_ack),
             suggested=figure.get("suggested", False) and rect is None and rect_px is None,
+            tiles_v=tiles.TILES_VERSION,
+            tiles=[_tile_record(t, before_tiles.get(t["id"])) for t in plan["tiles"]],
+            tile_order=plan["order"],
         )
         if teacher_note is not None:
             figure["teacher_note"] = teacher_note
-        if not figures.regions_readable(doc, regions):
+        readable = (
+            all(c["readable"] for c in checks.values())
+            if shown
+            else figures.regions_readable(doc, regions)
+        )
+        if not readable:
             figure["confirmed"] = False
             revision = new_revision(
                 conn,
@@ -187,18 +371,35 @@ def confirm_figure(
                 import_status="unsupported",
                 unsupported_reason=UNREADABLE,
             )
+            keep = set(tiles.figure_files(figure))
+            for stale in before_files:  # плитки, которых в новой записи нет, больше не нужны
+                if stale not in keep:
+                    ctx.material_path(stale).unlink(missing_ok=True)
             return {"status": "unsupported", "reason": UNREADABLE, "revision": revision}
         revision = task["revision"] + 1
         relative = f"figures/{task_id}-r{revision}.png"
         target = ctx.material_path(relative)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(figures.render_regions_png(doc, regions))
-        old = figure.get("file")
         figure.update(confirmed=True, file=relative)
+        for tile in figure["tiles"]:
+            tile["file"] = tiles.tile_file_name(task_id, revision, tile["id"])
+            tile_target = ctx.material_path(tile["file"])
+            tile_target.parent.mkdir(parents=True, exist_ok=True)
+            tile_target.write_bytes(
+                tiles.render_tile_png(doc, next(t for t in plan["tiles"] if t["id"] == tile["id"]))
+            )
         new_revision(conn, task_id, figure=figure, import_status="draft", unsupported_reason=None)
-        if old and old != relative:
-            ctx.material_path(old).unlink(missing_ok=True)
-        return {"status": "draft", "revision": revision}
+        keep = set(tiles.figure_files(figure))
+        for stale in before_files:
+            if stale not in keep:
+                ctx.material_path(stale).unlink(missing_ok=True)
+        return {
+            "status": "draft",
+            "revision": revision,
+            "raster_only": not lines,
+            "tiles_raster_only": [i for i, c in checks.items() if c["raster_only"]],
+        }
     finally:
         doc.close()
 
@@ -355,6 +556,9 @@ def recheck_figure(
             found = list(figure.get("leak") or [])  # вырезку не перечитать: прежнее найденное
         elif regions:
             found = shared.leaks(task, regions)
+            for tile in tiles.stored_tiles(figure) or []:  # плитки проверяются каждая отдельно
+                part = shared.leaks(task, [{"page": tile["page"], "rect": tile["rect"]}])
+                found += [x for x in part if x not in found]
         alt_bad = figures.alt_problem(
             figure.get("alt", ""), options_of(task), shared.labels[task_id]
         )
