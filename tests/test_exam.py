@@ -2,6 +2,7 @@
 
 import json
 import re
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -922,7 +923,9 @@ def test_blank_is_plain_forms_with_revision_and_origin_check(tmp_path):
         save_format(c, tmp_path)
         a = start_real(c).json()["attempt_id"]
         page = c.get("/exam/run", headers=CHILD).text
-        assert "fetch(" not in page and "hx-" not in page and 'method="post"' in page
+        assert (
+            page.count("fetch(") == 1 and "hx-" not in page
+        )  # одно: автосохранение перед сроком and 'method="post"' in page
         views = lambda: db(tmp_path).execute("SELECT COUNT(*) FROM exam_view").fetchone()[0]
         # успех - 303 на страницу; повтор того же действия не применяется второй раз
         form = form_of(c)
@@ -1168,3 +1171,26 @@ def test_submit_and_navigation_use_the_field_as_it_is_at_send_time(tmp_path):
         stale = act(c, "open:2", {**form_of(c), "rev": str(int(rev) - 1)}, n="7")
         assert stale.status_code == 409 and "не сохранён" in stale.text
         assert views() == before
+
+
+def test_save_one_second_before_deadline_is_taken_and_template_autosaves(tmp_path):
+    c, clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        form = form_of(c)
+        clock.advance(599)
+        assert act(c, "save", form, a="Б").status_code == 303
+        assert current(c)[1]["items"][0]["answer"] == "Б"
+        late_form = {**form_of(c), "action_id": "late"}
+        clock.advance(1)
+        late = act(c, "save", late_form, a="А")
+        assert "/exam/results/" in late.headers["location"]
+        row = db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 1").fetchone()
+        assert row[0] == '"Б"'
+    page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
+    script = page[page.index("<script>") :]
+    assert "Math.round" not in script and "Math.ceil" in script
+    assert 'data.set("action", "save")' in script and 'fetch("/exam/act"' in script
+    assert 'location.href = "/exam/results/' in script and "location.reload();\n  }" not in script

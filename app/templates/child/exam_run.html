@@ -40,14 +40,25 @@
      <button class="btn primary" type="submit" name="action" value="submit" id="exam-submit">Сдать вариант</button></p>
 </form>
 <script>
-// Только отображение: время на странице и блокировка кнопок до перехода. Срок решает сервер.
+// Только отображение. Срок решает сервер; бланк не перезагружается, пока идёт ввод.
+// Счёт от серверного срока (ceil: нуль только когда срок наступил). За ~1,5 с до срока бланк один
+// раз отправляет форму действием save тем же POST /exam/act (сервер принимает её до срока).
+// После срока - переход на страницу итога, без reload с потерей ввода.
 const left = document.getElementById("exam-left"), form = document.getElementById("exam-form");
 const offset = new Date(left.dataset.now) - Date.now();
+let autosaved = false;
 setInterval(() => {
-  const s = Math.max(0, Math.round((new Date(left.dataset.deadline) - (Date.now() + offset)) / 1000));
+  const ms = new Date(left.dataset.deadline) - (Date.now() + offset);
+  const s = Math.max(0, Math.ceil(ms / 1000));
   left.textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  if (s === 0) location.reload();
-}, 1000);
+  if (ms <= 1500 && ms > 0 && !autosaved) {
+    autosaved = true;
+    const data = new FormData(form);
+    data.set("action", "save");
+    fetch("/exam/act", {method: "POST", body: data, keepalive: true}).catch(() => {});
+  }
+  if (ms <= 0) location.href = "/exam/results/{{ v.id }}";
+}, 250);
 form.addEventListener("click", e => {
   if (e.target.id === "exam-submit" && !confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) e.preventDefault();
 });
