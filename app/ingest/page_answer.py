@@ -7,7 +7,7 @@
     value       нормализованный ответ (str | list | dict);
     source      "key_file" | "page" | "page_model";
     reason      "legacy_form" | "extended_form" | "model_normalized" | None (key_file);
-    revision    ревизия задания, для которой кандидат получен;
+    revision    ревизия задания на момент чтения (кандидат привязан к содержимому, не к ревизии);
     unverified  True - кандидат нельзя считать official и нельзя выдавать за ключ без явного
                 подтверждения родителя.
 `unverified` = False только у key_file и у формы со страницы, которую принимал прежний
@@ -191,8 +191,11 @@ def _fit_match(raw: str, options) -> tuple[object, str | None]:
     return build_value("match", options, pairs=pairs)
 
 
+# Баллы в конце - отдельное слово: целое число, «балл/балла/баллов», затем конец строки. Перед
+# числом начало строки или разделитель; «2 баллаВ», «15 баллов» как «1» + «5 баллов» не считаются.
 _POINTS = re.compile(  # «… 10 баллов», «… (2 балла)»
-    r"(?<=\S)[\s;,]*(?:\(\s*\d+(?:[.,]\d+)?\s*балл\w*\s*\)|\d+(?:[.,]\d+)?\s+балл\w*)\s*$",
+    r"(?:^|[\s;,]+)\d+(?:[.,]\d+)?\s*балл(?:а|ов)?\s*$|"
+    r"(?<=\S)[\s;,]*\(\s*\d+(?:[.,]\d+)?\s*балл(?:а|ов)?\s*\)\s*$",
     re.IGNORECASE,
 )
 _TRAILING_PARENS = re.compile(r"(?<=\S)((?:\s*\([^()]*\))+)\s*$")
@@ -277,21 +280,27 @@ def fit_page(raw, task_type: str, options) -> Fit:
     return Fit(value, None, extended=_fit_legacy(raw, task_type, options) != value)
 
 
-def raw_hash(raw) -> str:
-    return hashlib.sha256(str(raw or "").encode()).hexdigest()
+def content_hash(task) -> str:
+    """Что определяет результат нормализации: текст ответа, тип и варианты. Ревизия сюда не
+    входит: пересчёт рисунка поднимает её сам и не должен стирать оплаченный итог."""
+    options = json.loads(task["options"]) if task["options"] else None
+    payload = [str(task["answer_text"] or ""), task["type"], options]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
 
 
 def stored_candidate(conn, task):
-    """Значение, которое модель-нормализатор записала для ЭТОЙ ревизии и ЭТОГО текста ответа;
-    иначе None. Значение проверяется заново: в базе оно не доверенное."""
+    """Значение, которое модель-нормализатор записала для ЭТОГО содержимого (текст ответа, тип,
+    варианты) и ЭТОЙ версии правил; иначе None. Значение проверяется заново: в базе оно не доверенное."""
     row = conn.execute(
-        "SELECT revision, raw_hash, value, rules_version FROM page_answer WHERE task_item_id = ?",
+        "SELECT content_hash, value, rules_version FROM page_answer WHERE task_item_id = ?",
         (task["id"],),
     ).fetchone()
-    if row is None or row[2] is None:
+    if row is None or row[1] is None:
         return None
-    if (row[0], row[1], row[3]) != (task["revision"], raw_hash(task["answer_text"]), RULES_VERSION):
+    if (row[0], row[2]) != (content_hash(task), RULES_VERSION):
         return None  # устаревший итог - как будто его нет (needs_model запросит заново)
-    value = json.loads(row[2])
+    value = json.loads(row[1])
     options = json.loads(task["options"]) if task["options"] else None
     return None if check_answer(value, task["type"], options) else value

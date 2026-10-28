@@ -17,8 +17,8 @@ from app.ingest.page_answer import (
     RULES_VERSION,
     UNPARSED,
     build_value,
+    content_hash,
     fit_page,
-    raw_hash,
 )
 from app.ingest.prompt import neutralize
 from app.ingest.store import atomic, get_task, now
@@ -101,11 +101,10 @@ def needs_model(conn, task) -> bool:
     if _uploaded_candidate(conn, task) is not None:
         return False
     row = conn.execute(
-        "SELECT revision, raw_hash, rules_version FROM page_answer WHERE task_item_id = ?",
+        "SELECT content_hash, rules_version FROM page_answer WHERE task_item_id = ?",
         (task["id"],),
     ).fetchone()
-    same = (task["revision"], raw_hash(task["answer_text"]), RULES_VERSION)
-    return row is None or tuple(row) != same
+    return row is None or tuple(row) != (content_hash(task), RULES_VERSION)
 
 
 def normalize_task(ctx, conn, task) -> str:
@@ -127,13 +126,13 @@ def normalize_task(ctx, conn, task) -> str:
         ):
             return "error"  # задание изменилось или исключено за время запроса
         conn.execute(
-            "INSERT OR REPLACE INTO page_answer (task_item_id, revision, raw_hash, source, value, "
+            "INSERT OR REPLACE INTO page_answer (task_item_id, revision, content_hash, source, value, "
             "reason, rules_version, channel, model, created_at) "
             "VALUES (?, ?, ?, 'page_model', ?, ?, ?, ?, ?, ?)",
             (
                 task["id"],
                 task["revision"],
-                raw_hash(task["answer_text"]),
+                content_hash(task),
                 None if value is None else json.dumps(value, ensure_ascii=False),
                 "model_normalized" if reason is None else reason,
                 RULES_VERSION,
@@ -151,23 +150,26 @@ def normalize_pending(ctx, conn) -> dict:
     """Пакет: все задания, которым нужна модель. Дневной лимит кончился - остановка."""
     counts = {"stored": 0, "unparsable": 0, "rejected": 0, "error": 0, "skipped": 0}
     changed: set[int] = set()
-    for (task_id,) in conn.execute("SELECT id FROM task_item ORDER BY id").fetchall():
-        task = get_task(conn, task_id)  # состояние на момент вызова, не снимок начала пакета
-        if task is None or not needs_model(conn, task):
-            counts["skipped"] += 1
-            continue
-        outcome = normalize_task(ctx, conn, task)
-        if outcome == "limit":
-            counts["limit"] = 1
-            break
-        counts[outcome] += 1
-        if outcome == "stored":
-            changed.add(task["material_id"])
-    # Новый кандидат входит в защиту от утечки в вырезках: подтверждённые рисунки материала
-    # проверяются заново. Один раз на материал, после записей (транзакции закрыты).
-    changed.discard(None)
-    if changed:
-        recheck_materials_figures(ctx, conn, changed)
+    try:
+        for (task_id,) in conn.execute("SELECT id FROM task_item ORDER BY id").fetchall():
+            task = get_task(conn, task_id)  # состояние на момент вызова, не снимок начала пакета
+            if task is None or not needs_model(conn, task):
+                counts["skipped"] += 1
+                continue
+            outcome = normalize_task(ctx, conn, task)
+            if outcome == "limit":
+                counts["limit"] = 1
+                break
+            counts[outcome] += 1
+            if outcome == "stored":
+                changed.add(task["material_id"])
+    finally:
+        # Новый кандидат входит в защиту от утечки в вырезках: подтверждённые рисунки материала
+        # проверяются заново - один раз на материал, после записей, даже если пакет упал:
+        # следующий пакет увидит записанное как готовое и проверку не повторит.
+        changed.discard(None)
+        if changed:
+            recheck_materials_figures(ctx, conn, changed)
     return counts
 
 

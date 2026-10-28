@@ -92,7 +92,9 @@ def _parse_answer(task, raw) -> object:
     return value
 
 
-def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
+def set_key(
+    ctx, conn, task_id: int, value, source: str, candidate_source: str | None = None
+) -> dict:
     """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято.
     Подтверждённый рисунок проходит защиту от текста ответа заново: решение было для другого ключа;
     то же для рисунков других заданий материала: новый ключ не должен быть напечатан в их вырезках."""
@@ -111,6 +113,7 @@ def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
             "answer_key": key_json(value, task["type"]),
             "key_source": source,
             "key_version": task["key_version"] + 1,
+            "key_candidate_source": candidate_source,
         }
         if task["import_status"] == "checked":
             new_revision(conn, task_id, **cols)
@@ -137,7 +140,15 @@ def set_parent_key(ctx, conn, task_id: int, raw, keep_candidate: bool = False) -
         cand = candidate(conn, task)
         if cand and cand["value"] == value and not cand.get("unverified"):
             return {"revision": task["revision"], "key_version": task["key_version"]}
-    return set_key(ctx, conn, task_id, value, "parent")
+    return set_key(ctx, conn, task_id, value, "parent", _candidate_source(conn, task, value))
+
+
+def _candidate_source(conn, task, value) -> str | None:
+    """Источник кандидата, с которым совпал ответ родителя (ключа ещё нет); иначе None."""
+    if task["answer_key"] is not None:
+        return None
+    cand = candidate(conn, task)
+    return cand["source"] if cand and cand["value"] == value else None
 
 
 # ------------------------------------------------------------------------ правки
@@ -255,7 +266,7 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     if has_answer:
         value = _parse_answer(task, answer)
         if value != key_value(task["answer_key"]):
-            set_key(ctx, conn, task_id, value, "parent")
+            set_key(ctx, conn, task_id, value, "parent", _candidate_source(conn, task, value))
     elif task["answer_key"] is None:
         cand = candidate(conn, task)
         if cand and cand.get("unverified"):
@@ -417,6 +428,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "key": None if key is None else display(key),
         "key_source": SOURCE_LABELS.get(source, source),
         "key_unverified": unverified,
+        "key_candidate_source": task["key_candidate_source"],
         "button_answer": display(key) if unverified else None,
         "model_answer": None if model is None else display(model),
         "model_explanation": json.loads(task["model_answer"]).get("explanation")
@@ -455,6 +467,7 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         "options": options_of(task),
         "key": None if not task["answer_key"] else display(key_value(task["answer_key"])),
         "key_source": task["key_source"],
+        "key_candidate_source": task["key_candidate_source"],
         "key_candidate": None
         if cand is None
         else {

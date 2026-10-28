@@ -92,6 +92,8 @@ def test_digit_run_needs_single_digit_labels_and_known_labels():
 def test_strict_validator_is_shared():
     assert check_answer({"1": "А", "2": "Б"}, "match", MATCH) is None
     assert check_answer({"1": "А"}, "match", MATCH) == "partial_match"
+    assert check_answer({"1": "Я", "2": "Б"}, "match", MATCH) == "foreign_label"  # правая сторона
+    assert build_value("match", MATCH, pairs=[("1", "Я"), ("2", "Б")]) == (None, "foreign_label")
     assert check_answer(["А", "А"], "multiple", LETTERS) == "conflict"
     assert check_answer("Я", "single", LETTERS) == "foreign_label"
     assert build_value("match", MATCH, pairs=[("1", "А"), ("1", "Б"), ("2", "Б")]) == (
@@ -323,6 +325,7 @@ def test_an_unverified_candidate_does_not_take_a_task_out_of_the_feed(tmp_path):
         model.answer = lambda _c: {"proposed_answer": "А", "explanation": "e", "uncertainty": "low"}
         r = client.post(f"/parent/tasks/{tid}/retry-model", headers=PARENT, json={})
         assert r.status_code == 200, r.text
+        assert detail(client, tid)["model_answer"] == "А"  # ответ модели действительно записан
 
 
 def test_the_discrepancy_card_can_be_resolved_on_an_unverified_candidate(tmp_path):
@@ -516,3 +519,222 @@ def _tasks(tmp_path):
         return conn.execute("SELECT id, source_number FROM task_item").fetchall()
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------- круг 3 (Opus)
+
+
+@pytest.mark.parametrize("raw", ["Б 2 баллаВ", "15 баллов", "12 баллов", "Б 2 баллов1", "А2 балла"])
+def test_points_are_stripped_only_as_a_separate_trailing_token(raw):
+    kind, options = ("multiple", DIGITS) if raw.startswith("12") else ("single", LETTERS)
+    assert fit(raw, kind, options).value is None, raw
+    assert fit("Б 2 балла", "single", LETTERS).value == "Б"
+    assert fit("Б, 2,5 балла", "single", LETTERS).value == "Б"
+    assert fit("1, 3 (2 балла)", "multiple", DIGITS).value == ["1", "3"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "options"),
+    [
+        (
+            "АГ БД ВЕ",
+            {
+                "left": [{"label": c, "text": "x"} for c in "АБВ"],
+                "right": [{"label": c, "text": "y"} for c in "ГДЕ"],
+            },
+        ),
+        (
+            "14 25 36",
+            {
+                "left": [{"label": c, "text": "x"} for c in "123"],
+                "right": [{"label": c, "text": "y"} for c in "456"],
+            },
+        ),
+    ],
+)
+def test_a_pair_without_separator_needs_sides_of_different_kind(raw, options):
+    got = fit(raw, "match", options)
+    assert got.value is None, raw
+
+
+def test_a_stored_value_is_validated_again_on_read(tmp_path):
+    client, _, tid = start(tmp_path, "первый вариант", payload={"status": "ok", "labels": ["Б"]})
+    with client:
+        normalize(client)
+        conn = db(tmp_path)
+        conn.execute("UPDATE page_answer SET value = ?", (json.dumps("Я"),))  # чужое обозначение
+        conn.close()
+        assert detail(client, tid)["key_candidate"] is None
+
+
+def test_the_cache_is_keyed_to_the_content_not_to_the_revision(tmp_path):
+    client, model, tid = start(
+        tmp_path, "первый вариант", payload={"status": "ok", "labels": ["Б"]}
+    )
+    with client:
+        normalize(client)
+        r = client.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"text": "Новое условие"})
+        assert r.status_code == 200 and r.json()["revision"] == 2
+        assert detail(client, tid)["key_candidate"]["answer"] == "Б"  # правка условия не стирает
+        assert normalize(client)["stored"] == 0 and len(model.norm_calls) == 1
+        # Изменился текст ответа: итог относится к другому содержимому.
+        set_row(tmp_path, tid, answer_text="второй вариант")
+        assert detail(client, tid)["key_candidate"] is None
+
+
+@pytest.mark.parametrize(
+    "cols",
+    [
+        {"excluded": 1},
+        {"revision": 2},
+        {"answer_key": json.dumps({"type": "single", "value": "А"}), "key_source": "parent"},
+        {"answer_text": "другой текст ответа"},
+    ],
+    ids=["excluded", "revision", "answer_key", "answer_text"],
+)
+def test_a_result_is_not_written_when_the_task_changed_during_the_call(tmp_path, cols):
+    client, model, tid = start(tmp_path, "первый вариант")
+    model.payload = lambda _c: set_row(tmp_path, tid, **cols) or {"status": "ok", "labels": ["А"]}
+    with client:
+        normalize(client)
+        assert len(model.norm_calls) == 1 and stored(tmp_path, tid) is None
+
+
+def test_a_second_command_is_refused_while_the_first_runs(tmp_path):
+    import time
+
+    from app.ingest import page_normalizer
+
+    release, entered = threading.Event(), threading.Event()
+
+    def slow(_content):
+        entered.set()
+        release.wait(10)
+        return {"status": "ok", "labels": ["А"]}
+
+    client, model, tid = start(tmp_path, "первый вариант", payload=slow)
+    with client:
+        client.app.state.imports.sync = False
+        first = client.post("/parent/page-answers/normalize", headers=PARENT, json={})
+        assert first.json()["started"] is True and entered.wait(5)
+        second = client.post("/parent/page-answers/normalize", headers=PARENT, json={})
+        assert second.json()["started"] is False
+        release.set()
+        for _ in range(100):
+            if not page_normalizer.LOCK.locked():
+                break
+            time.sleep(0.05)
+        assert len(model.norm_calls) == 1 and stored(tmp_path, tid) is not None
+
+
+def _published_figure_layout(tmp_path, *, crash_task=None, candidate_task=None):
+    """Раздел из test_layout: у 1.2 опубликован рисунок, в рамке которого напечатано «28»."""
+    from tests.test_layout import good_tasks, import_layout
+
+    tasks = good_tasks()
+    tasks[2]["answer_text"] = "двадцать восемь"  # «28» напечатано в ячейке страницы 2
+    if crash_task is not None:
+        tasks[3]["answer_text"] = "что-то совсем непонятное"
+    if candidate_task is not None:
+        tasks[2]["answer_text"] = None
+        tasks[1]["answer_text"] = "второй вариант"
+    client = import_layout(tmp_path, tasks)
+    by = {}
+    for t in _tasks(tmp_path):  # номера повторяются в разделах: берём первый раздел
+        by.setdefault(t["source_number"], t["id"])
+    two = by["1.2"]
+    cell = [150, 510, 400, 536]
+    if candidate_task is None:
+        assert (
+            client.post(
+                f"/parent/tasks/{two}/key", headers=PARENT, json={"answer": "Б"}
+            ).status_code
+            == 200
+        )
+        r = client.post(
+            f"/parent/tasks/{two}/figure",
+            headers=PARENT,
+            json={
+                "alt": "Фотографии животных в таблице",
+                "teacher_note": "1 2 3 4 5",
+                "no_answer_ack": True,
+                "teacher_note_ack": True,
+                "rect": cell,
+                "page": 2,
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert (
+            client.post(f"/parent/tasks/{two}/confirm", headers=PARENT, json={}).status_code == 200
+        )
+        assert two in _child_ids(client)
+    return client, by, cell
+
+
+def _child_ids(client):
+    return {t["id"] for t in client.get("/api/tasks", headers=CHILD).json()["tasks"]}
+
+
+def test_figures_are_rechecked_even_when_the_batch_crashes(tmp_path):
+    client, by, _ = _published_figure_layout(tmp_path, crash_task=True)
+    with client:
+
+        def reply_by_content(content):
+            if "двадцать" in content:
+                return {"status": "ok", "number": "28"}
+            raise RuntimeError("db is locked")  # пакет падает на следующем задании
+
+        model = NormalizerModel(reply_by_content)
+        model.split = client.model.split
+        client.app.state.model = model
+        with pytest.raises(RuntimeError):
+            client.post("/parent/page-answers/normalize", headers=PARENT, json={})
+        assert detail(client, by["1.3"])["key_candidate"]["answer"] == "28"  # запись осталась
+        assert by["1.2"] not in _child_ids(client)  # а публикация снята в finally
+
+
+def test_publishing_with_the_preselected_candidate_records_where_it_came_from(tmp_path):
+    client, by, cell = _published_figure_layout(tmp_path, candidate_task=True)
+    with client:
+        model = NormalizerModel(
+            lambda content: (
+                {"status": "ok", "labels": ["Б"]}
+                if "второй" in content
+                else {"status": "unparsable"}
+            )
+        )
+        model.split = client.model.split
+        client.app.state.model = model
+        normalize(client)
+        two = by["1.2"]
+        assert detail(client, two)["key_candidate"]["unverified"] is True
+        # Цепочка ленты: ключ (кандидат выбран заранее) -> рисунок -> публикация.
+        r = client.post(
+            f"/parent/tasks/{two}/key", headers=PARENT, json={"answer": "Б", "keep_candidate": True}
+        )
+        assert r.status_code == 200, r.text
+        conn = db(tmp_path)
+        row = conn.execute(
+            "SELECT key_source, key_candidate_source, answer_key FROM task_item WHERE id = ?",
+            (two,),
+        ).fetchone()
+        conn.close()
+        assert row["answer_key"] is not None
+        assert (row["key_source"], row["key_candidate_source"]) == ("parent", "page_model")
+        r = client.post(
+            f"/parent/tasks/{two}/figure",
+            headers=PARENT,
+            json={
+                "alt": "Фотографии животных в таблице",
+                "teacher_note": "1 2 3 4 5",
+                "no_answer_ack": True,
+                "teacher_note_ack": True,
+                "rect": cell,
+                "page": 2,
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert (
+            client.post(f"/parent/tasks/{two}/confirm", headers=PARENT, json={}).status_code == 200
+        )
+        assert two in _child_ids(client)
