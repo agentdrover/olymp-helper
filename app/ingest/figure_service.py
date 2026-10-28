@@ -162,6 +162,31 @@ def leak_digest(regions, plan) -> str:
     return hashlib.sha1(json.dumps(parts).encode()).hexdigest()[:16]
 
 
+def column_digest(regions, plan) -> str:
+    """Слепок всей колонки плиток: рамка (страница и границы), состав плиток, их номера и порядок
+    показа. Карточка берёт его из ответа figure-tiles и присылает с публикацией: сервер считает
+    слепок заново из присланных рамки и плиток, и любое расхождение - отказ, ничего не сохраняется.
+    Так публикация со старой колонкой невозможна при любом порядке событий в браузере."""
+    import hashlib
+
+    def box(rect):
+        return [round(float(v), 1) for v in rect]
+
+    by_id = {t["id"]: t for t in plan["tiles"]}
+    parts = {
+        "regions": [[r["page"], box(r["rect"])] for r in regions],
+        "tiles": [
+            [i, by_id[i]["page"], box(by_id[i]["rect"]), by_id[i].get("label") or ""]
+            for i in plan["order"]
+            if i in by_id
+        ],
+    }
+    return hashlib.sha1(json.dumps(parts).encode()).hexdigest()[:16]
+
+
+STALE_COLUMN = "Карточка изменилась — проверьте плитки и опубликуйте снова."
+
+
 def _tile_state(raw) -> list[dict] | None:
     """Плитки из запроса: [{id, label}] в порядке показа; None - карточка их не присылала."""
     if raw is None:
@@ -252,6 +277,7 @@ def confirm_figure(
     teacher_note_ack=False,
     leak_ack=False,
     leak_digest_ack=None,
+    column_digest_ack=None,
     tile_state=None,
 ) -> dict:
     task = get_task(conn, task_id)
@@ -284,6 +310,10 @@ def confirm_figure(
         plan, lefts = tile_plan(doc, task, figure, regions, edited, state)
         shown_ids = {t["id"] for t in plan["tiles"]}
         digest_now = leak_digest(regions, plan)
+        column_now = column_digest(regions, plan)
+        needs_digest = state is not None and bool(plan["tiles"])  # карточка показывала плитки
+        if (column_digest_ack or needs_digest) and column_digest_ack != column_now:
+            raise Refusal(STALE_COLUMN, 409)  # колонка в карточке не та, что на сервере
         if leak_ack and leak_digest_ack != digest_now:
             leak_ack = False  # слепка нет или он для другой рамки или других плиток
         if state is None:  # клиент плиток не показывал: сохраняется только то, что видел родитель

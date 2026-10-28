@@ -150,6 +150,7 @@ def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> di
     """Что показывает «Как увидит ребёнок»: плитки (или общая вырезка) по текущей рамке и ввод
     ответа. Один источник и для карточки, и для обновления после правки рамки."""
     from app.ingest.figure_service import (
+        column_digest,
         edited_page,
         figure_regions,
         leak_digest,
@@ -183,6 +184,7 @@ def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> di
         "raster_warning": None,
         "overlays": [],
         "digest": "",
+        "column_digest": "",
         "lefts_csv": "",
     }
     area["lefts_csv"] = ",".join(area["lefts"])
@@ -199,6 +201,7 @@ def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> di
         edited = edited_page(figure, **frame)
         plan, lefts = tile_plan(doc, task, figure, regions, edited, state)
         area["digest"] = leak_digest(regions, plan)
+        area["column_digest"] = column_digest(regions, plan)
         shown = tiles.ordered(plan)
         checks = tiles.check_tiles(doc, shown, leak_units(conn, task))
         query = frame_query(frame)

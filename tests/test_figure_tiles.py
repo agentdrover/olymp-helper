@@ -201,10 +201,29 @@ def test_frame_edit_recomputes_only_its_page_and_keeps_labels():
 # ------------------------------------------------------------------ карточка v2 целиком
 
 
+class Browser(TestClient):
+    """Клиент, который ведёт себя как карточка: к публикации рисунка прикладывает слепок колонки,
+    взятый из ответа figure-tiles для тех же рамки и плиток. Явный column_digest (в том числе
+    None) в теле не трогается - так тесты проверяют и чужой слепок, и его отсутствие."""
+
+    def post(self, url, *args, **kwargs):
+        body = kwargs.get("json")
+        shown = isinstance(body, dict) and body.get("tiles") is not None
+        if url.endswith("/figure") and shown and "column_digest" not in body:
+            params = {"page": body.get("page"), "scale": body.get("scale")}
+            if body.get("rect_px"):
+                params["rect_px"] = ",".join(map(str, body["rect_px"]))
+            params["state"] = ",".join(f"{t['id']}:{t['label'] or ''}" for t in body["tiles"])
+            got = self.get(url[: -len("figure")] + "figure-tiles", params=params, headers=PARENT)
+            found = re.search(r'data-column-digest="(\w*)"', got.text)
+            kwargs["json"] = {**body, "column_digest": found.group(1) if found else None}
+        return super().post(url, *args, **kwargs)
+
+
 def boot(tmp_path, pdf, task=None, **extra):
     task = task or make_task(11, TEXT, type="match", figure=True, options=MATCH6)
     model = StubModel(split=reply(task))
-    c = TestClient(build_app(tmp_path, model))
+    c = Browser(build_app(tmp_path, model))
     c.__enter__()
     assert upload(c, pdf, **extra).status_code == 202
     return c, task_ids(tmp_path)[0]
@@ -833,6 +852,36 @@ def test_leak_ack_is_bound_to_the_frame_and_tiles_it_was_given_for(tmp_path):
         assert stored_figure(tmp_path, tid)["leak_ack"] is True
 
 
+def test_publication_needs_the_digest_of_the_column_it_sends(tmp_path):
+    """Гарантия на сервере: рамка, плитки, номера и порядок в запросе должны давать тот же слепок,
+    что и колонка, с которой родитель работал. Иначе 409 и ничего не записано."""
+    c, tid = boot(tmp_path, grid_pdf())
+    with c:
+        card = card_of(c, tid)
+        set_key(c, tid)
+        url = f"/parent/tasks/{tid}/figure"
+        shown = c.get(f"/parent/tasks/{tid}/figure-tiles", params=tiles_params(), headers=PARENT)
+        good = re.search(r'data-column-digest="(\w+)"', shown.text).group(1)
+        body = figure_body(card)
+        before = (row(tmp_path, tid)["figure"], row(tmp_path, tid)["revision"])
+
+        def refused(**over):
+            r = c.post(url, headers=PARENT, json={**body, "column_digest": good, **over})
+            assert r.status_code == 409, r.text
+            assert "Карточка изменилась" in r.json()["error"]
+            assert (row(tmp_path, tid)["figure"], row(tmp_path, tid)["revision"]) == before
+
+        refused(rect_px=[90, 160, 700, 790])  # другая рамка
+        refused(tiles=list(reversed(body["tiles"])))  # другой порядок
+        refused(tiles=[{**body["tiles"][0], "label": "6"}, *body["tiles"][1:]])  # другой номер
+        absent = c.post(url, headers=PARENT, json={**body, "column_digest": None})
+        assert absent.status_code == 409 and "Карточка изменилась" in absent.json()["error"]
+        assert (row(tmp_path, tid)["figure"], row(tmp_path, tid)["revision"]) == before
+        ok = c.post(url, headers=PARENT, json={**body, "column_digest": good})
+        assert ok.status_code == 200, ok.text
+        assert len(stored_figure(tmp_path, tid)["tiles"]) == 6
+
+
 def test_leak_ack_without_a_digest_is_ignored(tmp_path):
     c, tid = boot(tmp_path, pdf_with_option_word(tmp_path))
     with c:
@@ -894,6 +943,9 @@ def test_child_tiles_open_in_the_large_view(tmp_path):
         "reorder_during_pending_text_resends",
         "publish_blocked_until_tiles_fresh",
         "tiles_error_blocks_until_next_change",
+        "frame_is_frozen_during_publication",
+        "stale_column_409_stops_and_refreshes",
+        "answer_chosen_during_request_is_kept",
     ],
 )
 def test_feed_tile_scenarios(scenario):

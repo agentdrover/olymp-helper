@@ -1,5 +1,5 @@
 {# Картинки и ввод ответа в «Как увидит ребёнок». Тот же фрагмент отдаёт figure-tiles после правки рамки. #}
-<span hidden data-leak-digest="{{ a.digest }}"></span>
+<span hidden data-leak-digest="{{ a.digest }}" data-column-digest="{{ a.column_digest }}"></span>
 {% if a.tiles %}
   {% with tiles=a.tiles, editor=True, alt=a.alt %}{% include "child/_tiles.html" %}{% endwith %}
   {% if a.warning %}<p class="err tile-count-warning" role="alert">{{ a.warning }}</p>{% endif %}

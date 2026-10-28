@@ -495,6 +495,9 @@ class FigureBody(BaseModel):
     teacher_note_ack: bool = False
     leak_ack: bool = False  # явное решение: текст ответа в вырезке оставлен намеренно
     leak_digest: str | None = None  # слепок рамки и плиток отметки; без него leak_ack не действует
+    column_digest: str | None = (
+        None  # слепок колонки плиток из ответа figure-tiles; 409, если не тот
+    )
     tiles: list[TileBody] | None = None  # плитки в порядке показа и их привязка к номерам
 
 
@@ -649,6 +652,7 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
         teacher_note_ack=body.teacher_note_ack,
         leak_ack=body.leak_ack,
         leak_digest_ack=body.leak_digest,
+        column_digest_ack=body.column_digest,
         tile_state=None if body.tiles is None else [t.model_dump() for t in body.tiles],
     )
 

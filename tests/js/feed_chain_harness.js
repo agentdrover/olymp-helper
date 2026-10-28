@@ -9,7 +9,7 @@ const SRC = fs.readFileSync(path.join(__dirname, "..", "..", "app", "static", "f
 const fail = (m) => { console.error("FAIL: " + m); process.exit(1); };
 
 function build(extra, opts) {
-  opts = Object.assign({ leak: "none", tiles: [], keySelects: [], lefts: "", area: null, fetch: null }, opts || {});
+  opts = Object.assign({ leak: "none", tiles: [], keySelects: [], lefts: "", area: null, fetch: null, digest: null, controls: [] }, opts || {});
   const calls = [];
   const docHandlers = {};
   const gates = {};
@@ -29,6 +29,7 @@ function build(extra, opts) {
     querySelector(sel) {
       if (sel === ".card") return cardEl;
       if (sel === ".key-fields") return box;
+      if (sel === "[data-column-digest]" && opts.digest) return { dataset: { columnDigest: opts.digest() } };
       if (sel === 'button[data-action="figure"]') return figureBtn;
       if (sel === "[data-figure-img]" && extra) return extra.img;
       return null;
@@ -37,6 +38,7 @@ function build(extra, opts) {
       if (sel === "button") return [figureBtn, skipBtn];
       if (sel === "[data-tile-id]") return opts.tiles;
       if (sel === "[data-key-left]") return opts.keySelects;
+      if (sel === "select, input, textarea") return opts.controls;
       return [];
     },
     addEventListener(t, fn) { (handlers[t] = handlers[t] || []).push(fn); },
@@ -49,7 +51,7 @@ function build(extra, opts) {
   };
   const replies = {};
   const bodies = [];
-  const fetch = opts.fetch ? (url) => { calls.push(url); return opts.fetch(url); } : (url, opts) => {
+  const fetch = opts.fetch ? (url, o) => { calls.push(url); return opts.fetch(url, o); } : (url, opts) => {
     calls.push(url);
     const hit = Object.keys(replies).find((g) => url.endsWith(g));
     const body = hit ? replies[hit] : { status: "draft", next: null };
@@ -275,7 +277,8 @@ scenarios.reorder_keeps_the_frame_update = async function () {
 };
 
 // Колонка плиток с рамкой и двумя плитками; ответы figure-tiles отдаются вручную.
-function tilesEnv(respond) {
+function tilesEnv(respond, extra) {
+  extra = extra || {};
   const list = [];
   const mkTile = (id, label) => {
     const li = {
@@ -290,7 +293,19 @@ function tilesEnv(respond) {
   const a = mkTile("ta", "1"), b = mkTile("tb", "2");
   const area = { innerHTML: "" };
   const requests = [];
-  const fetch = (url) => {
+  const posts = [];
+  const hold = {};
+  const fetch = (url, o) => {
+    if (!url.includes("figure-tiles")) {  // шаги публикации: тело запоминается, ответ - черновик
+      const path = url.replace(/^.*\/1\//, "");
+      posts.push({ path, body: JSON.parse(o.body) });
+      if (extra.conflict === path) {
+        return Promise.resolve({ ok: false, redirected: false, status: 409, json: async () => ({ error: "Карточка изменилась — проверьте плитки и опубликуйте снова." }), text: async () => "" });
+      }
+      const gate = Object.keys(hold).find((g) => url.endsWith(g));
+      const reply = () => ({ ok: true, redirected: false, status: 200, json: async () => ({ status: "draft", next: null }), text: async () => "" });
+      return gate ? hold[gate].then(reply) : Promise.resolve(reply());
+    }
     const q = decodeURIComponent(url);
     const req = { url: q, rect: /rect_px=([^&]*)/.test(q) ? q.match(/rect_px=([^&]*)/)[1] : null, state: (q.match(/state=([^&]*)/) || [])[1] };
     requests.push(req);
@@ -304,7 +319,8 @@ function tilesEnv(respond) {
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 1200 }),
     addEventListener(t, fn) { listeners[t] = fn; },
   };
-  const p = build({ page, img }, { tiles: list, area, fetch });
+  const digest = () => area.innerHTML || "D0";
+  const p = build({ page, img }, { tiles: list, area, fetch, digest, controls: extra.controls || [] });
   const drag = (x1, y1, x2, y2) => {
     listeners.mousedown({ preventDefault() {}, clientX: x1, clientY: y1 });
     listeners.mouseup({ clientX: x2, clientY: y2 });
@@ -313,7 +329,8 @@ function tilesEnv(respond) {
   const move = () => p.handlers.click[0]({ target: { closest: (s) => (s === "[data-tile-move]" ? mover : null) } });
   const clickFigure = () => p.handlers.click[0]({ target: { closest: (s) => (s.startsWith("button") ? p.figureBtn : null) } });
   const postsCount = () => p.calls.filter((u) => u.includes("/parent/tasks/") && !u.includes("figure-tiles")).length;
-  return { p, area, requests, drag, move, clickFigure, postsCount, li: a };
+  const sent = (path) => posts.filter((x) => x.path === path);
+  return { p, area, requests, drag, move, clickFigure, postsCount, li: a, posts, sent, hold, digest };
 }
 const okReply = (html) => ({ ok: true, status: 200, text: async () => html, json: async () => ({}) });
 
@@ -346,11 +363,82 @@ scenarios.publish_blocked_until_tiles_fresh = async function () {
   await tick();
   e.clickFigure();   // кнопка отключена, но Enter/программный вызов не должен обходить состояние
   await tick(); await tick();
-  if (e.postsCount() !== 0) fail("публикация ушла при несвежей колонке: " + JSON.stringify(e.p.calls));
+  if (e.posts.length !== 0) fail("публикация ушла при несвежей колонке: " + JSON.stringify(e.p.calls));
   holds[0](); await tick(); await tick();
   e.clickFigure();
-  await tick(); await tick(); await tick();
-  if (e.postsCount() === 0) fail("публикация не ушла при свежей колонке");
+  await tick(); await tick(); await tick(); await tick();
+  if (e.sent("key").length !== 1 || e.sent("figure").length !== 1 || e.sent("confirm").length !== 1) {
+    fail("публикация не дошла до конца: " + JSON.stringify(e.posts.map((x) => x.path)));
+  }
+  const body = e.sent("figure")[0].body;
+  if (JSON.stringify(body.tiles.map((t) => t.id)) !== JSON.stringify(["ta", "tb"])) fail("id плиток: " + JSON.stringify(body.tiles));
+  if (body.column_digest !== "fresh") fail("слепок не от свежей колонки: " + body.column_digest);
+};
+
+// Codex P2: публикация началась, /key задержан, родитель рисует новую рамку. Карточка заморожена:
+// рамка не меняется, запрос плиток не уходит, /figure несёт слепок колонки, что была в DOM.
+scenarios.frame_is_frozen_during_publication = async function () {
+  const control = { disabled: false };
+  const e = tilesEnv((req) => Promise.resolve(okReply("col:" + req.rect)), { controls: [control] });
+  e.drag(100, 100, 400, 500);
+  await tick(); await tick();
+  const first = e.requests.length, digestBefore = e.digest();
+  let release;
+  e.hold["key"] = new Promise((r) => { release = r; });
+  e.clickFigure();
+  await tick();
+  if (!control.disabled) fail("поле карточки не отключено на время публикации");
+  e.drag(50, 50, 600, 700);          // новая рамка во время /key
+  e.move();                          // и перестановка
+  await tick(); await tick();
+  if (e.requests.length !== first) fail("во время публикации ушёл запрос плиток: " + JSON.stringify(e.requests.slice(first)));
+  if (e.digest() !== digestBefore) fail("колонка сменилась во время публикации");
+  release();
+  await tick(); await tick(); await tick(); await tick();
+  const body = e.sent("figure")[0] && e.sent("figure")[0].body;
+  if (!body) fail("/figure не ушёл: " + JSON.stringify(e.posts.map((x) => x.path)));
+  if (body.column_digest !== digestBefore) fail("слепок в теле не равен слепку колонки в DOM: " + body.column_digest + " / " + digestBefore);
+  const want = [100 / 1, 100, 400, 500].join(",");
+  if (body.rect_px.join(",") !== want) fail("рамка в теле изменилась: " + body.rect_px);
+  if (JSON.stringify(body.tiles.map((t) => t.id)) !== JSON.stringify(["ta", "tb"])) fail("порядок в теле изменился: " + JSON.stringify(body.tiles));
+  if (e.sent("confirm").length !== 1) fail("/confirm не ушёл");
+  if (control.disabled) fail("заморозка не снята после публикации");
+};
+
+// 409 от сервера: текст в #error, карточка не перелистана, заморозка снята, колонка запрошена заново.
+scenarios.stale_column_409_stops_and_refreshes = async function () {
+  const control = { disabled: false };
+  const e = tilesEnv(() => Promise.resolve(okReply("col")), { controls: [control], conflict: "figure" });
+  const before = e.requests.length;
+  e.clickFigure();
+  await tick(); await tick(); await tick(); await tick();
+  if (!/Карточка изменилась/.test(e.p.fields.error.textContent)) fail("текст 409 не показан: " + e.p.fields.error.textContent);
+  if (e.sent("confirm").length !== 0) fail("после 409 ушёл /confirm");
+  if (e.p.calls.some((u) => u.includes("/parent/review/"))) fail("карточка перелистана после 409");
+  if (control.disabled) fail("заморозка не снята после 409");
+  if (e.requests.length !== before + 1) fail("колонка не запрошена заново после 409: " + e.requests.length);
+};
+
+// Codex P2: выбор ответа, сделанный за время запроса плиток, не откатывается к прежнему.
+scenarios.answer_chosen_during_request_is_kept = async function () {
+  const sel = { dataset: { keyLeft: "1" }, value: "Б" };
+  const li = { dataset: { tileId: "ta", label: "" }, querySelector: () => null };
+  let release;
+  const fetch = () => new Promise((resolve) => {
+    release = () => resolve({ ok: true, status: 200, text: async () => "html", json: async () => ({}) });
+  });
+  const area = {
+    get innerHTML() { return this.v || ""; },
+    set innerHTML(h) { this.v = h; sel.value = "Б"; },  // сервер рисует поле с прежним ключом
+  };
+  const p = build(null, { tiles: [li], keySelects: [sel], area, fetch });
+  p.handlers.change[0]({ target: { id: "", value: "1", matches: (s) => s === "[data-tile-bind]", closest: () => li } });
+  await tick();
+  sel.value = "А";   // пока идёт запрос, родитель выбрал другой ответ
+  release();
+  await tick(); await tick();
+  if (area.innerHTML !== "html") fail("ответ не применён");
+  if (sel.value !== "А") fail("выбор «А» откатился к «" + sel.value + "»");
 };
 
 scenarios.tiles_error_blocks_until_next_change = async function () {
