@@ -3,7 +3,7 @@
 import json
 
 from app.ingest.answers import display, key_json, key_value, normalize_answer
-from app.ingest.keys import candidate
+from app.ingest.keys import candidate, page_refusal
 from app.ingest.model_answer import compute_model_answer, model_value
 from app.ingest.publish import leak_notice, publication
 from app.ingest.schema import InvalidStructure, check_options
@@ -453,6 +453,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "key": None if key is None else display(key),
         "key_source": SOURCE_LABELS.get(source, source),
         "key_unverified": unverified,
+        "key_refusal": page_refusal(conn, task),
         "key_candidate_source": task["key_candidate_source"],
         "key_candidate_source_label": CANDIDATE_SOURCE_LABELS.get(task["key_candidate_source"]),
         "button_answer": display(key) if unverified else None,
@@ -494,6 +495,7 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         "key": None if not task["answer_key"] else display(key_value(task["answer_key"])),
         "key_source": task["key_source"],
         "key_candidate_source": task["key_candidate_source"],
+        "key_refusal": page_refusal(conn, task),
         "key_candidate": None
         if cand is None
         else {

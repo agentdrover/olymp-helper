@@ -5,7 +5,7 @@ import re
 import sqlite3
 
 from app.ingest.answers import display, normalize_answer
-from app.ingest.page_answer import fit_page, stored_candidate
+from app.ingest.page_answer import fit_page, refusal_text, stored_candidate
 
 _LINE = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})?)\s*[.)\-–—:]\s*(.+?)\s*$")
 _LEADING_ZEROS = re.compile(r"^0+(?=\d)")
@@ -61,6 +61,17 @@ def model_candidate(conn: sqlite3.Connection, task) -> dict | None:
         "revision": task["revision"],
         "unverified": True,
     }
+
+
+def page_refusal(conn: sqlite3.Connection, task) -> str | None:
+    """Почему ответ, напечатанный на странице, не стал кандидатом: фраза для родителя.
+    None, если ключ или кандидат есть либо разбирать нечего (ответа на странице нет, открытое)."""
+    if task["answer_key"] is not None or task["type"] == "open":
+        return None
+    if not str(task["answer_text"] or "").strip() or candidate(conn, task) is not None:
+        return None
+    options = json.loads(task["options"]) if task["options"] else None
+    return refusal_text(fit_page(task["answer_text"], task["type"], options).reason)
 
 
 def candidate(conn: sqlite3.Connection, task) -> dict | None:

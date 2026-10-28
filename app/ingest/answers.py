@@ -130,17 +130,6 @@ def _expand_ranges(raw: str, order: list[str]) -> str | None:
     return None if failed or _DASHES.search(out) else out  # a range left unread is ambiguous
 
 
-def fit_page_answer(raw, task_type: str, options):
-    """Ответ со страницы задания, приведённый к заданию: обозначения вариантов или число.
-
-    Строгий разбор (`page_answer.fit_page`): ответ разобран целиком, обозначения только из
-    вариантов нужной стороны, противоречия отказываются. None, если ответ не складывается в
-    обозначения этого задания: тогда это не кандидат, ключ вписывает родитель."""
-    from app.ingest.page_answer import fit_page  # page_answer импортирует этот модуль
-
-    return fit_page(raw, task_type, options).value
-
-
 def _fit_legacy(raw, task_type: str, options):
     """Прежний разбор. Нужен только чтобы отличить формы, которые принимались раньше (их
     кандидат остаётся как был), от новых (они unverified). Значение для ключа он не даёт."""
