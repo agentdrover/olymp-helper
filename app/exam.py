@@ -458,14 +458,15 @@ ACTIONS = ("save", "open", "mark", "submit")
 
 def act(
     conn, now, *, attempt_id: int, rev: int, action_id: str, shown: int, action: str,
-    target: int | None = None, raw=None,
+    target: int | None = None, raw=None, keep_answer: bool = False,
 ) -> str:  # fmt: skip
     """Одно действие бланка (обычная форма): в одной транзакции под замком записи сверяются
     прохождение, срок, показанная позиция и ревизия; сохраняется ответ показанного задания,
     применяется действие, ревизия растёт. Повтор принятого действия (тот же action_id) ничего не
     меняет. Результат: "ok", "submitted" (сдано) или "time" (срок вышел). Устаревшая
     страница (другая ревизия или позиция) - ExamError 409 "stale": ни ответ, ни интервал
-    просмотра не меняются."""
+    просмотра не меняются. keep_answer: в форме не было полей ответа (они выключены или форма
+    собрана вручную) - сохранённый ответ не трогается, остальное действие выполняется."""
     if action not in ACTIONS:
         raise ExamError(422, "bad_action", "Неизвестное действие.")
     with atomic(conn):
@@ -477,7 +478,10 @@ def act(
             "SELECT outcome, digest FROM exam_action WHERE attempt_id = ? AND action_id = ?",
             (attempt_id, action_id),
         ).fetchone()
-        digest = json.dumps([action, target, shown, raw], ensure_ascii=False, sort_keys=True)
+        digest = json.dumps(
+            [action, target, shown, "<keep>" if keep_answer else raw],
+            ensure_ascii=False, sort_keys=True,
+        )  # fmt: skip
         reused = done is not None and done["digest"] != digest  # тот же id, другое действие
         if reused:
             raise ExamError(409, "stale", STALE_MESSAGE)
@@ -496,15 +500,22 @@ def act(
         if rev != attempt["rev"] or shown != _current_position(conn, attempt_id):
             raise ExamError(409, "stale", STALE_MESSAGE)
         item = _item(conn, attempt_id, shown)
-        value = _answer_value(item, raw)
+        value = None if keep_answer else _answer_value(item, raw)
         if action == "open":
             _item(conn, attempt_id, target if target is not None else 0)
-        conn.execute(
-            "UPDATE exam_item SET answer = ?, marked = CASE WHEN ? = 'mark' THEN 1 - marked "
-            "ELSE marked END WHERE attempt_id = ? AND position = ?",
-            (None if value is None else json.dumps(value, ensure_ascii=False), action,
-             attempt_id, shown),
-        )  # fmt: skip
+        if keep_answer:
+            conn.execute(
+                "UPDATE exam_item SET marked = CASE WHEN ? = 'mark' THEN 1 - marked ELSE marked END "
+                "WHERE attempt_id = ? AND position = ?",
+                (action, attempt_id, shown),
+            )
+        else:
+            conn.execute(
+                "UPDATE exam_item SET answer = ?, marked = CASE WHEN ? = 'mark' THEN 1 - marked "
+                "ELSE marked END WHERE attempt_id = ? AND position = ?",
+                (None if value is None else json.dumps(value, ensure_ascii=False), action,
+                 attempt_id, shown),
+            )  # fmt: skip
         outcome = "ok"
         if action == "open":
             _open_view(conn, attempt_id, target, t)

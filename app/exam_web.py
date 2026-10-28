@@ -197,11 +197,14 @@ async def exam_act(request: Request, conn: Db):
         (attempt_id, shown),
     ).fetchone()
     raw, entered, lost = _entered(kind[0] if kind else "single", form)
+    # Метка «поля ответа были в форме»: без неё (поля выключены, форма собрана вручную) пустое
+    # значение - не «стереть ответ», а «ответ не присылали».
+    keep = str(form.get("answer_present", "")) != str(shown)
     try:
         outcome = exam.act(
             conn, lambda: now_of(request), attempt_id=attempt_id, rev=rev,
             action_id=str(form.get("action_id", "")), shown=shown, action=action, target=goal,
-            raw=raw,
+            raw=raw, keep_answer=keep,
         )  # fmt: skip
     except ExamError as exc:
         if exc.code == "stale":

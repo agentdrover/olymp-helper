@@ -28,6 +28,8 @@ function build(reply, opts = {}) {
     cbC: mk({ tag: "input", type: "checkbox", name: "a", value: "C", checked: true }),
     rdX: mk({ tag: "input", type: "radio", name: "r", value: "X", checked: false }),
     rdY: mk({ tag: "input", type: "radio", name: "r", value: "Y", checked: true }),
+    // метка «ответ в форме есть»: скрытое поле, которое тоже выключается при закрытии бланка
+    marker: mk({ tag: "input", type: "hidden", name: "answer_present", value: "1" }),
   };
   const fields = [hidden("attempt_id", "7"), hidden("rev", "5"), hidden("shown", "1"), hidden("action_id", "orig")];
   const all = [...fields, ...Object.values(controls)];
@@ -42,15 +44,16 @@ function build(reply, opts = {}) {
     get(k) { const x = this.pairs.find((p) => p[0] === k); return x ? x[1] : null; }
     getAll(k) { return this.pairs.filter((p) => p[0] === k).map((p) => p[1]); }
   }
-  const SELECTOR = "button, input:not([type=hidden]), select";
   const handlers = {};
   const notes = [];
   const form = {
     all, elements: {},
     addEventListener(t, fn) { (handlers[t] = handlers[t] || []).push(fn); },
     querySelectorAll(sel) {
-      if (sel !== SELECTOR) throw new Error("селектор вне модели: " + sel);
-      return all.filter((f) => f.tag === "button" || f.tag === "select" || (f.tag === "input" && f.type !== "hidden"));
+      const base = "button, input:not([type=hidden]), select";
+      if (sel !== base && sel !== base + ", input[name=answer_present]") throw new Error("селектор вне модели: " + sel);
+      const withMarker = sel !== base;
+      return all.filter((f) => f.tag === "button" || f.tag === "select" || (f.tag === "input" && f.type !== "hidden") || (withMarker && f.name === "answer_present"));
     },
     before(n) { notes.push(n); },
   };
@@ -64,11 +67,13 @@ function build(reply, opts = {}) {
   const fetch = (url, opts) => { posts.push({ url, data: opts.body }); return reply(); };
   let tick = null;
   const loc = { href: "" };
-  let confirms = 0;
+  let confirms = 0, reloads = 0;
+  const timers = [], win = {};
+  loc.reload = () => { reloads++; };
   const ctx = {
     document, fetch, URL, FormData: FakeFormData, Date: FakeDate, Math, String, Promise, console,
-    setInterval: (fn) => { tick = fn; }, setTimeout: (fn) => fn(), location: loc,
-    confirm: () => { confirms++; return true; }, window: { addEventListener() {} },
+    setInterval: (fn) => { tick = fn; }, setTimeout: (fn) => { timers.push(fn); }, location: loc,
+    confirm: () => { confirms++; return true; }, window: { addEventListener(t, fn) { win[t] = fn; } },
   };
   vm.runInNewContext(SRC, ctx);
   const at = (msLeft) => { clock.t = DEADLINE - msLeft; tick(); };
@@ -85,7 +90,10 @@ function build(reply, opts = {}) {
   };
   // Обход выключенной кнопки (Enter, requestSubmit): только submit.
   const forceSubmit = (btn) => !run("submit", { submitter: btn }).defaultPrevented;
-  return { clock, controls, form, notes, posts, loc, at, press, forceSubmit, confirms: () => confirms };
+  const clickOnly = (btn) => run("click", { target: btn }).defaultPrevented;
+  const runTimers = () => { while (timers.length) timers.shift()(); };
+  const pageshow = (persisted) => win.pageshow({ persisted });
+  return { clickOnly, runTimers, pageshow, reloads: () => reloads, clock, controls, form, notes, posts, loc, at, press, forceSubmit, confirms: () => confirms };
 }
 
 const ok = (body) => () => Promise.resolve({
@@ -154,9 +162,9 @@ const scenarios = {
     if (!Object.values(p.controls).every((c) => c.disabled)) fail("бланк открыт до первого тика");
     if (p.forceSubmit(p.controls.submit) || p.forceSubmit(p.controls.save)) fail("отправка до первого тика");
     p.at(900); await flush();
-    if (p.posts.length > 1) fail("POST " + p.posts.length);
+    if (p.posts.length !== 0) fail("POST " + p.posts.length);
     p.at(500); await flush();
-    if (p.posts.length > 1) fail("POST " + p.posts.length);
+    if (p.posts.length !== 0) fail("POST " + p.posts.length);
   },
   async handlers_compare_the_deadline_not_only_the_flag() {
     const p = build(ok());
@@ -175,6 +183,47 @@ const scenarios = {
     if (d.get("n") !== "28" || JSON.stringify(d.getAll("a")) !== '["A","C"]') fail("ответ потерян: " + JSON.stringify(d.pairs));
     if (d.get("action") !== "save" || !String(d.get("action_id")).startsWith("auto-")) fail("не автосохранение");
     if (!Object.values(p.controls).every((c) => c.disabled)) fail("бланк не закрыт");
+  },
+  async normal_submit_then_window_tick_sends_no_autosave() {
+    const p = build(ok());
+    p.clock.t = DEADLINE - 1700;
+    if (!p.press(p.controls.save)) fail("обычная отправка вне окна не прошла");
+    p.runTimers();  // поля выключены после сбора формы браузером
+    if (!Object.values(p.controls).every((c) => c.disabled)) fail("после отправки бланк не выключен");
+    p.at(1400); p.at(1150); await flush();
+    if (p.posts.length !== 0) fail("пустое автосохранение после обычной отправки: " + JSON.stringify(p.posts[0] && p.posts[0].data.pairs));
+  },
+  async normal_submit_disables_the_fields_after_collecting() {
+    const p = build(ok());
+    if (!p.press(p.controls.save)) fail("обычная отправка не прошла");
+    if (p.controls.text.disabled) fail("поля выключены до сбора формы");
+    p.runTimers();
+    if (!Object.values(p.controls).every((c) => c.disabled)) fail("после отправки бланк не выключен");
+  },
+  async tick_after_the_deadline_sends_nothing() {
+    const p = build(ok());
+    p.at(5000);
+    p.at(-100); await flush();  // вкладка «спала» и проснулась после срока
+    if (p.posts.length !== 0) fail("POST после срока: " + p.posts.length);
+    if (p.loc.href !== "/exam/results/7") fail("переход " + p.loc.href);
+  },
+  async submit_handler_alone_checks_the_deadline() {
+    const p = build(ok());
+    p.clock.t = DEADLINE - 1000;  // ни тика, ни клика: только submit (Enter, requestSubmit)
+    if (p.forceSubmit(p.controls.mark)) fail("submit прошёл в окне");
+  },
+  async click_handler_alone_checks_the_deadline() {
+    const p = build(ok());
+    p.clock.t = DEADLINE - 1000;  // только click, без тика
+    if (!p.clickOnly(p.controls.submit)) fail("click прошёл в окне");
+    if (p.confirms()) fail("спросили подтверждение в окне");
+  },
+  async pageshow_from_cache_reloads() {
+    const p = build(ok());
+    p.pageshow(false);
+    if (p.reloads()) fail("перезагрузка без bfcache");
+    p.pageshow(true);
+    if (p.reloads() !== 1) fail("страница из bfcache не перезагружена");
   },
   async deadline_goes_to_results() {
     const p = build(ok());

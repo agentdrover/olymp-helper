@@ -1230,6 +1230,61 @@ def test_autosave_arriving_after_the_deadline_redirects_to_results_and_saves_not
         assert row[0] is None
 
 
+def _bare(c):
+    """Форма бланка без метки «ответ в форме есть»: поля ответа выключены или форма собрана вручную."""
+    return {k: v for k, v in form_of(c).items() if k != "answer_present"}
+
+
+def _answer(tmp_path):
+    row = db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 1").fetchone()
+    return row[0]
+
+
+def test_action_without_the_answer_marker_keeps_the_saved_answer(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        assert act(c, "save", a="Б").status_code == 303
+        assert _answer(tmp_path) == '"Б"'
+        page = c.get("/exam/run", headers=CHILD).text
+        assert 'name="answer_present" value="1"' in page
+        # без метки (поля выключены, форма собрана вручную) ответ не меняется, остальное действие идёт
+        assert act(c, "save", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
+        assert act(c, "mark", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
+        assert act(c, "open:2", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
+        assert current(c)[1]["items"][1]["position"] == 2
+        assert act(c, "open:1", _bare(c)).status_code == 303
+        assert act(c, "submit", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
+
+
+def test_empty_answer_with_the_marker_still_clears_it(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        assert act(c, "save", a="Б").status_code == 303
+        assert act(c, "save", {**_bare(c), "answer_present": "1"}).status_code == 303
+        assert _answer(tmp_path) is None
+        # метка чужой позиции не считается
+        assert act(c, "save", a="А").status_code == 303 and _answer(tmp_path) == '"А"'
+        assert act(c, "save", {**_bare(c), "answer_present": "2"}).status_code == 303
+        assert _answer(tmp_path) == '"А"'
+
+
+def test_enter_in_the_blank_saves_instead_of_opening_the_first_task(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        page = c.get("/exam/run", headers=CHILD).text
+        first = re.search(r'<button[^>]*type="submit"[^>]*>', page).group(0)
+        assert 'name="action"' in first and 'value="save"' in first
+
+
 def test_results_page_closes_an_attempt_whose_deadline_passed_without_submit(tmp_path):
     """Бланк уводит на итог по сроку без нажатия «Сдать»: страница итога сама закрывает попытку."""
     c, clock, _ = boot(tmp_path)
@@ -1255,6 +1310,12 @@ _AUTOSAVE_SCENARIOS = [
     "page_opened_inside_the_window_is_closed_at_once",
     "handlers_compare_the_deadline_not_only_the_flag",
     "save_click_in_window_before_the_tick_keeps_the_answer",
+    "normal_submit_then_window_tick_sends_no_autosave",
+    "normal_submit_disables_the_fields_after_collecting",
+    "tick_after_the_deadline_sends_nothing",
+    "submit_handler_alone_checks_the_deadline",
+    "click_handler_alone_checks_the_deadline",
+    "pageshow_from_cache_reloads",
 ]
 
 

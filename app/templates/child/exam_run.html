@@ -13,12 +13,15 @@
   <input type="hidden" name="rev" value="{{ v.rev }}">
   <input type="hidden" name="shown" value="{{ item.position }}">
   <input type="hidden" name="action_id" value="{{ action_id }}">
+  {# Первая кнопка отправки - «сохранить»: Enter в поле не должен открывать другое задание. #}
+  <button type="submit" name="action" value="save" class="visually-hidden" tabindex="-1">Сохранить ответ</button>
   <nav aria-label="Задания варианта">
   {% for x in v["items"] %}
     <button type="submit" name="action" value="open:{{ x.position }}"{% if x.position == item.position %} aria-current="true"{% endif %}>{{ x.position }}{% if x.answer is not none and x.answer != "" and x.answer != [] and x.answer != {} %} ✓{% endif %}{% if x.marked %} ⚑{% endif %}</button>
   {% endfor %}
   </nav>
   <section class="card">
+    <input type="hidden" name="answer_present" value="{{ item.position }}">
     <p>{{ item.text }}</p>
     {% if item.figure %}<img src="{{ item.figure.url }}" alt="{{ item.figure.alt }}">{% endif %}
     {% if item.type in ("single", "multiple") %}
@@ -50,7 +53,7 @@
 const left = document.getElementById("exam-left"), form = document.getElementById("exam-form");
 const offset = new Date(left.dataset.now) - Date.now();
 const remaining = () => new Date(left.dataset.deadline) - (Date.now() + offset);
-const lock = () => form.querySelectorAll("button, input:not([type=hidden]), select").forEach(x => { x.disabled = true; });
+const lock = () => form.querySelectorAll("button, input:not([type=hidden]), select, input[name=answer_present]").forEach(x => { x.disabled = true; });
 const say = (text, role) => {
   const note = document.createElement("p");
   note.className = role === "alert" ? "err" : "notice"; note.setAttribute("role", role);
@@ -60,12 +63,12 @@ const say = (text, role) => {
 // Единственный путь закрытия бланка (тик, submit, click, открытие страницы). Порядок строгий:
 // форма собирается ДО lock() (выключенные поля в неё не попадают), затем lock(), затем отправка.
 // Поля нигде больше не выключаются, кроме lock() здесь и после обычной отправки формы.
-let closed = false;
+let closed = false, sent = false;  // sent: форма уже ушла обычной отправкой, автосохранять нечего
 const closeBlank = () => {
   if (closed) return;
   closed = true;
   let data = null;
-  if (!opened && remaining() > 0) {
+  if (!opened && !sent && remaining() > 0) {
     data = new FormData(form);
     data.set("action", "save");
     data.set("action_id", "auto-" + Math.random().toString(36).slice(2));
@@ -100,6 +103,7 @@ form.addEventListener("click", e => {
 });
 form.addEventListener("submit", () => {
   // Поля блокируются после того, как браузер собрал форму (выключенная кнопка не отправляется).
+  sent = true;
   setTimeout(lock, 0);
 });
 window.addEventListener("pageshow", e => { if (e.persisted) location.reload(); });
