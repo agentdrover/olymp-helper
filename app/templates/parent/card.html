@@ -31,7 +31,7 @@
       </ul>
       {% endif %}
       {% if card.key %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }}){% if card.key_unverified %} <b>не проверен</b>{% endif %}</p>{% endif %}
-      {% if card.key_refusal %}<p class="hint">{{ card.key_refusal }} Впишите ответ сами.</p>{% endif %}
+      {% if card.key_refusal %}<p class="hint">{{ card.key_refusal }}{% if card.kind in ("no_key", "discrepancy") %} Впишите ответ сами.{% elif card.kind == "model_missing" %} Повторите запрос к модели.{% endif %}</p>{% endif %}
       {% if card.key_candidate_source_label %}<p class="hint">Ответ подтверждён родителем; предложен: {{ card.key_candidate_source_label }}.</p>{% endif %}
       {% if card.model_answer %}<p>Ответ модели (не проверен): <b>{{ card.model_answer }}</b></p>{% endif %}
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}

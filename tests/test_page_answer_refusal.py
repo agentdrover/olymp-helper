@@ -140,3 +140,16 @@ def test_a_candidate_from_the_key_file_means_no_model_call(tmp_path, monkeypatch
         monkeypatch.setattr(page_normalizer, "_uploaded_candidate", lambda c, t: {"value": "5"})
         counts = normalize(client)
         assert counts["stored"] == 0 and len(model.norm_calls) == 1  # новых вызовов нет
+
+
+def test_the_refusal_hint_matches_the_controls_of_the_card_kind(tmp_path):
+    client, _, tid = start(tmp_path, "12 лет", "numeric")
+    with client:
+        html = client.get(f"/parent/review/{tid}", headers=PARENT).text
+        assert detail(client, tid)["card"]["kind"] == "no_key"
+        assert UNIT + " Впишите ответ сами." in html and 'id="answer"' in html
+        set_row(tmp_path, tid, import_status="checked")  # ответа модели нет, рисунка нет
+        html = client.get(f"/parent/review/{tid}", headers=PARENT).text
+        assert detail(client, tid)["card"]["kind"] == "model_missing"
+        assert UNIT + " Повторите запрос к модели." in html
+        assert "Впишите" not in html and 'id="answer"' not in html
