@@ -149,7 +149,13 @@ def tile_view(task, tile: dict, number: int, check: dict, query: str) -> dict:
 def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> dict:
     """Что показывает «Как увидит ребёнок»: плитки (или общая вырезка) по текущей рамке и ввод
     ответа. Один источник и для карточки, и для обновления после правки рамки."""
-    from app.ingest.figure_service import edited_page, figure_regions, leak_units, tile_plan
+    from app.ingest.figure_service import (
+        edited_page,
+        figure_regions,
+        leak_digest,
+        leak_units,
+        tile_plan,
+    )
     from app.ingest.review import key_info
 
     frame = frame or {}
@@ -176,7 +182,10 @@ def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> di
         "raster_only": None,
         "raster_warning": None,
         "overlays": [],
+        "digest": "",
+        "lefts_csv": "",
     }
+    area["lefts_csv"] = ",".join(area["lefts"])
     material = conn.execute(
         "SELECT file FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
@@ -189,6 +198,7 @@ def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> di
         regions = figure_regions(doc, figure, **frame)
         edited = edited_page(figure, **frame)
         plan, lefts = tile_plan(doc, task, figure, regions, edited, state)
+        area["digest"] = leak_digest(regions, plan)
         shown = tiles.ordered(plan)
         checks = tiles.check_tiles(doc, shown, leak_units(conn, task))
         query = frame_query(frame)

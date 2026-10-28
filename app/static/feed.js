@@ -68,15 +68,20 @@
   function keyAnswer() {
     const box = feed.querySelector(".key-fields");
     if (!box) return { text: "", box: null, total: 0, chosen: 0 };
-    const lefts = Array.from(feed.querySelectorAll("[data-key-left]"));
+    const fields = Array.from(feed.querySelectorAll("[data-key-left]"));
+    // Ключ match обязан покрыть каждый левый элемент задания, а не только те, у которых сейчас
+    // есть поле: рисунок без номера поля не имеет, и ответ за него не дан.
+    const required = (box.dataset.lefts || "").split(",").filter(Boolean);
+    const lefts = required.length ? required : fields.map((x) => x.dataset.keyLeft);
     if (!lefts.length) {
       const text = val("key_text").trim();
       return { text, box, total: 1, chosen: text ? 1 : 0 };
     }
-    const chosen = lefts.filter((x) => x.value);
+    const answers = lefts.map((l) => [l, (fields.find((x) => x.dataset.keyLeft === l) || {}).value]);
+    const chosen = answers.filter((a) => a[1]);
     const base = { box, total: lefts.length, chosen: chosen.length };
     if (chosen.length && chosen.length < lefts.length) return { ...base, text: "!" };
-    return { ...base, text: chosen.map((x) => `${x.dataset.keyLeft}-${x.value}`).join(", ") };
+    return { ...base, text: chosen.map((a) => `${a[0]}-${a[1]}`).join(", ") };
   }
 
   // Плитки в порядке показа и их привязка к номерам: уходят в запрос подтверждения как есть.
@@ -84,6 +89,23 @@
     return Array.from(feed.querySelectorAll("[data-tile-id]")).map((li) => ({
       id: li.dataset.tileId, label: li.dataset.label || null,
     }));
+  }
+
+  // Слепок рамки и плиток, как его видит сервер: фрагмент плиток несёт его в data-leak-digest.
+  function currentDigest() {
+    const el = feed.querySelector("[data-leak-digest]");
+    return el ? el.dataset.leakDigest : "";
+  }
+  function leakDigest() {
+    const box = document.getElementById("leak_ack");
+    return box && box.dataset ? box.dataset.digest || "" : "";
+  }
+  // Отметка «текст допустим» относилась к прежней рамке или прежним плиткам: снимается.
+  function clearLeakAck() {
+    const box = document.getElementById("leak_ack");
+    if (box) { box.checked = false; if (box.dataset) box.dataset.digest = ""; }
+    const none = document.querySelector('input[name="leak"]:checked');
+    if (none) none.checked = false;
   }
 
   // Единственное состояние готовности: от него зависят и кнопка, и Enter. Сервер проверяет то же
@@ -153,6 +175,7 @@
         alt: val("alt"), teacher_note: teacherNote(),
         no_answer_ack: leak.value === "none", teacher_note_ack: checked("note_ack"),
         leak_ack: checked("leak_ack"),
+        leak_digest: leakDigest(),  // для какой рамки и каких плиток поставлена отметка
         tiles,  // пустой список - карточка плиток не показывала: сервер сверяет с этим
       },
     };
@@ -220,6 +243,7 @@
   }
 
   feed.addEventListener("input", (e) => {
+    if (e.target.id === "leak_ack") e.target.dataset.digest = e.target.checked ? currentDigest() : "";
     if (e.target.id === "alt") {
       const img = feed.querySelector("[data-figure-img]");
       if (img) img.alt = e.target.value;
@@ -229,6 +253,7 @@
   });
   feed.addEventListener("change", (e) => {
     if (e.target.id === "note_ack") refreshMode();
+    if (e.target.id === "leak_ack") e.target.dataset.digest = e.target.checked ? currentDigest() : "";
     if (e.target.matches && e.target.matches("[data-tile-bind]")) {
       const li = e.target.closest("[data-tile-id]");
       if (li) li.dataset.label = e.target.value;
@@ -257,7 +282,9 @@
     }
     const r = await fetch(`/parent/tasks/${id}/figure-tiles?${q}`);
     if (!r.ok || taskId() !== id) return;  // карточка успела смениться
+    const before = currentDigest();
     area.innerHTML = await r.text();
+    if (currentDigest() !== before) clearLeakAck();  // рамка или состав плиток другие
     feed.querySelectorAll("[data-key-left]").forEach((x) => { if (kept[x.dataset.keyLeft]) x.value = kept[x.dataset.keyLeft]; });
     const again = document.getElementById("key_text");
     if (again && keptSingle) again.value = keptSingle;
@@ -374,6 +401,7 @@
       drawFrame(img);
       const row = document.getElementById("leak-ack-row");
       if (row) row.dataset.need = "";  // прежняя находка относилась к прежней рамке
+      clearLeakAck();
       refreshPreview();
       refreshTiles();
     });

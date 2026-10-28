@@ -5,7 +5,7 @@
   {% for t in tiles %}
   <li class="fc-tile" data-tile-id="{{ t.id }}" data-label="{{ t.label or '' }}">
     <span class="fc-num" data-tile-num>{{ t.label or t.n }}</span>
-    <a href="{{ t.url }}" target="_blank" rel="noopener"><img src="{{ t.url }}" alt="{{ alt }} — рисунок {{ t.n }}" data-tile-img></a>
+    <a href="{{ t.url }}"{% if zoom %} data-zoom data-zoom-src="{{ t.url }}"{% else %} target="_blank" rel="noopener"{% endif %}><img src="{{ t.url }}" alt="{{ alt }} — рисунок {{ t.n }}" data-tile-img></a>
     {% if editor %}
     {% if t.raster_only %}<p class="tile-warning" role="alert">Рисунок {{ t.n }}: текст внутри картинки не проверяется автоматически — посмотрите на неё глазами.</p>{% endif %}
     {% if t.leak %}<p class="err" role="alert" data-tile-leak>В рисунке {{ t.n }} напечатан текст ответа или вариантов: {{ t.leak|join(", ") }}.</p>{% endif %}

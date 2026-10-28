@@ -3,9 +3,14 @@
 <section aria-label="Задание">
   {% if task.figure and task.figure.tiles %}
   <figure class="figure figure-tiles">
-    {% with tiles=task.figure.tiles, editor=False, alt=task.figure.alt %}{% include "child/_tiles.html" %}{% endwith %}
+    {% with tiles=task.figure.tiles, editor=False, alt=task.figure.alt, zoom=not preview %}{% include "child/_tiles.html" %}{% endwith %}
     <figcaption class="hint">Рисунок: {{ task.source }}{% if not preview %} · вырезан и проверен родителем{% endif %}</figcaption>
   </figure>
+  {% if not preview %}<dialog class="zoom" id="zoom" aria-label="Рисунок крупно">
+    <button type="button" data-close-zoom>Закрыть · Esc</button>
+    <img src="" alt="{{ task.figure.alt }}" data-zoom-target>
+    <p class="hint">{{ task.source }} · рисунок к заданию {{ task.number }}</p>
+  </dialog>{% endif %}
   {% elif task.figure %}
   <figure class="figure">
     <a href="{{ task.figure.url }}"{% if not preview %} data-zoom{% endif %}><img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}" data-figure-img></a>

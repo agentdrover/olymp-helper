@@ -494,6 +494,7 @@ class FigureBody(BaseModel):
     no_answer_ack: bool = False
     teacher_note_ack: bool = False
     leak_ack: bool = False  # явное решение: текст ответа в вырезке оставлен намеренно
+    leak_digest: str | None = None  # слепок рамки и плиток, для которых родитель поставил отметку
     tiles: list[TileBody] | None = None  # плитки в порядке показа и их привязка к номерам
 
 
@@ -647,6 +648,7 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
         no_answer_ack=body.no_answer_ack,
         teacher_note_ack=body.teacher_note_ack,
         leak_ack=body.leak_ack,
+        leak_digest_ack=body.leak_digest,
         tile_state=None if body.tiles is None else [t.model_dump() for t in body.tiles],
     )
 
@@ -700,7 +702,7 @@ def _frame_args(page, rect_px, scale) -> dict:
 
 def _tile_state_arg(state: str | None):
     """«id:номер,id:» -> [{id, label}] в порядке показа; пусто - карточка плитки не присылала."""
-    if state is None:
+    if not state:  # пусто - плиток на карточке ещё не было: привязка по умолчанию, как без state
         return None
     out = []
     for part in filter(None, state.split(",")):

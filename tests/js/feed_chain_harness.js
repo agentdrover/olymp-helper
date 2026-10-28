@@ -9,7 +9,7 @@ const SRC = fs.readFileSync(path.join(__dirname, "..", "..", "app", "static", "f
 const fail = (m) => { console.error("FAIL: " + m); process.exit(1); };
 
 function build(extra, opts) {
-  opts = Object.assign({ leak: "none", tiles: [], keySelects: [] }, opts || {});
+  opts = Object.assign({ leak: "none", tiles: [], keySelects: [], lefts: "" }, opts || {});
   const calls = [];
   const docHandlers = {};
   const gates = {};
@@ -23,7 +23,7 @@ function build(extra, opts) {
     alt: mk({ value: "Подпись" }), key_text: mk({ value: "Б" }), note_free: mk({ value: "" }),
     note_ack: mk({ checked: false }), leak_ack: mk({ checked: false }), error: mk({}),
   };
-  const box = { dataset: { candidate: "0", current: "" }, querySelectorAll: () => [] };
+  const box = { dataset: { candidate: "0", current: "", lefts: opts.lefts }, querySelectorAll: () => [] };
   const feed = {
     set innerHTML(h) { feed.html = h; }, get innerHTML() { return feed.html; },
     querySelector(sel) {
@@ -174,6 +174,47 @@ scenarios.tile_move_changes_order_only = async function () {
   if (sent.answer !== "1-А, 2-Б") fail("ключ следует за номером, а не за местом: " + p.bodies[0]);
   const tilesSent = JSON.parse(p.bodies[1]).tiles;
   if (JSON.stringify(tilesSent.map((t) => t.id)) !== JSON.stringify(["tb", "ta"])) fail("порядок в запросе: " + p.bodies[1]);
+};
+
+scenarios.unbound_tile_blocks_publish = async function () {
+  const tile = (id, label) => ({ dataset: { tileId: id, label }, querySelector: () => null });
+  const tiles = ["1", "2", "3", "4", "5", ""].map((l, i) => tile("t" + i, l));
+  const select = (label) => ({ dataset: { keyLeft: label }, value: "А" });
+  const p = build(null, { tiles, keySelects: ["1", "2", "3", "4", "5"].map(select), lefts: "1,2,3,4,5,6" });
+  p.handlers.input[0]({ target: { id: "alt", matches: () => false } });
+  if (!p.figureBtn.disabled) fail("кнопка открыта при шести левых и пяти ответах");
+  const before = p.calls.length;
+  enter(p); await tick();
+  if (p.calls.length !== before) fail("Enter опубликовал неполный ключ");
+  const all = build(null, { tiles, keySelects: ["1", "2", "3", "4", "5", "6"].map(select), lefts: "1,2,3,4,5,6" });
+  all.handlers.input[0]({ target: { id: "alt", matches: () => false } });
+  if (all.figureBtn.disabled) fail("полный ключ закрыл кнопку");
+};
+
+scenarios.frame_change_clears_leak_ack = async function () {
+  const listeners = {};
+  const img = { src: "", hidden: true, alt: "", dataset: {}, parentElement: null };
+  img.closest = () => null;
+  const page = {
+    naturalWidth: 900, naturalHeight: 1200, parentElement: { appendChild() {} },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 1200 }),
+    addEventListener(t, fn) { listeners[t] = fn; },
+  };
+  const p = build({ page, img });
+  p.fields.leak_ack.checked = true;
+  listeners.mousedown({ preventDefault() {}, clientX: 100, clientY: 100 });
+  listeners.mouseup({ clientX: 400, clientY: 500 });
+  if (p.fields.leak_ack.checked) fail("отметка leak_ack пережила новую рамку");
+};
+
+scenarios.leak_ack_digest_is_sent = async function () {
+  const p = build();
+  p.fields.leak_ack.checked = true;
+  p.fields.leak_ack.dataset.digest = "abc123";
+  p.click(p.figureBtn);
+  await tick(); await tick(); await tick();
+  const sent = JSON.parse(p.bodies[1]);
+  if (sent.leak_digest !== "abc123") fail("слепок рамки не ушёл с подтверждением: " + p.bodies[1]);
 };
 
 const name = process.argv[2];

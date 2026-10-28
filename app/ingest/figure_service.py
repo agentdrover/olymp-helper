@@ -10,7 +10,7 @@ from app.ingest import figures, tiles
 from app.ingest.answers import key_value
 from app.ingest.keys import candidate
 from app.ingest.leaks import answer_units, crop_units, norm, significant
-from app.ingest.review import Refusal
+from app.ingest.review import UNCOVERED_KEY, Refusal, key_info, uncovered_lefts
 from app.ingest.store import (
     figure_of,
     get_task,
@@ -147,6 +147,21 @@ def tile_plan(doc, task, figure: dict, regions, edited: int | None, state=None):
     return plan, lefts
 
 
+def leak_digest(regions, plan) -> str:
+    """Слепок рамки и состава плиток: отметка leak_ack действует только для него. Метки и порядок
+    в слепок не входят - на утечку они не влияют."""
+    import hashlib
+
+    def box(rect):
+        return [round(float(v), 1) for v in rect]
+
+    parts = {
+        "regions": [[r["page"], box(r["rect"])] for r in regions],
+        "tiles": sorted([t["id"], t["page"], box(t["rect"])] for t in plan["tiles"]),
+    }
+    return hashlib.sha1(json.dumps(parts).encode()).hexdigest()[:16]
+
+
 def _tile_state(raw) -> list[dict] | None:
     """Плитки из запроса: [{id, label}] в порядке показа; None - карточка их не присылала."""
     if raw is None:
@@ -236,6 +251,7 @@ def confirm_figure(
     no_answer_ack=False,
     teacher_note_ack=False,
     leak_ack=False,
+    leak_digest_ack=None,
     tile_state=None,
 ) -> dict:
     task = get_task(conn, task_id)
@@ -258,12 +274,17 @@ def confirm_figure(
             raise Refusal(problem)
         if not no_answer_ack:
             raise Refusal(NO_ANSWER_REFUSAL)
+        missing = uncovered_lefts(task, key_info(conn, task)[0])
+        if missing:
+            raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
         before_files = tiles.figure_files(figure)
         before_tiles = {t["id"]: t.get("file") for t in tiles.stored_tiles(figure) or []}
         state = _tile_state(tile_state)
         edited = edited_page(figure, rect=rect, rect_px=rect_px, page=page)
         plan, lefts = tile_plan(doc, task, figure, regions, edited, state)
         shown_ids = {t["id"] for t in plan["tiles"]}
+        if leak_ack and leak_digest_ack not in (None, leak_digest(regions, plan)):
+            leak_ack = False  # отметка была для другой рамки или других плиток
         if state is None:  # клиент плиток не показывал: сохраняется только то, что видел родитель
             plan, shown_ids = {"tiles": [], "order": []}, set()
         elif {t["id"] for t in state} != shown_ids:

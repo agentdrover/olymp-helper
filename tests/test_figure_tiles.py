@@ -768,13 +768,105 @@ def test_source_caption_is_the_same_on_preview_and_child_routes(tmp_path):
         assert c.get(f"/api/tasks/{tid}", headers=CHILD).json()["source"] == "f, стр. 1"
 
 
+def tiles_params(**extra):
+    return {"page": 1, "rect_px": ",".join(map(str, FRAME_PX)), "scale": 1.5, **extra}
+
+
+def test_partial_match_key_is_refused_and_the_card_demands_every_left(tmp_path):
+    c, tid = boot(tmp_path, grid_pdf())
+    with c:
+        card = card_of(c, tid)
+        html = fragment(c, tid)
+        assert 'data-lefts="1,2,3,4,5,6"' in html and 'data-bound="1"' in html
+        set_key(c, tid, "1-А, 2-Б, 3-В, 4-Г, 5-Д")  # шестой рисунок без ответа
+        refused = c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=figure_body(card))
+        assert refused.status_code == 422 and "каждого рисунка" in refused.json()["error"]
+        assert stored_figure(tmp_path, tid)["confirmed"] is False
+        set_key(c, tid)
+        assert (
+            c.post(
+                f"/parent/tasks/{tid}/figure", headers=PARENT, json=figure_body(card)
+            ).status_code
+            == 200
+        )
+        # ключ обрезали уже после подтверждения рисунка: публикация тоже отказывает
+        set_key(c, tid, "1-А, 2-Б, 3-В, 4-Г, 5-Д")
+        assert c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={}).status_code == 422
+
+
+def digest_of(text):
+    found = re.search(r'data-leak-digest="(\w+)"', text)
+    assert found, text
+    return found.group(1)
+
+
+def test_leak_ack_is_bound_to_the_frame_and_tiles_it_was_given_for(tmp_path):
+    c, tid = boot(tmp_path, pdf_with_option_word(tmp_path))
+    with c:
+        card = card_of(c, tid)
+        set_key(c, tid)
+        url = f"/parent/tasks/{tid}/figure-tiles"
+        now = digest_of(c.get(url, params=tiles_params(), headers=PARENT).text)
+        other = digest_of(
+            c.get(url, params=tiles_params(rect_px="90,160,700,790"), headers=PARENT).text
+        )
+        assert now != other
+        body = figure_body(card, leak_ack=True)
+        stale = c.post(
+            f"/parent/tasks/{tid}/figure", headers=PARENT, json={**body, "leak_digest": other}
+        )
+        assert stale.status_code == 422 and "миксина" in stale.json()["error"]
+        fresh = c.post(
+            f"/parent/tasks/{tid}/figure", headers=PARENT, json={**body, "leak_digest": now}
+        )
+        assert fresh.status_code == 200, fresh.text
+        assert stored_figure(tmp_path, tid)["leak_ack"] is True
+
+
+def test_empty_tile_state_still_binds_tiles_by_default(tmp_path):
+    c, tid = boot(tmp_path, grid_pdf())
+    with c:
+        url = f"/parent/tasks/{tid}/figure-tiles"
+        none = c.get(url, params=tiles_params(), headers=PARENT).text
+        empty = c.get(url, params=tiles_params(state=""), headers=PARENT).text
+        assert none.count("data-key-left=") == 6 == empty.count("data-key-left=")
+        assert re.findall(r'data-label="(\w*)"', empty) == ["1", "2", "3", "4", "5", "6"]
+
+
+def test_child_tiles_open_in_the_large_view(tmp_path):
+    c, tid = boot(tmp_path, grid_pdf())
+    with c:
+        card = card_of(c, tid)
+        set_key(c, tid)
+        assert (
+            c.post(
+                f"/parent/tasks/{tid}/figure", headers=PARENT, json=figure_body(card)
+            ).status_code
+            == 200
+        )
+        assert c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={}).status_code == 200
+        page = c.get(f"/tasks/{tid}", headers=CHILD).text
+        assert page.count("data-zoom-src=") == 6 and page.count('<dialog class="zoom"') == 1
+        assert "data-close-zoom" in page
+        # у родителя в предпросмотре окна нет, ключа у ребёнка тоже
+        assert 'class="zoom"' not in fragment(c, tid) and "data-key-left" not in page
+    assert "data-zoom-src" in Path("app/static/tutor.js").read_text()
+
+
 # ------------------------------------------------------------------------------- JS
 
 
 @pytest.mark.skipif(NODE is None, reason="node не установлен")
 @pytest.mark.parametrize(
     "scenario",
-    ["ready_state_gates_button_and_enter", "chain_carries_tiles", "tile_move_changes_order_only"],
+    [
+        "ready_state_gates_button_and_enter",
+        "chain_carries_tiles",
+        "tile_move_changes_order_only",
+        "unbound_tile_blocks_publish",
+        "frame_change_clears_leak_ack",
+        "leak_ack_digest_is_sent",
+    ],
 )
 def test_feed_tile_scenarios(scenario):
     harness = Path(__file__).parent / "js" / "feed_chain_harness.js"

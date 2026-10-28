@@ -1,4 +1,5 @@
 {# Картинки и ввод ответа в «Как увидит ребёнок». Тот же фрагмент отдаёт figure-tiles после правки рамки. #}
+<span hidden data-leak-digest="{{ a.digest }}"></span>
 {% if a.tiles %}
   {% with tiles=a.tiles, editor=True, alt=a.alt %}{% include "child/_tiles.html" %}{% endwith %}
   {% if a.warning %}<p class="err tile-count-warning" role="alert">{{ a.warning }}</p>{% endif %}
@@ -8,7 +9,7 @@
 {% else %}
   <figure class="figure" hidden><img alt="" data-figure-img hidden></figure>
 {% endif %}
-<div class="key-fields" data-type="{{ a.type }}" data-candidate="{{ 1 if a.key_is_candidate else 0 }}">
+<div class="key-fields" data-type="{{ a.type }}" data-candidate="{{ 1 if a.key_is_candidate else 0 }}" data-lefts="{{ a.lefts_csv }}" data-bound="{{ 1 if (a.tiles and a.bound) else 0 }}">
 {% if a.type == "match" and a.options is mapping %}
   {% if not (a.tiles and a.bound) %}
   {% for l in a.options.left %}
