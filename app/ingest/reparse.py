@@ -9,6 +9,7 @@ import sqlite3
 
 from app.ingest.review import Refusal
 from app.ingest.store import atomic
+from app.ingest.tiles import figure_files
 
 log = logging.getLogger("app.ingest")
 TOUCHED = (
@@ -37,9 +38,8 @@ def _figure_files(ctx, conn, ids: list[int]) -> set:
     for task_id, figure in conn.execute(
         f"SELECT id, figure FROM task_item WHERE id IN ({','.join('?' * len(ids))})", ids
     ):
-        relative = json.loads(figure).get("file") if figure else None
-        if relative:
-            files.add(ctx.material_path(relative))
+        for relative in figure_files(json.loads(figure) if figure else None):
+            files.add(ctx.material_path(relative))  # общая вырезка и PNG каждой плитки
         files.update(ctx.material_path("figures").glob(f"{task_id}-r*.png"))
     return files
 

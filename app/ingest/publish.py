@@ -6,6 +6,7 @@ import re
 from app.ingest.answers import key_value
 from app.ingest.leaks import condition_leaks
 from app.ingest.store import figure_of, options_of
+from app.ingest.tiles import stored_view
 
 PUBLISHED_STATUS = "checked"
 
@@ -163,20 +164,41 @@ def child_view(task, material) -> dict:
     }
     if figure is not None:
         view["figure"] = {"url": f"/tasks/{task['id']}/figure.png", "alt": figure.get("alt", "")}
+        view["figure"]["tiles"] = [
+            {
+                "url": f"/tasks/{task['id']}/figure/{tile['id']}.png",
+                "n": number,
+                "label": tile.get("label"),
+            }
+            for number, tile in enumerate(stored_view(figure), 1)
+        ]
     return view
+
+
+def source_caption(material, page) -> str:
+    """Подпись источника рисунка: одна функция для предпросмотра и детских маршрутов.
+
+    Известный год - «сборник 2022/23»; иначе имя загруженного файла (без .pdf); иначе «Сборник».
+    Номер страницы дописывается, если он известен. Хеш файла в подпись не попадает."""
+    year = material["year"]
+    name = material["original_name"] if "original_name" in material.keys() else None  # noqa: SIM118
+    if year:
+        base = f"сборник {year}/{str(year + 1)[-2:]}"
+    elif name:
+        base = name[:-4].strip() if name.lower().endswith(".pdf") and len(name) > 4 else name
+    else:
+        base = "Сборник"
+    return base + (f", стр. {page}" if page else "")
 
 
 def _source_label(task, material) -> str:
     if material is None:  # сгенерированное задание: сборника и страницы нет
         return "составлено помощником, проверено родителем"
-    year = material["year"]
-    year_text = f"{year}/{str(year + 1)[-2:]}" if year else "без года"
-    page = task["page_from"]
-    return f"сборник {year_text}" + (f", стр. {page}" if page else "")
+    return source_caption(material, task["page_from"])
 
 
 def key_display_value(task):
     return key_value(task["answer_key"])
 
 
-__all__ = ["child_view", "has_key", "is_published", "json", "publication"]
+__all__ = ["child_view", "has_key", "is_published", "json", "publication", "source_caption"]

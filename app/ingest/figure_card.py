@@ -5,10 +5,12 @@ assist_mode, что и экран ребёнка."""
 
 import contextlib
 import re
+from urllib.parse import urlencode
 
 import pymupdf
 
-from app.ingest import figures
+from app.ingest import figures, tiles
+from app.ingest.answers import display
 from app.ingest.publish import (
     assist_caption,
     assist_mode,
@@ -60,7 +62,7 @@ def mode_for(task, teacher_note: str | None, ack: bool) -> dict:
 def child_preview(conn, task, figure: dict, regions: list[dict]) -> tuple[dict, dict]:
     """(вид задания для ребёнка, состояние экрана) по текущему рисунку."""
     material = conn.execute(
-        "SELECT year FROM material WHERE id = ?", (task["material_id"],)
+        "SELECT year, original_name FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
     fake = preview_task(
         task, figure, items_v2=True
@@ -109,16 +111,127 @@ def _overlays(doc, regions: list[dict], shown_page: int) -> list[dict]:
     return out
 
 
+def frame_query(frame: dict | None) -> str:
+    """Параметры правки рамки для адресов предпросмотра: одни и те же у вырезки и у плиток."""
+    frame = frame or {}
+    if frame.get("rect_px") is None:
+        return ""
+    return urlencode(
+        {
+            "page": frame.get("page") or "",
+            "rect_px": ",".join(str(v) for v in frame["rect_px"]),
+            "scale": frame.get("scale") or "",
+        }
+    )
+
+
+TILE_COUNT_WARNING = (
+    "Плиток {tiles}, а рисунков в задании {lefts}: плитки не привязаны по порядку, ответ "
+    "вводится для каждого рисунка отдельно."
+)
+
+
+def tile_view(task, tile: dict, number: int, check: dict, query: str) -> dict:
+    suffix = f"?v={task['revision']}" + (f"&{query}" if query else "")
+    return {
+        "id": tile["id"],
+        "n": number,
+        "page": tile["page"],
+        "label": tile.get("label"),
+        "url": f"/parent/tasks/{task['id']}/tile-preview/{tile['id']}.png{suffix}",
+        "raster_only": check["raster_only"],
+        "leak": check["leak"],
+        "readable": check["readable"],
+        "warning": RASTER_WARNING if check["raster_only"] else None,
+    }
+
+
+def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> dict:
+    """Что показывает «Как увидит ребёнок»: плитки (или общая вырезка) по текущей рамке и ввод
+    ответа. Один источник и для карточки, и для обновления после правки рамки."""
+    from app.ingest.figure_service import (
+        column_digest,
+        edited_page,
+        figure_regions,
+        leak_digest,
+        leak_units,
+        tile_plan,
+    )
+    from app.ingest.review import key_info
+
+    frame = frame or {}
+    stored = figures.regions_of(figure)
+    key, _source, is_candidate = key_info(conn, task)
+    options = options_of(task)
+    area = {
+        "tiles": [],
+        "count": 0,
+        "bound": False,
+        "warning": None,
+        "lefts": tiles.left_labels(options, task["type"]),
+        "type": task["type"],
+        "options": options,
+        "key": key,
+        "key_value": key if isinstance(key, dict) else None,
+        "key_display": None if key is None else display(key),
+        "alt": figure.get("alt", ""),
+        "key_is_candidate": is_candidate,
+        "common_url": PREVIEW_URL.format(task["id"])
+        + f"?v={task['revision']}"
+        + (f"&{frame_query(frame)}" if frame_query(frame) else ""),
+        "has_regions": bool(stored),
+        "raster_only": None,
+        "raster_warning": None,
+        "overlays": [],
+        "digest": "",
+        "column_digest": "",
+        "lefts_csv": "",
+    }
+    area["lefts_csv"] = ",".join(area["lefts"])
+    material = conn.execute(
+        "SELECT file FROM material WHERE id = ?", (task["material_id"],)
+    ).fetchone()
+    source = ctx.material_path(material["file"]) if material else None
+    drawn = frame.get("rect_px") is not None or frame.get("rect") is not None
+    if not ((stored or drawn) and source is not None and source.exists()):
+        return area
+    area["has_regions"] = True
+    with contextlib.closing(pymupdf.open(str(source))) as doc:
+        regions = figure_regions(doc, figure, **frame)
+        edited = edited_page(figure, **frame)
+        plan, lefts = tile_plan(doc, task, figure, regions, edited, state)
+        area["digest"] = leak_digest(regions, plan)
+        area["column_digest"] = column_digest(regions, plan)
+        shown = tiles.ordered(plan)
+        checks = tiles.check_tiles(doc, shown, leak_units(conn, task))
+        query = frame_query(frame)
+        area["tiles"] = [
+            tile_view(task, t, number, checks[t["id"]], query) for number, t in enumerate(shown, 1)
+        ]
+        area["count"] = len(shown)
+        area["bound"] = bool(lefts) and len(shown) == len(lefts)
+        if shown and lefts and len(shown) != len(lefts):
+            area["warning"] = TILE_COUNT_WARNING.format(tiles=len(shown), lefts=len(lefts))
+        area["has_regions"] = True
+        raster = not figures.region_lines(doc, regions)
+        area["raster_only"] = raster
+        area["raster_warning"] = RASTER_WARNING if raster and not shown else None
+        area["page_overlays"] = _overlays(doc, regions, frame.get("page") or regions[0]["page"])
+    return area
+
+
 def card_extras(ctx, conn, task, figure: dict, shown_page: int | None, deep: bool) -> dict:
     """Что нужно карточке needs_figure сверх общих полей. deep: открыть PDF (рамки на странице,
-    есть ли в них текстовый слой); в общей очереди PDF не открывается."""
-    from app.ingest.review import SOURCE_LABELS, key_info
-
+    плитки, есть ли в них текстовый слой); в общей очереди PDF не открывается."""
     regions = figures.regions_of(figure)
     items = ordered_designations(options_of(task))
     notes, rest = note_lines(figure.get("teacher_note"), items)
     view, screen = child_preview(conn, task, figure, regions)
+    area = area_context(ctx, conn, task, figure) if deep else None
+    from app.ingest.review import SOURCE_LABELS, key_info
+
     key, source, is_candidate = key_info(conn, task)
+    shown_tiles = area["tiles"] if area else []
     extras = {
         "figure_items": items,
         "figure_notes": notes,
@@ -132,17 +245,17 @@ def card_extras(ctx, conn, task, figure: dict, shown_page: int | None, deep: boo
         "key_source_label": SOURCE_LABELS.get(source),
         "figure_check": {"raster_only": None, "warning": None},
         "overlays": [],
+        "area": area,
+        "tiles": shown_tiles,
+        "tile_warning": area["warning"] if area else None,
+        "tile_bound": bool(area and area["bound"]),
+        "tiles_raster": sum(1 for t in shown_tiles if t["raster_only"]),
     }
-    material = conn.execute(
-        "SELECT file FROM material WHERE id = ?", (task["material_id"],)
-    ).fetchone()
-    source = ctx.material_path(material["file"]) if material else None
-    if deep and regions and source is not None and source.exists():
-        with contextlib.closing(pymupdf.open(str(source))) as doc:
-            raster = not figures.region_lines(doc, regions)
-            extras["figure_check"] = {
-                "raster_only": raster,
-                "warning": RASTER_WARNING if raster else None,
-            }
-            extras["overlays"] = _overlays(doc, regions, shown_page or regions[0]["page"])
+    if area and area["raster_only"] is not None:
+        raster = area["raster_only"]
+        extras["figure_check"] = {
+            "raster_only": raster,
+            "warning": RASTER_WARNING if raster else None,
+        }
+        extras["overlays"] = area.get("page_overlays", [])
     return extras
