@@ -112,13 +112,13 @@ def _overlays(doc, regions: list[dict], shown_page: int) -> list[dict]:
 def card_extras(ctx, conn, task, figure: dict, shown_page: int | None, deep: bool) -> dict:
     """Что нужно карточке needs_figure сверх общих полей. deep: открыть PDF (рамки на странице,
     есть ли в них текстовый слой); в общей очереди PDF не открывается."""
-    from app.ingest.review import key_info
+    from app.ingest.review import SOURCE_LABELS, key_info
 
     regions = figures.regions_of(figure)
     items = ordered_designations(options_of(task))
     notes, rest = note_lines(figure.get("teacher_note"), items)
     view, screen = child_preview(conn, task, figure, regions)
-    key, _source, is_candidate = key_info(conn, task)
+    key, source, is_candidate = key_info(conn, task)
     extras = {
         "figure_items": items,
         "figure_notes": notes,
@@ -129,6 +129,7 @@ def card_extras(ctx, conn, task, figure: dict, shown_page: int | None, deep: boo
         "mode": assist_caption(screen["assist"]),
         "key_value": key,
         "key_is_candidate": is_candidate,
+        "key_source_label": SOURCE_LABELS.get(source),
         "figure_check": {"raster_only": None, "warning": None},
         "overlays": [],
     }

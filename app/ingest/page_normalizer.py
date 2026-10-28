@@ -20,7 +20,7 @@ from app.ingest.page_answer import (
     raw_hash,
 )
 from app.ingest.prompt import neutralize
-from app.ingest.store import atomic, now
+from app.ingest.store import atomic, get_task, now
 
 LOCK = threading.Lock()  # одна пачка за раз
 
@@ -93,7 +93,9 @@ def needs_model(conn, task) -> bool:
     if not str(task["answer_text"] or "").strip():
         return False
     options = json.loads(task["options"]) if task["options"] else None
-    if not options or fit_page(task["answer_text"], task["type"], options).value is not None:
+    if task["type"] != "numeric" and not options:  # у numeric вариантов нет
+        return False
+    if fit_page(task["answer_text"], task["type"], options).value is not None:
         return False
     if _uploaded_candidate(conn, task) is not None:
         return False
@@ -107,18 +109,22 @@ def needs_model(conn, task) -> bool:
 
 def normalize_task(ctx, conn, task) -> str:
     """'stored' | 'unparsable' | 'rejected' | 'error' | 'limit'. Ошибка канала не пишется."""
-    options = json.loads(task["options"])
+    options = json.loads(task["options"]) if task["options"] else None
     system, messages = build_request(task, options)
     result = ctx.model.complete(system, messages, SCHEMA)
     if not getattr(result, "ok", False):
         return "limit" if getattr(result, "error_kind", None) == "limit" else "error"
     value, reason = parse_payload(getattr(result, "json", None), task["type"], options)
     with atomic(conn):
-        fresh = conn.execute(
-            "SELECT revision, answer_text FROM task_item WHERE id = ?", (task["id"],)
-        ).fetchone()
-        if fresh is None or fresh[0] != task["revision"] or fresh[1] != task["answer_text"]:
-            return "error"  # задание изменилось за время запроса
+        fresh = get_task(conn, task["id"])
+        if (
+            fresh is None
+            or fresh["excluded"]
+            or fresh["answer_key"] is not None
+            or fresh["revision"] != task["revision"]
+            or fresh["answer_text"] != task["answer_text"]
+        ):
+            return "error"  # задание изменилось или исключено за время запроса
         conn.execute(
             "INSERT OR REPLACE INTO page_answer (task_item_id, revision, raw_hash, source, value, "
             "reason, rules_version, channel, model, created_at) "
@@ -143,8 +149,9 @@ def normalize_task(ctx, conn, task) -> str:
 def normalize_pending(ctx, conn) -> dict:
     """Пакет: все задания, которым нужна модель. Дневной лимит кончился - остановка."""
     counts = {"stored": 0, "unparsable": 0, "rejected": 0, "error": 0, "skipped": 0}
-    for task in conn.execute("SELECT * FROM task_item ORDER BY id").fetchall():
-        if not needs_model(conn, task):
+    for (task_id,) in conn.execute("SELECT id FROM task_item ORDER BY id").fetchall():
+        task = get_task(conn, task_id)  # состояние на момент вызова, не снимок начала пакета
+        if task is None or not needs_model(conn, task):
             counts["skipped"] += 1
             continue
         outcome = normalize_task(ctx, conn, task)

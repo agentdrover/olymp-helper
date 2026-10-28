@@ -190,7 +190,13 @@ def _fit_match(raw: str, options) -> tuple[object, str | None]:
 
 
 _POINTS = re.compile(r"(?<=\S)[\s;,]+\d+\s+балл\w*\s*$", re.IGNORECASE)  # «… 10 баллов»
-_REMARKS = re.compile(r"(?<=\S)(?:\s*\([^()]*\))+\s*$")
+_TRAILING_PARENS = re.compile(r"(?<=\S)((?:\s*\([^()]*\))+)\s*$")
+_GROUP = re.compile(r"\(([^()]*)\)")
+# Скобки после списка, которые можно отбросить: только баллы и «в любом порядке». Всё остальное
+# («или 2», «кроме 2») меняет ответ: такой ответ отказывается как неоднозначный.
+_ALLOWED_REMARK = re.compile(
+    r"\s*(?:[^()]*\bбалл\w*[^()]*|в\s+любом\s+порядке|любой\s+порядок)\s*", re.IGNORECASE
+)
 
 
 def _letters(text: str, labels: set[str], task_type: str) -> tuple[list[str] | None, str | None]:
@@ -228,8 +234,12 @@ def _fit_choice(raw: str, task_type: str, options) -> tuple[object, str | None]:
     text = _expand_ranges(raw, order)
     if text is None:
         return None, UNPARSED
-    if task_type == "multiple":  # «9, 9 (9 w)»: пояснения после списка не обозначения
-        text = _REMARKS.sub("", text)
+    if task_type == "multiple":  # «9, 9 (9 балл)»: пояснения после списка не обозначения
+        tail = _TRAILING_PARENS.search(text)
+        if tail:
+            if not all(_ALLOWED_REMARK.fullmatch(g) for g in _GROUP.findall(tail.group(1))):
+                return None, AMBIGUOUS
+            text = text[: tail.start()]
     plain = _PLAIN.fullmatch(text) is not None
     found, why = _letters(text, set(order), task_type) if plain else (None, None)
     if why:
@@ -269,12 +279,13 @@ def stored_candidate(conn, task):
     """Значение, которое модель-нормализатор записала для ЭТОЙ ревизии и ЭТОГО текста ответа;
     иначе None. Значение проверяется заново: в базе оно не доверенное."""
     row = conn.execute(
-        "SELECT revision, raw_hash, value FROM page_answer WHERE task_item_id = ?", (task["id"],)
+        "SELECT revision, raw_hash, value, rules_version FROM page_answer WHERE task_item_id = ?",
+        (task["id"],),
     ).fetchone()
     if row is None or row[2] is None:
         return None
-    if row[0] != task["revision"] or row[1] != raw_hash(task["answer_text"]):
-        return None
+    if (row[0], row[1], row[3]) != (task["revision"], raw_hash(task["answer_text"]), RULES_VERSION):
+        return None  # устаревший итог - как будто его нет (needs_model запросит заново)
     value = json.loads(row[2])
     options = json.loads(task["options"]) if task["options"] else None
     return None if check_answer(value, task["type"], options) else value

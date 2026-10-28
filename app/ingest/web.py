@@ -583,26 +583,29 @@ def page_answers_normalize(request: Request, conn: Db):
     ctx = ctx_of(request)
     if not page_normalizer.LOCK.acquire(blocking=False):
         return {"started": False, "message": "Нормализация уже идёт."}
-
-    def run(db):
+    if request.app.state.imports.sync:
         try:
-            return page_normalizer.normalize_pending(ctx, db)
+            return {"started": True, "counts": page_normalizer.normalize_pending(ctx, conn)}
         finally:
             page_normalizer.LOCK.release()
 
-    if request.app.state.imports.sync:
-        return {"started": True, "counts": run(conn)}
-
     def background():
-        db = open_db(ctx.db_path)
-        try:
-            run(db)
+        try:  # соединение открывается внутри: при любой ошибке замок отпускается
+            db = open_db(ctx.db_path)
+            try:
+                page_normalizer.normalize_pending(ctx, db)
+            finally:
+                db.close()
         except Exception:
             log.exception("page answer normalization failed")
         finally:
-            db.close()
+            page_normalizer.LOCK.release()
 
-    threading.Thread(target=background, daemon=True, name="page-answers").start()
+    try:
+        threading.Thread(target=background, daemon=True, name="page-answers").start()
+    except BaseException:
+        page_normalizer.LOCK.release()
+        raise
     return {"started": True}
 
 

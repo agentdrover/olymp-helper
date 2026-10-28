@@ -1,6 +1,7 @@
 """K5e1 (#2134): ответы со страниц становятся кандидатами ключа - строго и без автоподтверждения."""
 
 import json
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -264,3 +265,176 @@ def test_a_new_rule_form_is_not_official_either_but_an_old_one_still_is(tmp_path
         conn = db(tmp_path / "old")
         assert conn.execute("SELECT key_source FROM task_item").fetchone()[0] == "official"
         conn.close()
+
+
+# ------------------------------------------------------------- круг 1 (Codex)
+
+
+def set_row(tmp_path, tid, **cols):
+    conn = db(tmp_path)
+    sets = ", ".join(f"{k} = ?" for k in cols)
+    conn.execute(f"UPDATE task_item SET {sets} WHERE id = ?", (*cols.values(), tid))
+    conn.close()
+
+
+def test_only_listed_remarks_after_the_list_are_dropped():
+    assert fit("1, 3 (любой порядок)", "multiple", DIGITS).value == ["1", "3"]
+    assert fit("1, 3 (в любом порядке) (2 балла)", "multiple", DIGITS).value == ["1", "3"]
+    for raw in ("1 (или 2)", "1, 2 (кроме 2)", "1, 3 (2 балла) (или 5)"):
+        got = fit(raw, "multiple", DIGITS)
+        assert got.value is None and got.reason == "ambiguous", raw
+
+
+def test_numeric_answers_the_rule_cannot_read_go_to_the_model(tmp_path):
+    client, model, tid = start(
+        tmp_path,
+        "двадцать восемь",
+        "numeric",
+        payload={"status": "ok", "number": "28"},
+    )
+    with client:
+        assert normalize(client)["stored"] == 1
+        assert detail(client, tid)["key_candidate"]["answer"] == "28"
+        assert len(model.norm_calls) == 1
+
+
+def test_an_unverified_candidate_does_not_take_a_task_out_of_the_feed(tmp_path):
+    client, model, tid = start(
+        tmp_path, "первый вариант", payload={"status": "ok", "labels": ["Б"]}
+    )
+    with client:
+        set_row(tmp_path, tid, import_status="checked")
+        assert detail(client, tid)["card"]["kind"] == "model_missing"
+        normalize(client)
+        card = detail(client, tid)["card"]
+        assert card is not None and card["kind"] == "model_missing"
+        assert card["key"] == "Б" and card["key_unverified"] is True
+        queue = client.get("/parent/review/queue", headers=PARENT).json()
+        assert tid in [c["task_id"] for c in queue["cards"]]
+        # Ответ модели можно запросить: непроверенный кандидат ключом не считается.
+        model.answer = lambda _c: {"proposed_answer": "А", "explanation": "e", "uncertainty": "low"}
+        r = client.post(f"/parent/tasks/{tid}/retry-model", headers=PARENT, json={})
+        assert r.status_code == 200, r.text
+
+
+def test_the_discrepancy_card_can_be_resolved_on_an_unverified_candidate(tmp_path):
+    client, _, tid = start(tmp_path, "первый вариант", payload={"status": "ok", "labels": ["Б"]})
+    with client:
+        normalize(client)
+        seen = json.dumps({"answer": "А", "value": "А", "explanation": "", "unverified": True})
+        set_row(tmp_path, tid, model_answer=seen)
+        card = detail(client, tid)["card"]
+        assert card["kind"] == "discrepancy" and card["button_answer"] == "Б"
+        html = client.get(f"/parent/review/{tid}", headers=PARENT).text
+        assert 'data-choice="key" data-answer="Б"' in html
+        r = client.post(
+            f"/parent/tasks/{tid}/resolve",
+            headers=PARENT,
+            json={"choice": "key", "answer": card["button_answer"]},
+        )
+        assert r.status_code == 200, r.text
+
+
+def test_the_source_of_an_unverified_candidate_is_shown_on_every_card_kind(tmp_path):
+    client, _, tid = start(tmp_path, "первый вариант", payload={"status": "ok", "labels": ["Б"]})
+    with client:
+        normalize(client)
+        seen = json.dumps({"answer": "А", "value": "А", "explanation": "", "unverified": True})
+        for cols in (
+            {},  # confirm
+            {"model_answer": seen},  # discrepancy
+            {
+                "import_status": "unsupported",
+                "figure": json.dumps({"page": 1, "regions": [], "confirmed": False}),
+                "unsupported_reason": "нужен рисунок",
+            },  # needs_figure
+        ):
+            if cols:
+                set_row(tmp_path, tid, **cols)
+            html = client.get(f"/parent/review/{tid}", headers=PARENT).text
+            kind = detail(client, tid)["card"]["kind"]
+            assert "через модель, не проверен" in html, kind
+            assert "Ключ из загруженного файла" not in html, kind
+
+
+def test_a_stale_rules_version_makes_the_stored_result_absent(tmp_path):
+    client, model, tid = start(
+        tmp_path, "первый вариант", payload={"status": "ok", "labels": ["Б"]}
+    )
+    with client:
+        normalize(client)
+        conn = db(tmp_path)
+        conn.execute("UPDATE page_answer SET rules_version = 0")
+        conn.close()
+        assert detail(client, tid)["key_candidate"] is None
+        assert detail(client, tid)["card"]["key"] is None
+        assert normalize(client)["stored"] == 1 and len(model.norm_calls) == 2
+        assert detail(client, tid)["key_candidate"]["answer"] == "Б"
+
+
+def test_a_task_excluded_during_the_batch_is_not_sent_or_stored(tmp_path):
+    tasks = [make_task(n, f"Вопрос номер {n}") for n in (1, 2)]
+    model = NormalizerModel(None)
+    model.split = reply(*tasks)
+    client = TestClient(build_app(tmp_path, model))
+    with client:
+        upload(client, text_pdf([["1. вопрос", "2. вопрос"]]))
+        first, second = task_ids(tmp_path)
+        for tid in (first, second):
+            set_row(tmp_path, tid, answer_text="первый вариант")
+
+        def hook(_content):
+            set_row(tmp_path, second, excluded=1)  # родитель исключает соседа во время пакета
+            return {"status": "ok", "labels": ["А"]}
+
+        model.payload = hook
+        counts = normalize(client)
+        assert counts["stored"] == 1 and len(model.norm_calls) == 1
+        assert stored(tmp_path, second) is None and stored(tmp_path, first) is not None
+
+        # Исключено во время собственного запроса: ответ не пишется.
+        set_row(tmp_path, second, excluded=0)
+        conn = db(tmp_path)
+        conn.execute("DELETE FROM page_answer")
+        conn.close()
+        model.payload = lambda _c: (
+            set_row(tmp_path, first, excluded=1) or {"status": "ok", "labels": ["А"]}
+        )
+        normalize(client)
+        assert stored(tmp_path, first) is None
+
+
+def test_the_lock_is_released_when_the_background_connection_fails(tmp_path, monkeypatch):
+    import time
+
+    from app.ingest import page_normalizer, web
+
+    client, _model, tid = start(
+        tmp_path, "первый вариант", payload={"status": "ok", "labels": ["А"]}
+    )
+    with client:
+        client.app.state.imports.sync = False  # как в работе: пакет идёт фоном
+
+        real = web.open_db
+
+        def boom(path):  # ломается только в фоновом потоке пакета; запрос открывает базу как обычно
+            if threading.current_thread().name == "page-answers":
+                raise OSError("db is gone")
+            return real(path)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(web, "open_db", boom)
+            r = client.post("/parent/page-answers/normalize", headers=PARENT, json={})
+            assert r.json()["started"] is True
+            for _ in range(100):
+                if not page_normalizer.LOCK.locked():
+                    break
+                time.sleep(0.05)
+            assert not page_normalizer.LOCK.locked()
+        r = client.post("/parent/page-answers/normalize", headers=PARENT, json={})
+        assert r.json()["started"] is True  # не «уже идёт»
+        for _ in range(100):
+            if not page_normalizer.LOCK.locked():
+                break
+            time.sleep(0.05)
+        assert stored(tmp_path, tid) is not None

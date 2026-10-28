@@ -170,7 +170,7 @@
     skip: () => post("skip"),
     exclude: () => post("exclude"),
     retry: async () => { await post("retry-model"); return { next: { task_id: Number(taskId()) }, counter: card().dataset.counter }; },
-    resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: val("answer") || null }),
+    resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: (b.dataset.choice === "key" ? b.dataset.answer : val("answer")) || null }),
     figure: publishFigure,
     "save-edit": () => post("edit", changedEdit())
       .then(() => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter })),

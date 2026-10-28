@@ -281,7 +281,7 @@ def resolve(ctx, conn, task_id: int, choice: str, answer=None) -> None:
     task = _task(conn, task_id)
     seen = model_value(task)
     if choice == "key":
-        confirm(ctx, conn, task_id)
+        confirm(ctx, conn, task_id, answer=answer)  # у непроверенного кандидата ответ явный
     elif choice == "mine":
         if answer is None or not str(answer).strip():
             raise Refusal("Укажите свой ответ.")
@@ -305,7 +305,8 @@ def retry_model(ctx, conn, task_id: int) -> bool:
             "затем повторяйте запрос к модели.",
             409,
         )
-    if key_info(conn, task)[0] is not None:
+    value, source, _ = key_info(conn, task)
+    if value is not None and source not in SOURCE_LABELS:
         raise Refusal("У задания есть ключ: ответ модели не нужен.", 409)
     if task["model_answer"] is not None:
         raise Refusal(
@@ -333,6 +334,9 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     figure = figure_of(task)
     status = task["import_status"]
     key, source, _ = key_info(conn, task)
+    unverified = source in SOURCE_LABELS
+    # Непроверенный кандидат показывается, но ключом не считается: он не убирает задание из ленты.
+    trusted = None if unverified else key
     model = model_value(task)
     kind, hint = None, ""
     if status == "checked" and _open_dispute(conn, task):
@@ -347,9 +351,15 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
                 "Нужен рисунок: подтвердите найденный или поправьте рамку и alt, либо впишите "
                 "самодостаточное условие."
             )
-    elif status == "checked" and figure is None and key is None and task["model_answer"] is None:
+    elif (
+        status == "checked" and figure is None and trusted is None and task["model_answer"] is None
+    ):
         kind, hint = "model_missing", "Ответ модели не получен. Повторите запрос."
-    elif key is None and (figure is not None or status == "draft"):
+    elif (
+        trusted is None
+        and not (unverified and figure is None)
+        and (figure is not None or status == "draft")
+    ):
         kind = "no_key"
         hint = (
             "Для задания с рисунком нужен ключ или ваш ответ: без него оно не публикуется."
@@ -374,7 +384,6 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     catalog = load_catalog(conn)
     topic = task["topic"] if task["topic"] in catalog else None
     button = None
-    unverified = source in SOURCE_LABELS
     if kind == "confirm":
         button = (
             f"Верно, ответ {display(key)} — подтвердить и дальше"

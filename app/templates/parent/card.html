@@ -31,7 +31,7 @@
       </ul>
       {% endif %}
       {% endif %}
-      {% if card.key and card.kind != "needs_figure" %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }})</p>{% endif %}
+      {% if card.key and (card.kind != "needs_figure" or card.key_unverified) %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }}){% if card.key_unverified %} <b>не проверен</b>{% endif %}</p>{% endif %}
       {% if card.model_answer %}<p>Ответ модели (не проверен): <b>{{ card.model_answer }}</b></p>{% endif %}
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
       <p class="hint">{{ card.hint }}</p>
@@ -46,7 +46,7 @@
         <button class="primary" data-action="confirm">Подтвердить с моим ответом</button>
         <button data-action="confirm-no-key">Подтвердить без ключа</button>
       {% elif card.kind == "discrepancy" %}
-        <button class="primary" data-action="resolve" data-choice="key">Ключ прав</button>
+        <button class="primary" data-action="resolve" data-choice="key"{% if card.button_answer %} data-answer="{{ card.button_answer }}"{% endif %}>Ключ прав</button>
         <label>Мой ответ <input id="answer" size="8"></label>
         <button data-action="resolve" data-choice="mine">Принять мой ответ</button>
       {% elif card.kind == "model_missing" %}
@@ -73,7 +73,7 @@
           </li>
           <li>
             <h3>Правильный ответ</h3>
-            <p class="hint">{% if card.key_value is none %}Ключа нет — выберите сами. Без ключа задание не публикуется.{% elif card.key_is_candidate %}Ключ из загруженного файла — проверьте его.{% else %}Ключ задан — можно изменить.{% endif %}</p>
+            <p class="hint">{% if card.key_value is none %}Ключа нет — выберите сами. Без ключа задание не публикуется.{% elif card.key_source_label %}Кандидат: {{ card.key_source_label }} — проверьте его.{% elif card.key_is_candidate %}Ключ из загруженного файла — проверьте его.{% else %}Ключ задан — можно изменить.{% endif %}</p>
             <div class="key-fields" data-type="{{ card.type }}" data-candidate="{{ 1 if card.key_is_candidate else 0 }}" data-current="{{ card.key or '' }}">
             {% if card.type == "match" and card.options is mapping %}
               {% for l in card.options.left %}
