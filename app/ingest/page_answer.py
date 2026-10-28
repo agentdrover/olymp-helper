@@ -260,6 +260,14 @@ def _fit_choice(raw: str, task_type: str, options) -> tuple[object, str | None]:
     return build_value(task_type, options, labels=found)
 
 
+def _decimal_points_look_like_a_label(tail: str, options) -> bool:
+    """«1, 3,5 балла»: «3,5 балла» - баллы или обозначение 3 и «5 балла»? Скобки снимают вопрос."""
+    found = re.search(r"(\d+)[.,]\d+", tail)
+    if not found or "(" in tail or not isinstance(options, list):
+        return False
+    return label_key(found.group(1)) in set(_texts(options))
+
+
 def fit_page(raw, task_type: str, options) -> Fit:
     """Ответ со страницы, приведённый к заданию, строго. extended: прежний разбор такого не принимал."""
     if task_type not in ("single", "multiple", "match", "numeric"):
@@ -268,6 +276,9 @@ def fit_page(raw, task_type: str, options) -> Fit:
         return Fit(None, EMPTY)
     text = str(raw)
     if task_type != "numeric":  # баллы за ответ в конце строки - не часть ответа
+        tail = _POINTS.search(text)
+        if tail and _decimal_points_look_like_a_label(tail.group(0), options):
+            return Fit(None, AMBIGUOUS)
         text = _POINTS.sub("", text)
     if task_type == "numeric":
         value, reason = _numeric(text)
@@ -281,9 +292,18 @@ def fit_page(raw, task_type: str, options) -> Fit:
 
 
 def content_hash(task) -> str:
-    """Что определяет результат нормализации: текст ответа, тип и варианты. Ревизия сюда не
-    входит: пересчёт рисунка поднимает её сам и не должен стирать оплаченный итог."""
+    """Что видит модель и проверяет валидатор: текст ответа, тип и ОБОЗНАЧЕНИЯ вариантов (их
+    тексты не входят). Ревизия тоже не входит: пересчёт рисунка поднимает её сам и не должен
+    стирать оплаченный итог."""
     options = json.loads(task["options"]) if task["options"] else None
+
+    def labels(items):
+        return [label_key(o.get("label", "")) for o in items or [] if isinstance(o, dict)]
+
+    if isinstance(options, dict):
+        options = {"left": labels(options.get("left")), "right": labels(options.get("right"))}
+    elif isinstance(options, list):
+        options = labels(options)
     payload = [str(task["answer_text"] or ""), task["type"], options]
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()

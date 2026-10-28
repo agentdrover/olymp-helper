@@ -53,6 +53,11 @@ UNVERIFIED_SOURCES = {
     "page": "page_rule",
     "page_model": "page_model",
 }
+CANDIDATE_SOURCE_LABELS = {
+    "key_file": "загруженный ключ",
+    "page": "правило по ответу на странице",
+    "page_model": "модель по ответу на странице",
+}
 SOURCE_LABELS = {
     "page_rule": "кандидат со страницы по правилу, не проверен",
     "page_model": "кандидат со страницы через модель, не проверен",
@@ -429,6 +434,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "key_source": SOURCE_LABELS.get(source, source),
         "key_unverified": unverified,
         "key_candidate_source": task["key_candidate_source"],
+        "key_candidate_source_label": CANDIDATE_SOURCE_LABELS.get(task["key_candidate_source"]),
         "button_answer": display(key) if unverified else None,
         "model_answer": None if model is None else display(model),
         "model_explanation": json.loads(task["model_answer"]).get("explanation")

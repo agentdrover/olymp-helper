@@ -31,7 +31,8 @@
       </ul>
       {% endif %}
       {% endif %}
-      {% if card.key and (card.kind != "needs_figure" or card.key_unverified) %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }}){% if card.key_unverified %} <b>не проверен</b>{% endif %}{% if card.key_candidate_source %} · подтверждён родителем, предложен: {{ card.key_candidate_source }}{% endif %}</p>{% endif %}
+      {% if card.key and (card.kind != "needs_figure" or card.key_unverified) %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }}){% if card.key_unverified %} <b>не проверен</b>{% endif %}</p>{% endif %}
+      {% if card.key_candidate_source_label %}<p class="hint">Ответ подтверждён родителем; предложен: {{ card.key_candidate_source_label }}.</p>{% endif %}
       {% if card.model_answer %}<p>Ответ модели (не проверен): <b>{{ card.model_answer }}</b></p>{% endif %}
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
       <p class="hint">{{ card.hint }}</p>

@@ -738,3 +738,110 @@ def test_publishing_with_the_preselected_candidate_records_where_it_came_from(tm
             client.post(f"/parent/tasks/{two}/confirm", headers=PARENT, json={}).status_code == 200
         )
         assert two in _child_ids(client)
+
+
+# ------------------------------------------------------------- круг 4
+
+
+def candidate_source(tmp_path, tid):
+    conn = db(tmp_path)
+    try:
+        return conn.execute(
+            "SELECT key_source, key_candidate_source FROM task_item WHERE id = ?", (tid,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def put_key(client, tid, answer):
+    r = client.post(f"/parent/tasks/{tid}/key", headers=PARENT, json={"answer": answer})
+    assert r.status_code == 200, r.text
+
+
+def with_candidate(tmp_path):
+    return start(tmp_path, "первый вариант", payload={"status": "ok", "labels": ["Б"]})
+
+
+def test_the_candidate_source_is_recorded_only_for_an_answer_equal_to_the_candidate(tmp_path):
+    client, _, tid = with_candidate(tmp_path)
+    with client:
+        normalize(client)
+        put_key(client, tid, "В")  # свой ответ, не кандидат
+        assert tuple(candidate_source(tmp_path, tid)) == ("parent", None)
+
+
+def test_the_candidate_source_is_not_set_again_when_a_key_is_changed(tmp_path):
+    client, _, tid = with_candidate(tmp_path)
+    with client:
+        normalize(client)
+        put_key(client, tid, "В")
+        put_key(client, tid, "Б")  # ключ уже есть: совпадение с кандидатом - не подтверждение
+        assert tuple(candidate_source(tmp_path, tid)) == ("parent", None)
+    client, _, tid = with_candidate(tmp_path / "b")
+    with client:
+        normalize(client)
+        put_key(client, tid, "Б")  # первый ключ равен кандидату: источник записан
+        assert candidate_source(tmp_path / "b", tid)["key_candidate_source"] == "page_model"
+        put_key(client, tid, "В")  # смена ключа стирает источник
+        assert candidate_source(tmp_path / "b", tid)["key_candidate_source"] is None
+
+
+def test_confirm_with_an_explicit_answer_records_the_candidate_source(tmp_path):
+    client, _, tid = with_candidate(tmp_path)
+    with client:
+        normalize(client)
+        r = client.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={"answer": "Б"})
+        assert r.status_code == 200, r.text
+        assert tuple(candidate_source(tmp_path, tid)) == ("parent", "page_model")
+
+
+def test_the_cache_follows_labels_and_type_but_not_option_texts(tmp_path):
+    client, model, tid = with_candidate(tmp_path)
+    with client:
+        normalize(client)
+        conn = db(tmp_path)
+        options = json.loads(conn.execute("SELECT options FROM task_item").fetchone()[0])
+        # (ii) изменился только текст варианта: модель не зовётся, кандидат остался.
+        renamed = [{**o, "text": o["text"] + " (правка)"} for o in options]
+        conn.execute("UPDATE task_item SET options = ?", (json.dumps(renamed, ensure_ascii=False),))
+        assert detail(client, tid)["key_candidate"]["answer"] == "Б"
+        assert normalize(client)["stored"] == 0 and len(model.norm_calls) == 1
+        # (i) изменились обозначения: итог относится к другим вариантам - его нет, модель зовётся.
+        relabelled = [{**o, "label": o["label"] + "2"} for o in options]
+        conn.execute(
+            "UPDATE task_item SET options = ?", (json.dumps(relabelled, ensure_ascii=False),)
+        )
+        assert detail(client, tid)["key_candidate"] is None
+        model.payload = {"status": "ok", "labels": ["Б2"]}
+        assert normalize(client)["stored"] == 1 and len(model.norm_calls) == 2
+        conn.close()
+
+
+def test_the_proposal_source_is_shown_by_its_label_on_the_figure_card(tmp_path):
+    client, by, _ = _published_figure_layout(tmp_path, candidate_task=True)
+    with client:
+        model = NormalizerModel(
+            lambda content: (
+                {"status": "ok", "labels": ["Б"]}
+                if "второй" in content
+                else {"status": "unparsable"}
+            )
+        )
+        model.split = client.model.split
+        client.app.state.model = model
+        normalize(client)
+        two = by["1.2"]
+        put_key(client, two, "Б")
+        card = detail(client, two)["card"]
+        assert card["kind"] == "needs_figure" and card["key_candidate_source"] == "page_model"
+        html = client.get(f"/parent/review/{two}", headers=PARENT).text
+        assert "предложен: модель по ответу на странице" in html
+        assert "предложен: page_model" not in html
+
+
+def test_a_decimal_comma_next_to_a_label_before_points_is_ambiguous():
+    got = fit("1, 3,5 балла", "multiple", DIGITS)
+    assert got.value is None and got.reason == "ambiguous"
+    assert fit("1, 3 (5 балла)", "multiple", DIGITS).value == ["1", "3"]
+    assert fit("1, 3, 5 баллов", "multiple", DIGITS).value == ["1", "3"]
+    assert fit("Б, 2,5 балла", "single", LETTERS).value == "Б"  # «2» - не обозначение
