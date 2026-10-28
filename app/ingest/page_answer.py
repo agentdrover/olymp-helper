@@ -51,7 +51,9 @@ NEEDS_UNIT = "needs_unit_context"
 UNITS = frozenset(["г", "мг", "кг", "мл", "л", "см", "мм", "м", "%", "шт"])
 AMBIGUOUS = "ambiguous"  # после числа ещё числа или второе значение
 _NUMBER_HEAD = re.compile(r"([+-]?\d+(?:[.,]\d+)?)\s*(.*)", re.DOTALL)
-_PLAIN = re.compile(r"[0-9A-Za-zА-Яа-яЁё\s,;.]*")
+# Знаки-оформление вокруг обозначений («(Б)», «1) 3)», ««А»») отбрасывались и раньше.
+_SEPARATORS = r"[\s,;.()\[\]«»\"']+"
+_PLAIN = re.compile(r"[0-9A-Za-zА-Яа-яЁё\s,;.()\[\]«»\"']*")
 _ITEM = re.compile(
     r"\s*(?P<a>\d{1,3}|[A-Za-zА-Яа-яЁё])(?P<gap>\s*[-–—:=>→.)]*\s*)(?P<b>\d{1,3}|[A-Za-zА-Яа-яЁё])"
     r"(?![0-9A-Za-zА-Яа-яЁё])\s*[;,]?"
@@ -189,13 +191,17 @@ def _fit_match(raw: str, options) -> tuple[object, str | None]:
     return build_value("match", options, pairs=pairs)
 
 
-_POINTS = re.compile(r"(?<=\S)[\s;,]+\d+\s+балл\w*\s*$", re.IGNORECASE)  # «… 10 баллов»
+_POINTS = re.compile(  # «… 10 баллов», «… (2 балла)»
+    r"(?<=\S)[\s;,]*(?:\(\s*\d+(?:[.,]\d+)?\s*балл\w*\s*\)|\d+(?:[.,]\d+)?\s+балл\w*)\s*$",
+    re.IGNORECASE,
+)
 _TRAILING_PARENS = re.compile(r"(?<=\S)((?:\s*\([^()]*\))+)\s*$")
 _GROUP = re.compile(r"\(([^()]*)\)")
 # Скобки после списка, которые можно отбросить: только баллы и «в любом порядке». Всё остальное
 # («или 2», «кроме 2») меняет ответ: такой ответ отказывается как неоднозначный.
 _ALLOWED_REMARK = re.compile(
-    r"\s*(?:[^()]*\bбалл\w*[^()]*|в\s+любом\s+порядке|любой\s+порядок)\s*", re.IGNORECASE
+    r"\s*(?:\d+(?:[.,]\d+)?\s*балл(?:а|ов)?|в\s+любом\s+порядке|любой\s+порядок)\s*",
+    re.IGNORECASE,
 )
 
 
@@ -204,7 +210,7 @@ def _letters(text: str, labels: set[str], task_type: str) -> tuple[list[str] | N
     каждый знак - обозначение (для цифр: все обозначения однозначные цифры) и без повторов."""
     out: list[str] = []
     single_digits = all(len(x) == 1 and x.isdigit() for x in labels)
-    for token in (t for t in re.split(r"[\s,;.]+", text) if t):
+    for token in (t for t in re.split(_SEPARATORS, text) if t):
         key = label_key(token)
         fused = task_type == "multiple" and (token.isalpha() or (token.isdigit() and single_digits))
         if key in labels:
@@ -212,7 +218,7 @@ def _letters(text: str, labels: set[str], task_type: str) -> tuple[list[str] | N
         elif fused:
             parts = [label_key(c) for c in token]
             if not all(p in labels for p in parts):
-                return None, FOREIGN_LABEL
+                return None, None  # не набор обозначений: возможно, тексты вариантов (_names)
             if len(set(parts)) != len(parts):
                 return None, CONFLICT
             out.extend(parts)
@@ -236,7 +242,7 @@ def _fit_choice(raw: str, task_type: str, options) -> tuple[object, str | None]:
         return None, UNPARSED
     if task_type == "multiple":  # «9, 9 (9 балл)»: пояснения после списка не обозначения
         tail = _TRAILING_PARENS.search(text)
-        if tail:
+        if tail and re.search(r"[0-9A-Za-zА-Яа-яЁё]", re.sub(r"\([^()]*\)", " ", text)):
             if not all(_ALLOWED_REMARK.fullmatch(g) for g in _GROUP.findall(tail.group(1))):
                 return None, AMBIGUOUS
             text = text[: tail.start()]

@@ -11,6 +11,7 @@ POST /parent/page-answers/normalize; чтение карточки модель 
 import json
 import threading
 
+from app.ingest.figure_service import recheck_materials_figures
 from app.ingest.keys import _uploaded_candidate
 from app.ingest.page_answer import (
     RULES_VERSION,
@@ -149,6 +150,7 @@ def normalize_task(ctx, conn, task) -> str:
 def normalize_pending(ctx, conn) -> dict:
     """Пакет: все задания, которым нужна модель. Дневной лимит кончился - остановка."""
     counts = {"stored": 0, "unparsable": 0, "rejected": 0, "error": 0, "skipped": 0}
+    changed: set[int] = set()
     for (task_id,) in conn.execute("SELECT id FROM task_item ORDER BY id").fetchall():
         task = get_task(conn, task_id)  # состояние на момент вызова, не снимок начала пакета
         if task is None or not needs_model(conn, task):
@@ -159,6 +161,13 @@ def normalize_pending(ctx, conn) -> dict:
             counts["limit"] = 1
             break
         counts[outcome] += 1
+        if outcome == "stored":
+            changed.add(task["material_id"])
+    # Новый кандидат входит в защиту от утечки в вырезках: подтверждённые рисунки материала
+    # проверяются заново. Один раз на материал, после записей (транзакции закрыты).
+    changed.discard(None)
+    if changed:
+        recheck_materials_figures(ctx, conn, changed)
     return counts
 
 

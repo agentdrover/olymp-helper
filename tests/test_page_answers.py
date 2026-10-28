@@ -10,6 +10,7 @@ from app.ingest.keys import page_candidate
 from app.ingest.page_answer import build_value, check_answer, fit_page
 from app.model.types import ModelResult
 from tests.bank_helpers import (
+    CHILD,
     PARENT,
     StubModel,
     build_app,
@@ -280,7 +281,14 @@ def set_row(tmp_path, tid, **cols):
 def test_only_listed_remarks_after_the_list_are_dropped():
     assert fit("1, 3 (любой порядок)", "multiple", DIGITS).value == ["1", "3"]
     assert fit("1, 3 (в любом порядке) (2 балла)", "multiple", DIGITS).value == ["1", "3"]
-    for raw in ("1 (или 2)", "1, 2 (кроме 2)", "1, 3 (2 балла) (или 5)"):
+    for raw in (
+        "1 (или 2)",
+        "1, 2 (кроме 2)",
+        "1, 3 (2 балла) (или 5)",
+        "1, 2 (кроме 2; 1 балл)",  # «балл» внутри не делает пояснение допустимым
+        "1 (или 2 за 1 балл)",
+        "1, 2 (3)",
+    ):
         got = fit(raw, "multiple", DIGITS)
         assert got.value is None and got.reason == "ambiguous", raw
 
@@ -438,3 +446,73 @@ def test_the_lock_is_released_when_the_background_connection_fails(tmp_path, mon
                 break
             time.sleep(0.05)
         assert stored(tmp_path, tid) is not None
+
+
+NAMED = [{"label": "1", "text": "клетка"}, {"label": "2", "text": "ткань"}]
+
+
+def test_forms_main_accepted_stay_accepted_and_legacy():
+    """Прежний разбор принимал эти формы: кандидат остаётся как был (не unverified)."""
+    for raw, kind, options, want in (
+        ("клетка, ткань", "multiple", NAMED, ["1", "2"]),  # тексты вариантов
+        ("Ткань", "single", NAMED, "2"),
+        ("(Б)", "single", LETTERS, "Б"),
+        ("(А), (В)", "multiple", LETTERS, ["А", "В"]),
+        ("А) В)", "multiple", LETTERS, ["А", "В"]),
+        ("1-А, 2-Б (2 балла)", "match", MATCH, {"1": "А", "2": "Б"}),
+    ):
+        got = fit(raw, kind, options)
+        assert got.value == want and got.extended is False, raw
+
+
+def test_published_figure_is_withdrawn_when_a_normalised_answer_shows_in_its_frame(tmp_path):
+    from tests.test_layout import good_tasks, import_layout
+
+    tasks = good_tasks()
+    tasks[2]["answer_text"] = "двадцать восемь"  # «28» напечатано в ячейке страницы 2
+    with import_layout(tmp_path, tasks) as client:
+        by = {}
+        for t in _tasks(tmp_path):  # номера повторяются в разделах: берём первый раздел
+            by.setdefault(t["source_number"], t["id"])
+        two, three = by["1.2"], by["1.3"]
+        cell = [150, 510, 400, 536]
+        r = client.post(f"/parent/tasks/{two}/key", headers=PARENT, json={"answer": "Б"})
+        assert r.status_code == 200
+        r = client.post(
+            f"/parent/tasks/{two}/figure",
+            headers=PARENT,
+            json={
+                "alt": "Фотографии животных в таблице",
+                "teacher_note": "1 2 3 4 5",
+                "no_answer_ack": True,
+                "teacher_note_ack": True,
+                "rect": cell,
+                "page": 2,
+            },
+        )
+        assert r.status_code == 200, r.text
+        r = client.post(f"/parent/tasks/{two}/confirm", headers=PARENT, json={})
+        assert r.status_code == 200, r.text
+        child = {t["id"] for t in client.get("/api/tasks", headers=CHILD).json()["tasks"]}
+        assert two in child
+        model = NormalizerModel(
+            lambda content: (
+                {"status": "ok", "number": "28"}
+                if "двадцать" in content
+                else {"status": "unparsable"}
+            )
+        )
+        model.split = client.model.split
+        client.app.state.model = model
+        assert normalize(client)["stored"] == 1
+        assert detail(client, three)["key_candidate"]["answer"] == "28"
+        child = {t["id"] for t in client.get("/api/tasks", headers=CHILD).json()["tasks"]}
+        assert two not in child  # публикация снята после пакета
+
+
+def _tasks(tmp_path):
+    conn = db(tmp_path)
+    try:
+        return conn.execute("SELECT id, source_number FROM task_item").fetchall()
+    finally:
+        conn.close()
