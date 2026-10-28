@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from app import exam
 from app.ingest import packs, review
 from app.ingest.figure_card import area_context, mode_for
 from app.ingest.figure_service import confirm_figure, preview_png, preview_tile_png
@@ -29,7 +30,7 @@ from app.ingest.store import figure_of, get_task, open_db
 from app.ingest.tiles import stored_tiles
 from app.ingest.topics import load_catalog
 from app.notice import notice_redirect, notice_seen
-from app.roles import PARENT, csrf_token, current_role, require_csrf, require_parent
+from app.roles import PARENT, csrf_token, current_role, now_of, require_csrf, require_parent
 from app.search import search
 from app.search.tasks import search_published_tasks
 from app.tutor import catalog
@@ -806,11 +807,13 @@ def tasks_page(
     if current_role(request) != PARENT and not notice_seen(conn):
         return notice_redirect("/tasks")
     theme = theme or block
-    blocks = catalog.build_blocks(conn)
     params = {"q": q, "theme": theme, "type": type, "source": source, "variant": variant,
               "status": status}  # fmt: skip
     active = any(v.strip() for v in params.values())
-    found = catalog.filter_tasks(conn, **params)
+    exam.expire_due(conn, now_of(request))  # запись - до снимка чтения
+    blocks, found = exam.stable(  # замок олимпиады и данные карты - из одного состояния базы
+        conn, lambda _hidden: (catalog.build_blocks(conn), catalog.filter_tasks(conn, **params))
+    )
     current = next((b for b in blocks if str(b["pos"]) == theme), None)
     return TEMPLATES.TemplateResponse(
         request,

@@ -51,6 +51,16 @@ PUBLIC = {
     ("GET", "/api/my/sessions/{session_id}"),
     ("POST", "/session/finish"),
     ("POST", "/my/sessions/{session_id}/show-parent"),
+    # имитация олимпиады (OH-K3a): страницы и JSON ребёнка за уведомлением, POST - свой источник
+    ("GET", "/exam"),
+    ("GET", "/exam/run"),
+    ("GET", "/exam/figure/{position}.png"),
+    ("GET", "/exam/results/{attempt_id}"),
+    ("GET", "/api/exam"),
+    ("GET", "/api/exam/current"),
+    ("GET", "/api/exam/results/{attempt_id}"),
+    ("POST", "/exam/start"),
+    ("POST", "/exam/act"),
 }
 FRAMEWORK = {"/static"}  # the API description is switched off: no /docs, /redoc, /openapi.json
 

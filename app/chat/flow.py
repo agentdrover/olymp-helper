@@ -83,6 +83,7 @@ class ChatFlow(Flow):
         except Exception:  # noqa: BLE001 - модель любого вида: ребёнку «не отвечает»
             self.panel_state = "down"
             return None
+        self._exam_check(task)
         if not getattr(result, "ok", False):
             self.panel_state = failure_state(result)
             return None
@@ -198,6 +199,7 @@ class ChatFlow(Flow):
             "visible": visible,
             "withheld": reason,
         }
+        self._exam_check(task)
         with atomic(self.conn):
             steps.hold(self.conn, self.step_id)  # опоздавший шаг ничего не публикует
             state.add_event(self.conn, self.now, "chat", task["id"], data)

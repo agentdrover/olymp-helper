@@ -12,6 +12,8 @@ from app import auth, privacy
 from app.account_web import parent as account_parent
 from app.account_web import public as account_public
 from app.db import connect, migrate, schema_version
+from app.exam_web import child as exam_child
+from app.exam_web import parent as exam_parent
 from app.ingest.context import AppContext, ExecutorModel
 from app.ingest.jobs import ImportJobs
 from app.ingest.limits import IMPORT_MAX_BASE_S, IMPORT_MAX_PER_CHUNK_S, IMPORT_STALL_S
@@ -25,6 +27,7 @@ from app.summary_web import child as summary_child
 from app.summary_web import parent as summary_parent
 from app.tutor.panel import Inflight
 from app.tutor.steps import StepRunner
+from app.tutor.web import ExamBusy
 from app.tutor.web import router as tutor_router
 from app.voice.service import VoiceService
 from app.voice.web import router as voice_router
@@ -116,6 +119,7 @@ def create_app(
         title="olymp-helper", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
     app.state.clock = clock
+    app.add_exception_handler(ExamBusy, lambda request, exc: exc.response)
     app.state.model = model or ExecutorModel(path)
     # Часы одни на всё приложение (clock выше): тест подменяет их, и 60 секунд до подсказки,
     # простой занятия и сессия родителя идут по одному времени.
@@ -145,6 +149,8 @@ def create_app(
     app.include_router(account_public)
     app.include_router(parent_router)
     app.include_router(tutor_router)
+    app.include_router(exam_child)
+    app.include_router(exam_parent)
     app.include_router(summary_child)
     app.include_router(summary_parent)
     app.include_router(voice_router)

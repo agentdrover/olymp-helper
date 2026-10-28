@@ -1,0 +1,111 @@
+{% extends "base_child.html" %}
+{% block title %}Олимпиада{% endblock %}
+{% block content %}
+{# Бланк без фоновых запросов: каждое действие - обычная отправка формы (POST) и 303 на эту страницу. #}
+<header>
+  <div class="kicker">{{ v.title }} · {{ v.stage }} этап</div>
+  <h1>Олимпиада: осталось <span id="exam-left" data-deadline="{{ v.deadline_at }}" data-now="{{ v.server_now }}">…</span></h1>
+</header>
+{% if message %}<p class="err" role="alert">{{ message }}</p>{% endif %}
+{% if lost %}<p class="notice">Введённое тобой (не сохранено): {{ lost }}</p>{% endif %}
+<form method="post" action="/exam/act" id="exam-form">
+  <input type="hidden" name="attempt_id" value="{{ v.id }}">
+  <input type="hidden" name="rev" value="{{ v.rev }}">
+  <input type="hidden" name="shown" value="{{ item.position }}">
+  <input type="hidden" name="action_id" value="{{ action_id }}">
+  {# Первая кнопка отправки - «сохранить»: Enter в поле не должен открывать другое задание. #}
+  <button type="submit" name="action" value="save" class="visually-hidden" tabindex="-1">Сохранить ответ</button>
+  <nav aria-label="Задания варианта">
+  {% for x in v["items"] %}
+    <button type="submit" name="action" value="open:{{ x.position }}"{% if x.position == item.position %} aria-current="true"{% endif %}>{{ x.position }}{% if x.answer is not none and x.answer != "" and x.answer != [] and x.answer != {} %} ✓{% endif %}{% if x.marked %} ⚑{% endif %}</button>
+  {% endfor %}
+  </nav>
+  <section class="card">
+    <input type="hidden" name="answer_present" value="{{ item.position }}">
+    <p>{{ item.text }}</p>
+    {% if item.figure %}<img src="{{ item.figure.url }}" alt="{{ item.figure.alt }}">{% endif %}
+    {% if item.type in ("single", "multiple") %}
+      {% for o in item.options %}
+      <label><input type="{{ 'radio' if item.type == 'single' else 'checkbox' }}" name="a" value="{{ o.token }}"{% if o.token in fill.a %} checked{% endif %}> {{ o.label }}) {{ o.text }}</label><br>
+      {% endfor %}
+    {% elif item.type == "match" %}
+      {% for l in item.options.left %}
+      <p>{{ l.label }}) {{ l.text }} → <select name="m.{{ l.token }}"><option value="">—</option>
+        {% for r in item.options.right %}<option value="{{ r.token }}"{% if fill.m[l.token] == r.token %} selected{% endif %}>{{ r.label }}) {{ r.text }}</option>{% endfor %}
+      </select></p>
+      {% endfor %}
+    {% else %}
+      <label>Число <input name="n" inputmode="decimal" value="{{ fill.n }}"></label>
+    {% endif %}
+    <p><button class="btn" type="submit" name="action" value="save">Сохранить ответ</button></p>
+  </section>
+  <p><button class="btn" type="submit" name="action" value="mark">{{ "Снять «вернусь»" if item.marked else "Вернусь" }}</button>
+     <button class="btn primary" type="submit" name="action" value="submit" id="exam-submit">Сдать вариант</button></p>
+</form>
+<script>
+// Только отображение. Срок решает сервер; бланк не перезагружается, пока идёт ввод.
+// Счёт от серверного срока (ceil: нуль только когда срок наступил). За ~1,5 с до срока бланк один
+// раз отправляет форму действием save тем же POST /exam/act и сразу закрывается: поля и кнопки
+// выключены, любая отправка отменяется. Ответ ничего не меняет в форме (ревизию из него не берём),
+// отложенных действий нет: старые данные уйти не могут. Страница, открытая уже в этом окне,
+// закрыта с первой секунды (автосохранение ей не нужно: данные только что пришли с сервера).
+// После срока - переход на страницу итога.
+const left = document.getElementById("exam-left"), form = document.getElementById("exam-form");
+const offset = new Date(left.dataset.now) - Date.now();
+const remaining = () => new Date(left.dataset.deadline) - (Date.now() + offset);
+const lock = () => form.querySelectorAll("button, input:not([type=hidden]), select, input[name=answer_present]").forEach(x => { x.disabled = true; });
+const say = (text, role) => {
+  const note = document.createElement("p");
+  note.className = role === "alert" ? "err" : "notice"; note.setAttribute("role", role);
+  note.textContent = text;
+  form.before(note);
+};
+// Единственный путь закрытия бланка (тик, submit, click, открытие страницы). Порядок строгий:
+// форма собирается ДО lock() (выключенные поля в неё не попадают), затем lock(), затем отправка.
+// Поля нигде больше не выключаются, кроме lock() здесь и после обычной отправки формы.
+let closed = false, sent = false;  // sent: форма уже ушла обычной отправкой, автосохранять нечего
+const closeBlank = () => {
+  if (closed) return;
+  closed = true;
+  let data = null;
+  if (!opened && !sent && remaining() > 0) {
+    data = new FormData(form);
+    data.set("action", "save");
+    data.set("action_id", "auto-" + Math.random().toString(36).slice(2));
+  }
+  lock();
+  if (!data) return;  // страница открыта в окне или срок вышел: сохранять нечего
+  fetch("/exam/act", {method: "POST", body: data, keepalive: true}).then(r => {
+    // Успех - только редирект на бланк; 409, редирект на итог (запрос пришёл после срока)
+    // и любой другой ответ: последнее могло не сохраниться.
+    if (r.ok && r.redirected && new URL(r.url).pathname === "/exam/run") say("Ответы сохранены", "status");
+    else say("Последние изменения могли не сохраниться", "alert");
+  }).catch(() => say("Последние изменения могли не сохраниться", "alert"));
+};
+// Закрыт ли бланк: сравниваем срок с часами, а не только флаг (тик может ещё не прийти).
+const isClosed = () => { if (remaining() <= 1500) closeBlank(); return closed; };
+const opened = remaining() <= 1500;  // страница открыта уже внутри окна
+if (opened) closeBlank();
+setInterval(() => {
+  const ms = remaining();
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  left.textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  if (ms <= 1500) closeBlank();
+  if (ms <= 0) location.href = "/exam/results/{{ v.id }}";
+}, 250);
+form.addEventListener("submit", e => {
+  // Закрытый бланк ничего не отправляет.
+  if (isClosed()) { e.preventDefault(); e.stopImmediatePropagation(); }
+});
+form.addEventListener("click", e => {
+  if (isClosed()) { e.preventDefault(); return; }
+  if (e.target.id === "exam-submit" && !confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) e.preventDefault();
+});
+form.addEventListener("submit", () => {
+  // Поля блокируются после того, как браузер собрал форму (выключенная кнопка не отправляется).
+  sent = true;
+  setTimeout(lock, 0);
+});
+window.addEventListener("pageshow", e => { if (e.persisted) location.reload(); });
+</script>
+{% endblock %}
