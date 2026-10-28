@@ -33,8 +33,9 @@ LABELS = {
 class Refusal(Exception):
     """Действие отклонено; message читает родитель."""
 
-    def __init__(self, message: str, status: int = 422):
+    def __init__(self, message: str, status: int = 422, extra: dict | None = None):
         super().__init__(message)
+        self.extra = extra or {}
         self.message = message
         self.status = status
 

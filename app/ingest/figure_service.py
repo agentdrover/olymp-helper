@@ -283,8 +283,9 @@ def confirm_figure(
         edited = edited_page(figure, rect=rect, rect_px=rect_px, page=page)
         plan, lefts = tile_plan(doc, task, figure, regions, edited, state)
         shown_ids = {t["id"] for t in plan["tiles"]}
-        if leak_ack and leak_digest_ack not in (None, leak_digest(regions, plan)):
-            leak_ack = False  # отметка была для другой рамки или других плиток
+        digest_now = leak_digest(regions, plan)
+        if leak_ack and leak_digest_ack != digest_now:
+            leak_ack = False  # слепка нет или он для другой рамки или других плиток
         if state is None:  # клиент плиток не показывал: сохраняется только то, что видел родитель
             plan, shown_ids = {"tiles": [], "order": []}, set()
         elif {t["id"] for t in state} != shown_ids:
@@ -306,7 +307,8 @@ def confirm_figure(
         if found and not leak_ack:
             raise Refusal(
                 "В вырезке напечатан текст ответа или вариантов: «" + "», «".join(found) + "». "
-                "Сдвиньте рамку или подтвердите явно, что так и надо."
+                "Сдвиньте рамку или подтвердите явно, что так и надо.",
+                extra={"leak_digest": digest_now},
             )
         figure.update(
             rect=regions[0]["rect"],

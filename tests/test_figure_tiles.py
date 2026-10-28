@@ -244,6 +244,16 @@ def stored_figure(tmp_path, tid):
     return json.loads(row(tmp_path, tid)["figure"])
 
 
+def digest_for(c, tid, **params):
+    url = f"/parent/tasks/{tid}/figure-tiles"
+    found = re.search(
+        r'data-leak-digest="(\w+)"',
+        c.get(url, params=tiles_params(**params), headers=PARENT).text,
+    )
+    assert found
+    return found.group(1)
+
+
 def test_card_v2_layout_and_readiness(tmp_path):
     pdf = grid_pdf(captions=False, text_in={2: "лишайник"})
     c, tid = boot(tmp_path / "a", pdf)
@@ -303,7 +313,7 @@ def test_card_v2_layout_and_readiness(tmp_path):
             ok = c2.post(
                 f"/parent/tasks/{tid2}/figure",
                 headers=PARENT,
-                json=figure_body(card2, leak_ack=True),
+                json=figure_body(card2, leak_ack=True, leak_digest=digest_for(c2, tid2)),
             )
             assert ok.status_code == 200, ok.text
             # правка рамки после подтверждения снова упирается в ту же проверку
@@ -821,6 +831,19 @@ def test_leak_ack_is_bound_to_the_frame_and_tiles_it_was_given_for(tmp_path):
         )
         assert fresh.status_code == 200, fresh.text
         assert stored_figure(tmp_path, tid)["leak_ack"] is True
+
+
+def test_leak_ack_without_a_digest_is_ignored(tmp_path):
+    c, tid = boot(tmp_path, pdf_with_option_word(tmp_path))
+    with c:
+        card = card_of(c, tid)
+        set_key(c, tid)
+        bare = c.post(
+            f"/parent/tasks/{tid}/figure", headers=PARENT, json=figure_body(card, leak_ack=True)
+        )
+        assert bare.status_code == 422 and "миксина" in bare.json()["error"]
+        assert bare.json()["leak_digest"] == digest_for(c, tid)  # отказ сам называет слепок
+        assert stored_figure(tmp_path, tid)["confirmed"] is False
 
 
 def test_empty_tile_state_still_binds_tiles_by_default(tmp_path):

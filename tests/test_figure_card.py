@@ -20,6 +20,7 @@ from tests.bank_helpers import (
     doc_bytes,
     figure_pdf,
     make_task,
+    post_figure_acked,
     reply,
     row,
     task_ids,
@@ -69,7 +70,7 @@ def fragment(c, tid):
 def post_figure(c, tid, **kw):
     body = {"alt": "Части объекта обозначены цифрами", "no_answer_ack": True}
     body.update(kw)
-    return c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=body)
+    return post_figure_acked(c, tid, body)
 
 
 def test_reported_leak_cause_is_caught(tmp_path):

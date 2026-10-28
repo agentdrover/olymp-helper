@@ -80,7 +80,7 @@ def child_notice_gate(request: Request, conn: Db) -> None:
 
 
 def _refusal(exc: Refusal) -> JSONResponse:
-    return JSONResponse({"error": exc.message}, status_code=exc.status)
+    return JSONResponse({**exc.extra, "error": exc.message}, status_code=exc.status)
 
 
 # ------------------------------------------------------------------------- вход
@@ -494,7 +494,7 @@ class FigureBody(BaseModel):
     no_answer_ack: bool = False
     teacher_note_ack: bool = False
     leak_ack: bool = False  # явное решение: текст ответа в вырезке оставлен намеренно
-    leak_digest: str | None = None  # слепок рамки и плиток, для которых родитель поставил отметку
+    leak_digest: str | None = None  # слепок рамки и плиток отметки; без него leak_ack не действует
     tiles: list[TileBody] | None = None  # плитки в порядке показа и их привязка к номерам
 
 
