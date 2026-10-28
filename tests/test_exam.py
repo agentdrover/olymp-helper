@@ -1224,3 +1224,13 @@ def test_page_stays_valid_after_its_own_autosave(tmp_path):
         assert act(c2, "submit", tab, a="А").status_code == 409
     page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
     assert 'form.elements["rev"].value' in page and '"auto-"' in page
+
+
+def test_action_pressed_during_autosave_waits_for_its_reply():
+    page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
+    script = page[page.index("<script>") :]
+    assert "inflight = true" in script and "if (inflight) { e.preventDefault()" in script
+    assert "pending = e.submitter" in script and "form.requestSubmit(btn)" in script
+    assert ".finally(finish)" in script
+    # после срока отложенное действие уходит на итог, а не на форму
+    assert script.index("<= 0) location.href") < script.index("form.requestSubmit(btn)")

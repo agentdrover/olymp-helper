@@ -47,7 +47,7 @@
 // После срока - переход на страницу итога, без reload с потерей ввода.
 const left = document.getElementById("exam-left"), form = document.getElementById("exam-form");
 const offset = new Date(left.dataset.now) - Date.now();
-let autosaved = false;
+let autosaved = false, inflight = false, pending = null;
 setInterval(() => {
   const ms = new Date(left.dataset.deadline) - (Date.now() + offset);
   const s = Math.max(0, Math.ceil(ms / 1000));
@@ -58,13 +58,26 @@ setInterval(() => {
     data.set("action", "save");
     data.set("action_id", "auto-" + Math.random().toString(36).slice(2));
     // Автосохранение продвигает ревизию: страница берёт новую из ответа и остаётся действующей.
+    inflight = true;
+    const finish = () => {
+      inflight = false;
+      if (!pending) return;
+      const btn = pending; pending = null;
+      // Нажатое во время автосохранения выполняется после ответа, с новой ревизией; после срока - итог.
+      if (new Date(left.dataset.deadline) - (Date.now() + offset) <= 0) location.href = "/exam/results/{{ v.id }}";
+      else form.requestSubmit(btn);
+    };
     fetch("/exam/act", {method: "POST", body: data, keepalive: true}).then(r => r.text()).then(t => {
       const rev = new DOMParser().parseFromString(t, "text/html").querySelector('input[name="rev"]');
       if (rev) form.elements["rev"].value = rev.value;
-    }).catch(() => {});
+    }).catch(() => {}).finally(finish);
   }
   if (ms <= 0) location.href = "/exam/results/{{ v.id }}";
 }, 250);
+form.addEventListener("submit", e => {
+  // Пока автосохранение в пути, действие ждёт его ответа (новая ревизия), а не теряется.
+  if (inflight) { e.preventDefault(); e.stopImmediatePropagation(); pending = e.submitter; }
+});
 form.addEventListener("click", e => {
   if (e.target.id === "exam-submit" && !confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) e.preventDefault();
 });
