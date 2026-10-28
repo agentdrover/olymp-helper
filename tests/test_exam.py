@@ -1253,6 +1253,9 @@ def test_action_without_the_answer_marker_keeps_the_saved_answer(tmp_path):
         # без метки (поля выключены, форма собрана вручную) ответ не меняется, остальное действие идёт
         assert act(c, "save", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
         assert act(c, "mark", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
+        assert current(c)[1]["items"][0]["marked"] is True  # «Вернусь» без метки всё же ставится
+        assert act(c, "mark", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
+        assert current(c)[1]["items"][0]["marked"] is False
         assert act(c, "open:2", _bare(c)).status_code == 303 and _answer(tmp_path) == '"Б"'
         assert current(c)[1]["items"][1]["position"] == 2
         assert act(c, "open:1", _bare(c)).status_code == 303
@@ -1316,6 +1319,7 @@ _AUTOSAVE_SCENARIOS = [
     "submit_handler_alone_checks_the_deadline",
     "click_handler_alone_checks_the_deadline",
     "pageshow_from_cache_reloads",
+    "submit_button_asks_for_confirmation",
 ]
 
 

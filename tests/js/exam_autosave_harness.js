@@ -73,7 +73,7 @@ function build(reply, opts = {}) {
   const ctx = {
     document, fetch, URL, FormData: FakeFormData, Date: FakeDate, Math, String, Promise, console,
     setInterval: (fn) => { tick = fn; }, setTimeout: (fn) => { timers.push(fn); }, location: loc,
-    confirm: () => { confirms++; return true; }, window: { addEventListener(t, fn) { win[t] = fn; } },
+    confirm: () => { confirms++; return !opts.decline; }, window: { addEventListener(t, fn) { win[t] = fn; } },
   };
   vm.runInNewContext(SRC, ctx);
   const at = (msLeft) => { clock.t = DEADLINE - msLeft; tick(); };
@@ -224,6 +224,15 @@ const scenarios = {
     if (p.reloads()) fail("перезагрузка без bfcache");
     p.pageshow(true);
     if (p.reloads() !== 1) fail("страница из bfcache не перезагружена");
+  },
+  async submit_button_asks_for_confirmation() {
+    const p = build(ok());
+    if (!p.press(p.controls.submit)) fail("«Сдать» вне окна не прошла");
+    if (p.confirms() !== 1) fail("подтверждений " + p.confirms());
+    const q = build(ok(), { decline: true });
+    if (q.press(q.controls.submit)) fail("«Сдать» ушла без согласия");
+    if (q.confirms() !== 1) fail("подтверждений " + q.confirms());
+    if (!q.press(q.controls.mark) || q.confirms() !== 1) fail("лишнее подтверждение у другой кнопки");
   },
   async deadline_goes_to_results() {
     const p = build(ok());
