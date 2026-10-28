@@ -84,21 +84,29 @@ _FENCE = re.compile(r"```(?:json)?[ \t]*\n?(.*?)```", re.DOTALL)
 
 
 def _extract_json(text: str):
-    """JSON из ответа со вступлением: последний блок кода, иначе первый разбираемый {...}."""
-    for block in reversed(_FENCE.findall(text)):
+    """JSON из ответа со вступлением. Объект должен быть ровно один: блоки кода и объекты вне их
+    считаются вместе (вложенные не считаются). Два и больше - неоднозначность: ChannelError,
+    а не выбор (иначе пример перед итогом обходит судью)."""
+    found = []
+    for block in _FENCE.findall(text):
         try:
-            return json.loads(block.strip())
+            found.append(json.loads(block.strip()))
         except ValueError:
             continue
     decoder = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch == "{":
-            try:
-                obj, _ = decoder.raw_decode(text, i)
-            except ValueError:
-                continue
-            return obj
-    return _NOTHING
+    rest = _FENCE.sub(" ", text)
+    i = 0
+    while (i := rest.find("{", i)) != -1:
+        try:
+            obj, end = decoder.raw_decode(rest, i)
+        except ValueError:
+            i += 1
+            continue
+        found.append(obj)
+        i = end  # вложенные объекты внутри найденного не считаются
+    if len(found) > 1:
+        raise ChannelError("bad_schema_json")
+    return found[0] if found else _NOTHING
 
 
 def _result_event(stdout: str):

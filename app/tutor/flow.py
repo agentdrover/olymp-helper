@@ -433,7 +433,8 @@ class Flow:
             elif verdict[0]:
                 reason = "judge"
         if reason:
-            self.notice = "Объяснение не получилось, попробуй другой способ."
+            if self.notice != LONG_TALK:  # «слишком длинный разговор» точнее и не перезаписывается
+                self.notice = "Объяснение не получилось, попробуй другой способ."
             return
         state.add_explain(
             self.conn, run["id"], mode, label, html, out.uncertainty, self.now, self.step_id

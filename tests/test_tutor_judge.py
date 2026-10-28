@@ -4,8 +4,10 @@ import json
 import threading
 
 from app.db import connect, migrate
+from app.model.adapters import parse_cli_json
 from app.model.service import LIMIT_MESSAGE, ModelService
-from app.model.types import ModelResult
+from app.model.types import ChannelError, ModelResult
+from app.tutor.flow import LONG_TALK
 from app.tutor.guard import GENERIC
 from tests.tutor_helpers import Blocking, Judged, attempt, boot, events, out, post, seed, view
 
@@ -386,3 +388,36 @@ def test_without_a_key_an_unavailable_judge_withholds_the_explanation(tmp_path):
         attempt(c, tid, "Б")
         got = post(c, tid, "explain", mode="simpler").json()
     assert got["explains"] == [] and "не получилось" in got["notice"]
+
+
+TWO_OBJECTS = (
+    'Пример: {"reveals": false, "reason": "пример"} ... '
+    'Итог: {"reveals": true, "reason": "раскрывает ответ"}'
+)
+
+
+def judge_through_the_parser(content):
+    """Ответ судьи идёт через настоящий разбор CLI, как в бою: ошибка разбора - сбой канала."""
+    stdout = json.dumps({"type": "result", "result": TWO_OBJECTS})
+    try:
+        return parse_cli_json(stdout, {"type": "object"}).json
+    except ChannelError as exc:
+        return ModelResult.failure("cursor", "stub", exc.kind)
+
+
+def test_an_ambiguous_judge_answer_never_lets_a_leaking_hint_through(tmp_path):
+    leak = "Подумай про энергетическую станцию клетки"
+    hint, _model = run_hint(tmp_path, leak, judge_through_the_parser)
+    html = json.dumps([h["html"] for h in hint["hints_list"]], ensure_ascii=False)
+    assert GENERIC["hint1"] in html and leak not in html
+
+
+def test_a_too_large_judge_request_keeps_the_long_talk_notice_on_explain(tmp_path):
+    big = lambda content: ModelResult.failure("cursor", "stub", "request_too_large")
+    model = Judged(judge=big, reply=lambda kind, content: out("Б", "Это важный механизм."))
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key=None, model_answer="Б", options=OPTS, text=COND)
+        assert attempt(c, tid, "Б").json()["state"] == "solved_unknown"
+        got = post(c, tid, "explain", mode="simpler").json()
+    assert got["explains"] == [] and got["notice"] == LONG_TALK
