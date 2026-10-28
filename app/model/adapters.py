@@ -132,10 +132,16 @@ def _extract_json(text: str):
 
 
 def _strict_json(text: str):
-    """Строгий режим (судья): весь ответ - один объект либо один блок кода с любым тегом."""
+    """Строгий режим (судья): вступление без скобок { } [ ], затем ровно один объект или один
+    блок кода с любым тегом, затем только пробелы. Пример-объект во вступлении невозможен:
+    скобка во вступлении - ошибка."""
     text = text.strip()
-    candidates = [text]
-    fenced = re.fullmatch(r"```(.*)```", text, re.DOTALL)
+    cut = min((i for i in (text.find(c) for c in "{}[]") if i != -1), default=len(text))
+    fence = text.find("```")
+    start = fence if 0 <= fence < cut else cut
+    rest = text[start:]
+    candidates = [rest]
+    fenced = re.fullmatch(r"```(.*)```", rest, re.DOTALL)
     if fenced:
         body = fenced.group(1).strip()
         candidates = [body]

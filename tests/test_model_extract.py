@@ -109,10 +109,13 @@ def test_honest_preambles_still_parse():
     "text",
     [
         EX + LEAK,
-        "Вот ответ: " + LEAK,
         LEAK + "\nпоправка",
         EX + "```JSON\n" + LEAK + "\n```",
-        "Сначала думаю.\n```json\n" + LEAK + "\n```",
+        "Пример [1] и " + LEAK,
+        "Формат } затем " + LEAK,
+        "Вот вердикт:\n```json\n" + LEAK + "\n```\nА ещё " + LEAK,
+        "Вот вердикт:\n" + LEAK + "\nи ещё слова",
+        "Вот вердикт:\n```json\n" + LEAK + "\n```\nготово",
     ],
 )
 def test_strict_mode_rejects_anything_but_one_object(text):
@@ -141,3 +144,16 @@ def test_the_tutor_judge_schema_is_strict():
 def test_lenient_mode_takes_one_fenced_object_with_any_tag(tag):
     text = INTRO + f'```{tag}\n{{"a": 9}}\n```'
     assert parse_cli_json(out(text), SCHEMA).json == {"a": 9}
+
+
+VERDICT = {"reveals": False, "reason": "нет признаков"}
+
+
+def test_strict_mode_takes_a_brace_free_preamble_before_one_object_or_fence():
+    body = json.dumps(VERDICT, ensure_ascii=False)
+    for text in (
+        "Вот вердикт:\n" + body,
+        "Вот вердикт:\n```json\n" + body + "\n```\n",
+        "Сначала посмотрю на текст.\n\n```JSON\n" + body + "\n```",
+    ):
+        assert parse_cli_json(out(text), JUDGE).json == VERDICT

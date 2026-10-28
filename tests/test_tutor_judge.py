@@ -412,7 +412,7 @@ JUDGE_ANSWERS = {
     '```JSON\n{"reveals": true, "reason": "раскрывает"}\n```',
     "broken_outer": 'Итог: {"reveals": true, "reason": "r", "d": {"reveals": false, '
     '"reason": "ok"},}',
-    "preamble_single": 'Вот вердикт: {"reveals": false, "reason": "нет"}',
+    "after_object": 'Вот вердикт: {"reveals": true, "reason": "r"} и ещё {"reveals": false, "reason": "x"}',
 }
 
 
