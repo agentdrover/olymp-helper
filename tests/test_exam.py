@@ -1136,3 +1136,35 @@ def test_blank_view_is_rechecked_after_assembly(tmp_path, monkeypatch):
         code, view = current(c)
         assert fired and code == 200 and view["id"] != a
         assert all(i["answer"] is None for i in view["items"])
+
+
+def test_submit_and_navigation_use_the_field_as_it_is_at_send_time(tmp_path):
+    """Правило бланка: одно действие = одна отправка формы; поле читается в момент отправки и
+    сохраняется первым; отказ не теряет ввод и не двигает интервал просмотра."""
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        views = lambda: (
+            db(tmp_path).execute("SELECT position, closed_at FROM exam_view ORDER BY id").fetchall()
+        )
+        # правка и сразу сдача: ответ из поля в момент отправки сохранён и оценён
+        at(c, 1, "save", a=["А"])
+        done_form = form_of(c)
+        r = act(c, "submit", done_form, a=["Б"])
+        assert r.status_code == 303 and "/exam/results/" in r.headers["location"]
+        done = c.get("/api" + r.headers["location"], headers=CHILD).json()
+        assert {i["position"]: i["points"] for i in done["items"]}[1] > 0
+        # новое прохождение: отказ перехода (невалидное число) не трогает интервал и позицию
+        start_real(c)
+        at(c, 4, "save", n="5")
+        before, rev = views(), form_of(c)["rev"]
+        bad = act(c, "open:1", n="двадцать")
+        assert bad.status_code == 422 and 'value="двадцать"' in bad.text
+        assert views() == before and form_of(c)["rev"] == rev
+        assert form_of(c)["shown"] == "4"
+        # правка во второй вкладке (старая ревизия) тоже не сдвигает интервал и показывает ввод
+        stale = act(c, "open:2", {**form_of(c), "rev": str(int(rev) - 1)}, n="7")
+        assert stale.status_code == 409 and "не сохранён" in stale.text
+        assert views() == before
