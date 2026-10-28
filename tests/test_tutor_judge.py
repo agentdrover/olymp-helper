@@ -9,6 +9,7 @@ from app.model.service import LIMIT_MESSAGE, ModelService
 from app.model.types import ChannelError, ModelResult
 from app.tutor.flow import LONG_TALK
 from app.tutor.guard import GENERIC
+from app.tutor.prompts import JUDGE_SCHEMA
 from tests.tutor_helpers import Blocking, Judged, attempt, boot, events, out, post, seed, view
 
 OPTS = [
@@ -403,6 +404,80 @@ def judge_through_the_parser(content):
         return parse_cli_json(stdout, {"type": "object"}).json
     except ChannelError as exc:
         return ModelResult.failure("cursor", "stub", exc.kind)
+
+
+LEAK_TEXT = "Подумай про энергетическую станцию клетки"
+JUDGE_ANSWERS = {
+    "hidden_fence": 'Пример: {"reveals": false, "reason": "пример"}\n'
+    '```JSON\n{"reveals": true, "reason": "раскрывает"}\n```',
+    "broken_outer": 'Итог: {"reveals": true, "reason": "r", "d": {"reveals": false, '
+    '"reason": "ok"},}',
+    "preamble_single": 'Вот вердикт: {"reveals": false, "reason": "нет"}',
+}
+
+
+def test_the_judge_never_lets_a_leak_through_on_a_doubtful_answer(tmp_path):
+    def through(text):
+        def judge(content):
+            stdout = json.dumps({"type": "result", "result": text})
+            try:
+                return parse_cli_json(stdout, JUDGE_SCHEMA).json
+            except ChannelError as exc:
+                return ModelResult.failure("cursor", "stub", exc.kind)
+
+        return judge
+
+    for n, text in enumerate(JUDGE_ANSWERS.values()):
+        hint, _m = run_hint(tmp_path / f"d{n}", LEAK_TEXT, through(text))
+        html = json.dumps([h["html"] for h in hint["hints_list"]], ensure_ascii=False)
+        assert GENERIC["hint1"] in html and LEAK_TEXT not in html, text
+
+
+class Sized(Judged):
+    """Мерка размера по модели канала: ответ задан, вызовы записаны."""
+
+    def __init__(self, fits_ok, **kw):
+        super().__init__(**kw)
+        self.fits_ok = fits_ok
+        self.fits_calls = []
+
+    def fits(self, system, messages, schema=None, channel=None):
+        self.fits_calls.append(channel)
+        return self.fits_ok
+
+
+def test_a_request_that_does_not_fit_by_the_channel_model_is_a_long_talk(tmp_path):
+    # Мерка по умолчанию (без имени модели) сочла бы запрос годным; мерка модели - нет.
+    model = Sized(False, reply=lambda kind, content: out("Б"))
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        got = post(c, tid, "hint", level=1).json()
+    assert model.fits_calls and model.calls == []
+    assert got["notice"] == LONG_TALK and got["panel"]["state"] != "down"
+
+
+def test_the_judge_request_is_measured_on_the_judge_channel(tmp_path):
+    model = Sized(True, reply=generation(LEAK_TEXT))
+    model.fits = lambda s, m, sc=None, ch=None: model.fits_calls.append(ch) or ch is None
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        got = post(c, tid, "hint", level=1).json()
+    assert "cursor" in model.fits_calls and model.judge_calls == []
+    assert got["notice"] == LONG_TALK
+
+
+def test_request_too_large_from_the_model_is_a_long_talk_not_a_failure_in_the_tutor(tmp_path):
+    big = ModelResult.failure("claude", "stub", "request_too_large")
+    c, _clock, model = boot(tmp_path, Judged(reply=lambda kind, content: big))
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        got = post(c, tid, "hint", level=1).json()
+    assert model.calls and got["notice"] == LONG_TALK and got["panel"]["state"] != "down"
 
 
 def test_an_ambiguous_judge_answer_never_lets_a_leaking_hint_through(tmp_path):

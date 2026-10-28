@@ -189,6 +189,7 @@ JUDGE_QUESTION = {
 }
 JUDGE_SCHEMA = {
     "title": "tutor_judge",
+    "x-strict-json": True,  # судья: ответ - ровно один объект (adapters.STRICT_KEY)
     "type": "object",
     "required": ["reveals", "reason"],
     "properties": {"reveals": {"type": "boolean"}, "reason": {"type": "string"}},

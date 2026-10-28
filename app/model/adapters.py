@@ -80,19 +80,38 @@ def _unfence(text: str) -> str:
 
 
 _NOTHING = object()
-_FENCE = re.compile(r"```(?:json)?[ \t]*\n?(.*?)```", re.DOTALL)
+# Блок кода с любым тегом (json, JSON, jsonc, js, text, пробелы): тег не решает, что это не данные.
+_FENCE = re.compile(r"```[ \t]*[\w+.-]*[ \t]*\n?(.*?)```", re.DOTALL)
+STRICT_KEY = "x-strict-json"  # метка схемы: ответ - ровно один объект, без вступления
+
+
+def _group_end(text: str, start: int) -> int:
+    """Индекс закрывающей скобки группы, открытой в start; -1, если не закрыта."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
 
 
 def _extract_json(text: str):
-    """JSON из ответа со вступлением. Объект должен быть ровно один: блоки кода и объекты вне их
-    считаются вместе (вложенные не считаются). Два и больше - неоднозначность: ChannelError,
-    а не выбор (иначе пример перед итогом обходит судью)."""
+    """JSON из ответа со вступлением (мягкий режим), при любом сомнении - ошибка.
+    Считаются все разбираемые объекты: в блоках кода с любым тегом и вне их (вложенные - нет).
+    Ошибка: больше одного; блок с '{', который не разбирается; '{' вне блоков, который не
+    разбирается и не похож на безобидную группу вроде LaTeX \\frac{1}{2} (без кавычек и
+    двоеточий). Внутрь неразобранного объекта не заглядываем."""
     found = []
     for block in _FENCE.findall(text):
+        if "{" not in block and "[" not in block:
+            continue
         try:
             found.append(json.loads(block.strip()))
         except ValueError:
-            continue
+            raise ChannelError("bad_schema_json") from None
     decoder = json.JSONDecoder()
     rest = _FENCE.sub(" ", text)
     i = 0
@@ -100,13 +119,36 @@ def _extract_json(text: str):
         try:
             obj, end = decoder.raw_decode(rest, i)
         except ValueError:
-            i += 1
+            end = _group_end(rest, i)
+            if end == -1 or any(ch in rest[i:end] for ch in '":'):
+                raise ChannelError("bad_schema_json") from None
+            i = end + 1  # безобидная группа не JSON: пропускаем целиком
             continue
         found.append(obj)
         i = end  # вложенные объекты внутри найденного не считаются
     if len(found) > 1:
         raise ChannelError("bad_schema_json")
     return found[0] if found else _NOTHING
+
+
+def _strict_json(text: str):
+    """Строгий режим (судья): весь ответ - один объект либо один блок кода с любым тегом."""
+    text = text.strip()
+    candidates = [text]
+    fenced = re.fullmatch(r"```(.*)```", text, re.DOTALL)
+    if fenced:
+        body = fenced.group(1).strip()
+        candidates = [body]
+        if "\n" in body:
+            candidates.append(body.split("\n", 1)[1].strip())  # первая строка - тег
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    raise ChannelError("bad_schema_json")
 
 
 def _result_event(stdout: str):
@@ -124,7 +166,7 @@ def _result_event(stdout: str):
     return found
 
 
-def parse_cli_json(stdout: str, schema: dict | None) -> Parsed:
+def parse_cli_json(stdout: str, schema: dict | None, strict: bool | None = None) -> Parsed:
     """Общий разбор: ошибка CLI, пустой или битый JSON - ChannelError, а не ответ."""
     if not stdout or not stdout.strip():
         raise ChannelError("empty_output")
@@ -147,6 +189,10 @@ def parse_cli_json(stdout: str, schema: dict | None) -> Parsed:
         usage = {"input_tokens": raw["input_tokens"], "output_tokens": raw["output_tokens"]}
     if schema is None:
         return Parsed(result, None, usage)
+    if strict is None:
+        strict = bool(schema.get(STRICT_KEY))
+    if strict:
+        return Parsed(None, _strict_json(result), usage)
     try:
         return Parsed(None, json.loads(_unfence(result)), usage)
     except ValueError:
