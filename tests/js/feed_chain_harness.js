@@ -274,6 +274,101 @@ scenarios.reorder_keeps_the_frame_update = async function () {
   if (area.innerHTML !== "frame:true order:tb:2,ta:1") fail("рамка или порядок потеряны: " + area.innerHTML);
 };
 
+// Колонка плиток с рамкой и двумя плитками; ответы figure-tiles отдаются вручную.
+function tilesEnv(respond) {
+  const list = [];
+  const mkTile = (id, label) => {
+    const li = {
+      dataset: { tileId: id, label }, querySelector: () => null,
+      get previousElementSibling() { return list[list.indexOf(li) - 1] || null; },
+      get nextElementSibling() { return list[list.indexOf(li) + 1] || null; },
+      parentNode: { insertBefore(node, ref) { list.splice(list.indexOf(node), 1); list.splice(list.indexOf(ref), 0, node); } },
+    };
+    list.push(li);
+    return li;
+  };
+  const a = mkTile("ta", "1"), b = mkTile("tb", "2");
+  const area = { innerHTML: "" };
+  const requests = [];
+  const fetch = (url) => {
+    const q = decodeURIComponent(url);
+    const req = { url: q, rect: /rect_px=([^&]*)/.test(q) ? q.match(/rect_px=([^&]*)/)[1] : null, state: (q.match(/state=([^&]*)/) || [])[1] };
+    requests.push(req);
+    return respond(req);
+  };
+  const listeners = {};
+  const img = { src: "", hidden: true, alt: "", dataset: {}, parentElement: null };
+  img.closest = () => null;
+  const page = {
+    naturalWidth: 900, naturalHeight: 1200, parentElement: { appendChild() {} },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 1200 }),
+    addEventListener(t, fn) { listeners[t] = fn; },
+  };
+  const p = build({ page, img }, { tiles: list, area, fetch });
+  const drag = (x1, y1, x2, y2) => {
+    listeners.mousedown({ preventDefault() {}, clientX: x1, clientY: y1 });
+    listeners.mouseup({ clientX: x2, clientY: y2 });
+  };
+  const mover = { dataset: { tileMove: "-1" }, closest: () => b };
+  const move = () => p.handlers.click[0]({ target: { closest: (s) => (s === "[data-tile-move]" ? mover : null) } });
+  const clickFigure = () => p.handlers.click[0]({ target: { closest: (s) => (s.startsWith("button") ? p.figureBtn : null) } });
+  const postsCount = () => p.calls.filter((u) => u.includes("/parent/tasks/") && !u.includes("figure-tiles")).length;
+  return { p, area, requests, drag, move, clickFigure, postsCount, li: a };
+}
+const okReply = (html) => ({ ok: true, status: 200, text: async () => html, json: async () => ({}) });
+
+scenarios.reorder_during_pending_text_resends = async function () {
+  const holds = [];
+  const e = tilesEnv((req) => Promise.resolve({
+    ok: true, status: 200, json: async () => ({}),
+    text: () => new Promise((res) => holds.push(() => res(`R${holds.length}|${req.rect}|${req.state}`))),
+  }));
+  if (e.p.figureBtn.disabled) fail("начальная колонка должна быть свежей, кнопка открыта");
+  e.drag(100, 100, 400, 500);
+  await tick(); await tick();   // fetch разрешён, text() ещё висит
+  if (!e.p.figureBtn.disabled) fail("кнопка открыта при несвежей колонке");
+  e.move();
+  await tick();
+  if (e.requests.length !== 2) fail("перестановка в окне text() не породила второй запрос: " + e.requests.length);
+  if (!e.requests[1].rect || e.requests[1].state !== "tb:2,ta:1") fail("второй запрос без рамки или порядка: " + JSON.stringify(e.requests[1]));
+  holds[0](); await tick(); await tick();
+  if (e.area.innerHTML !== "") fail("первый ответ не отброшен: " + e.area.innerHTML);
+  if (!e.p.figureBtn.disabled) fail("кнопка открылась по устаревшему ответу");
+  holds[1](); await tick(); await tick();
+  if (!/^R2\|/.test(e.area.innerHTML) || !e.area.innerHTML.includes("tb:2,ta:1")) fail("колонка не от новой рамки: " + e.area.innerHTML);
+  if (e.p.figureBtn.disabled) fail("после свежего ответа публикация недоступна");
+};
+
+scenarios.publish_blocked_until_tiles_fresh = async function () {
+  const holds = [];
+  const e = tilesEnv(() => new Promise((res) => holds.push(() => res(okReply("fresh")))));
+  e.drag(100, 100, 400, 500);
+  await tick();
+  e.clickFigure();   // кнопка отключена, но Enter/программный вызов не должен обходить состояние
+  await tick(); await tick();
+  if (e.postsCount() !== 0) fail("публикация ушла при несвежей колонке: " + JSON.stringify(e.p.calls));
+  holds[0](); await tick(); await tick();
+  e.clickFigure();
+  await tick(); await tick(); await tick();
+  if (e.postsCount() === 0) fail("публикация не ушла при свежей колонке");
+};
+
+scenarios.tiles_error_blocks_until_next_change = async function () {
+  let fail1 = true;
+  const e = tilesEnv(() => Promise.resolve(fail1 ? { ok: false, status: 500, text: async () => "", json: async () => ({}) } : okReply("ok2")));
+  e.drag(100, 100, 400, 500);
+  await tick(); await tick();
+  if (!e.p.figureBtn.disabled) fail("публикация доступна после ошибки ответа");
+  if (!/Плитки не обновились/.test(e.p.fields.error.textContent)) fail("нет текста об ошибке: " + e.p.fields.error.textContent);
+  e.clickFigure(); await tick(); await tick();
+  if (e.postsCount() !== 0) fail("публикация ушла после ошибки плиток");
+  fail1 = false;
+  e.move(); await tick(); await tick(); await tick();
+  if (e.requests.length !== 2) fail("следующее изменение не запросило плитки: " + e.requests.length);
+  if (e.area.innerHTML !== "ok2") fail("колонка не обновилась: " + e.area.innerHTML);
+  if (e.p.figureBtn.disabled) fail("публикация осталась заблокированной навсегда");
+};
+
 const name = process.argv[2];
 if (!scenarios[name]) fail("нет сценария " + name);
 scenarios[name]().then(() => process.exit(0), (e) => fail(String(e)));

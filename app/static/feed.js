@@ -39,6 +39,7 @@
     counter.textContent = count || "";
     frame = null;
     tilesSeq += 1;
+    tilesApplied = tilesSeq;  // колонку только что отрисовал сервер: она свежая
     bindPage();
     refreshReady();
   }
@@ -141,7 +142,7 @@
   function refreshReady() {
     const list = problems();
     const btn = feed.querySelector('button[data-action="figure"]');
-    if (btn) btn.disabled = list.length > 0;
+    if (btn) btn.disabled = list.length > 0 || !tilesFresh();
     const leak = document.querySelector('input[name="leak"]:checked');
     const key = keyAnswer();
     setSum("leak", leak && leak.value === "none", leak && leak.value === "none" ? "✓ Ответа на картинках нет" : "✗ Не отмечено, что ответа на картинках нет");
@@ -165,6 +166,7 @@
     const counter = card().dataset.counter;
     const list = problems();
     if (list.length) throw new Error(list[0]);
+    if (!tilesFresh()) throw new Error("Плитки обновляются — подождите секунду.");
     const leak = document.querySelector('input[name="leak"]:checked');
     const key = keyAnswer();
     const tiles = tilesState();
@@ -265,15 +267,19 @@
 
   // Плитки и ввод ответа по текущей рамке: сервер отдаёт тот же фрагмент, что и карточка.
   // Выбранные ответы переживают замену по номеру плитки, а не по месту.
-  // Номер последнего действия над плитками. Ответ применяется, только если после запроса
-  // не было ни другого запроса, ни ручной перестановки: иначе он вернул бы прежние номера.
+  // Каждое изменение колонки плиток (рамка, номер, порядок) запрашивает её заново безусловно.
+  // tilesSeq - номер последнего запроса, tilesApplied - номер последнего применённого ответа.
+  // Колонка свежая, когда они равны; пока нет, публикация рисунка закрыта. Ответ применяется,
+  // только если за время запроса не ушёл другой: так порядок и рамка не откатываются.
   let tilesSeq = 0;
-  let tilesPending = 0;  // запросы плиток в пути
+  let tilesApplied = 0;
+  const tilesFresh = () => tilesApplied === tilesSeq;
   async function refreshTiles() {
     const area = document.getElementById("figure-area");
     if (!area) return;
     const id = taskId();
     const seq = ++tilesSeq;
+    refreshReady();  // колонка несвежая: публикация закрыта до ответа
     const kept = {};
     feed.querySelectorAll("[data-key-left]").forEach((x) => { kept[x.dataset.keyLeft] = x.value; });
     const single = document.getElementById("key_text");
@@ -286,12 +292,21 @@
       q.set("rect_px", [frame.x0, frame.y0, frame.x1, frame.y1].join(","));
       q.set("scale", PAGE_SCALE);
     }
-    tilesPending += 1;
-    let r;
-    try { r = await fetch(`/parent/tasks/${id}/figure-tiles?${q}`); } finally { tilesPending -= 1; }
-    if (!r.ok || taskId() !== id || seq !== tilesSeq) return;  // карточка или ответ устарели
-    const html = await r.text();
-    if (seq !== tilesSeq) return;
+    let html;
+    try {
+      const r = await fetch(`/parent/tasks/${id}/figure-tiles?${q}`);
+      if (taskId() !== id || seq !== tilesSeq) return;  // карточка или ответ устарели
+      if (!r.ok) throw new Error("tiles " + r.status);
+      html = await r.text();
+    } catch (e) {
+      if (taskId() !== id || seq !== tilesSeq) return;
+      const err = document.getElementById("error");
+      if (err) err.textContent = "Плитки не обновились — повторите";
+      refreshReady();  // колонка остаётся несвежей; следующее изменение запросит снова
+      return;
+    }
+    if (taskId() !== id || seq !== tilesSeq) return;
+    tilesApplied = seq;
     const before = currentDigest();
     area.innerHTML = html;
     if (currentDigest() !== before) clearLeakAck();  // рамка или состав плиток другие
@@ -300,18 +315,20 @@
     if (again && keptSingle) again.value = keptSingle;
     const row = document.getElementById("leak-ack-row");
     if (row && feed.querySelector("[data-tile-leak]")) row.hidden = false;
+    const err = document.getElementById("error");
+    if (err && /^Плитки не обновились/.test(err.textContent)) err.textContent = "";
     refreshReady();
   }
 
   function moveTile(li, dir) {
     const other = dir < 0 ? li.previousElementSibling : li.nextElementSibling;
-    if (!other) return;
-    tilesSeq += 1;  // ответ, ушедший до перестановки, порядок не вернёт
+    if (!other) return false;
     if (dir < 0) li.parentNode.insertBefore(li, other); else li.parentNode.insertBefore(other, li);
     Array.from(feed.querySelectorAll("[data-tile-id]")).forEach((x, i) => {
       const num = x.querySelector("[data-tile-num]");
       if (num && !x.dataset.label) num.textContent = String(i + 1);
     });
+    return true;
   }
 
   const actions = {
@@ -351,11 +368,8 @@
     }
     const mover = e.target.closest("[data-tile-move]");
     if (mover) {
-      // Запрос в пути (например, после новой рамки) перестановка обесценит: пошлём его заново
-      // с текущими рамкой, привязкой и порядком, чтобы обновление рамки не потерялось.
-      const inFlight = tilesPending > 0;
-      moveTile(mover.closest("[data-tile-id]"), Number(mover.dataset.tileMove));
-      if (inFlight) refreshTiles();
+      // Порядок - тоже изменение колонки: запрос уходит всегда, с текущими рамкой и порядком.
+      if (moveTile(mover.closest("[data-tile-id]"), Number(mover.dataset.tileMove))) refreshTiles();
       return refreshReady();
     }
     const b = e.target.closest("button[data-action]");
