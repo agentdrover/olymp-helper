@@ -19,6 +19,7 @@ from tests.bank_helpers import (
     figure_pdf,
     key_pdf,
     make_task,
+    post_figure_acked,
     reply,
     row,
     task_ids,
@@ -76,7 +77,7 @@ def confirm_figure(c, tid, **kw):
     body.update(kw)
     if "rect_px" in kw:
         body.setdefault("page", 1)  # a drawn frame carries the page it was drawn on
-    return c.post(f"/parent/tasks/{tid}/figure", headers=PARENT, json=body)
+    return post_figure_acked(c, tid, body)
 
 
 def nonwhite_bbox(pix):

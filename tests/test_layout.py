@@ -12,6 +12,7 @@ from tests.bank_helpers import (
     StubModel,
     build_app,
     db,
+    post_figure_acked,
     reply,
     task_ids,
     upload,
@@ -181,7 +182,7 @@ def confirm(client, task_id, **body):
 
 def confirm_figure(client, task_id, **kw):
     body = {"alt": ALT, "teacher_note": "1 2 3 4 5", **ACK, **kw}
-    return client.post(f"/parent/tasks/{task_id}/figure", headers=PARENT, json=body)
+    return post_figure_acked(client, task_id, body)
 
 
 def child_surfaces(client, query_words):

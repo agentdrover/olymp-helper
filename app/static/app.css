@@ -229,3 +229,40 @@ dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max
 .steps .choices { display: flex; gap: 12px; flex-wrap: wrap; }
 .key-fields { display: grid; gap: 8px; }
 .note-row { display: block; margin: 0 0 6px; }
+
+/* Карточка рисунка v2 (#2121): ноутбук от 1280 px — верхняя полоса и три колонки. */
+.content:has(.fc) { max-width: none; padding: 12px 20px 24px; }
+.shell:has(.fc) .rail { flex: 0 0 170px; max-width: 170px; }
+.fc { padding: 0; display: flex; flex-direction: column; gap: 0; }
+.fc-bar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.fc-title { flex: 1 1 200px; min-width: 0; }
+.fc-crumb { font-size: 12px; color: var(--ink-3); }
+.fc-h { margin: 2px 0 0; font-size: 18px; }
+.fc-bar button { margin: 0; min-height: 40px; padding: 0 12px; font-size: 14px; }
+.fc-bar button.primary:disabled { opacity: .45; cursor: not-allowed; }
+.fc-bar kbd { opacity: .7; font-size: 12px; margin-left: 4px; }
+.fc-notes-row { padding: 0 16px; }
+.fc-notes-row p { margin: 6px 0 0; }
+.fc-cols { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 16px; align-items: start; }
+.fc-col { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; min-width: 0; }
+.fc-col h3 { margin: 0 0 8px; font-size: 14px; }
+.fc-pages img { max-width: 100%; }
+@media (min-width: 1280px) {
+  .fc-cols { grid-template-columns: minmax(300px, 30%) minmax(0, 1fr) minmax(280px, 26%); }
+  .fc-col { max-height: calc(100vh - 190px); overflow: auto; }
+}
+.fc-tiles { list-style: none; margin: 0 0 8px; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; }
+.fc-tile { position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.fc-tile img { display: block; width: 100%; height: auto; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.fc-num { position: absolute; left: 6px; top: 6px; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 11px; background: var(--ink); color: #fff; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.fc-tile-tools { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.fc-tile-tools button { min-height: 30px; padding: 0 8px; margin: 0; }
+.fc-tile-key { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); }
+.fc-tile-key select { flex: 1; min-width: 0; min-height: 32px; }
+.tile-warning { margin: 0; font-size: 12px; color: var(--warn); }
+.fc-q h4 { margin: 0 0 4px; font-size: 14px; font-weight: 500; }
+.fc-notes { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin: 10px 0; }
+.fc-notes summary { cursor: pointer; }
+.fc-summary { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); display: grid; gap: 4px; font-size: 13px; }
+.fc-summary .bad { color: var(--warn); }
+.why-slot:not([hidden]) { margin-top: 12px; }

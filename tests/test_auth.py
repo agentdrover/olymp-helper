@@ -27,6 +27,7 @@ PUBLIC = {
     ("GET", "/tasks"),
     ("GET", "/tasks/{task_id}"),
     ("GET", "/tasks/{task_id}/figure.png"),
+    ("GET", "/tasks/{task_id}/figure/{tile_id}.png"),  # плитка: те же условия, что у figure.png
     ("GET", "/api/tasks"),
     ("GET", "/api/tasks/{task_id}"),
     ("GET", "/api/search"),

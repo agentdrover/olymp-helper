@@ -67,7 +67,7 @@ def _published(conn, task_id: int):
     if task is None or not is_published(task):
         raise HTTPException(404, "Задание не найдено")
     material = conn.execute(
-        "SELECT year FROM material WHERE id = ?", (task["material_id"],)
+        "SELECT year, original_name FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
     return task, material
 
