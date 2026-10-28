@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app import summary
 from app.ingest.store import atomic
+from app.ingest.tiles import figure_files
 from app.tutor.seq import bump
 
 RETENTION_DAYS = 180
@@ -128,7 +129,7 @@ def delete_material(ctx, conn: sqlite3.Connection, material_id: int) -> dict:
         "AND t.figure IS NOT NULL",
         (material_id,),
     ):
-        figures.append(json.loads(raw).get("file"))
+        figures.extend(figure_files(json.loads(raw)))  # вырезка и PNG плиток
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute("DELETE FROM material_page WHERE material_id = ?", (material_id,))

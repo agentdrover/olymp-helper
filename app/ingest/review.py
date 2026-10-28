@@ -33,8 +33,9 @@ LABELS = {
 class Refusal(Exception):
     """Действие отклонено; message читает родитель."""
 
-    def __init__(self, message: str, status: int = 422):
+    def __init__(self, message: str, status: int = 422, extra: dict | None = None):
         super().__init__(message)
+        self.extra = extra or {}
         self.message = message
         self.status = status
 
@@ -57,6 +58,21 @@ def key_info(conn, task):
     if cand:
         return cand["value"], "official", True
     return None, None, False
+
+
+def uncovered_lefts(task, key) -> list[str]:
+    """Номера левых элементов match, для которых в ключе нет ответа; у других типов пусто.
+    Ключ без пары для рисунка нельзя публиковать: ребёнок получил бы задание без проверки."""
+    options = options_of(task)
+    if task["type"] != "match" or not isinstance(options, dict) or key is None:
+        return []
+    named = key if isinstance(key, dict) else {}
+    return [
+        str(x.get("label", "")) for x in options.get("left") or [] if not named.get(x.get("label"))
+    ]
+
+
+UNCOVERED_KEY = "В ключе нет ответа для рисунков: {}. Выберите ответ для каждого рисунка."
 
 
 def _labels_of(task) -> set[str]:
@@ -249,6 +265,10 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     task = _task(conn, task_id)
     if task["import_status"] == "unsupported":  # новый ключ вернул рисунок на проверку
         raise Refusal(task["unsupported_reason"])
+    if figure_of(task) is not None:
+        missing = uncovered_lefts(task, key_value(task["answer_key"]))
+        if missing:
+            raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
     update_task(conn, task_id, import_status="checked")
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)

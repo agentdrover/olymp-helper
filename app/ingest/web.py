@@ -17,8 +17,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.ingest import packs, review
-from app.ingest.figure_card import mode_for
-from app.ingest.figure_service import confirm_figure, preview_png
+from app.ingest.figure_card import area_context, mode_for
+from app.ingest.figure_service import confirm_figure, preview_png, preview_tile_png
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
 from app.ingest.names import clean_original_name
 from app.ingest.progress import progress_text
@@ -26,6 +26,7 @@ from app.ingest.publish import child_view, is_published
 from app.ingest.reparse import UNAVAILABLE, reset_material, touched_materials
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
+from app.ingest.tiles import stored_tiles
 from app.ingest.topics import load_catalog
 from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, csrf_token, current_role, require_csrf, require_parent
@@ -79,7 +80,7 @@ def child_notice_gate(request: Request, conn: Db) -> None:
 
 
 def _refusal(exc: Refusal) -> JSONResponse:
-    return JSONResponse({"error": exc.message}, status_code=exc.status)
+    return JSONResponse({**exc.extra, "error": exc.message}, status_code=exc.status)
 
 
 # ------------------------------------------------------------------------- вход
@@ -478,6 +479,11 @@ class ResolveBody(BaseModel):
     answer: str | None = None
 
 
+class TileBody(BaseModel):
+    id: str
+    label: str | None = None
+
+
 class FigureBody(BaseModel):
     rect: list[float] | None = None
     rect_px: list[float] | None = None
@@ -488,6 +494,11 @@ class FigureBody(BaseModel):
     no_answer_ack: bool = False
     teacher_note_ack: bool = False
     leak_ack: bool = False  # явное решение: текст ответа в вырезке оставлен намеренно
+    leak_digest: str | None = None  # слепок рамки и плиток отметки; без него leak_ack не действует
+    column_digest: str | None = (
+        None  # слепок колонки плиток из ответа figure-tiles; 409, если не тот
+    )
+    tiles: list[TileBody] | None = None  # плитки в порядке показа и их привязка к номерам
 
 
 def _advance(request: Request, conn, task_id: int, *, stay_if_open: bool = False) -> dict:
@@ -640,6 +651,9 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
         no_answer_ack=body.no_answer_ack,
         teacher_note_ack=body.teacher_note_ack,
         leak_ack=body.leak_ack,
+        leak_digest_ack=body.leak_digest,
+        column_digest_ack=body.column_digest,
+        tile_state=None if body.tiles is None else [t.model_dump() for t in body.tiles],
     )
 
 
@@ -679,6 +693,73 @@ def task_figure_preview(
     return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+def _frame_args(page, rect_px, scale) -> dict:
+    """Правка рамки из адреса: пусто - рамку не трогали."""
+    if not rect_px:
+        return {}
+    try:
+        frame = [float(v) for v in rect_px.split(",")]
+    except ValueError:
+        raise Refusal("Рамка задана неверно: нужны четыре числа.") from None
+    return {"rect_px": frame, "scale": scale, "page": page}
+
+
+def _tile_state_arg(state: str | None):
+    """«id:номер,id:» -> [{id, label}] в порядке показа; пусто - карточка плитки не присылала."""
+    if not state:  # пусто - плиток на карточке ещё не было: привязка по умолчанию, как без state
+        return None
+    out = []
+    for part in filter(None, state.split(",")):
+        tile, _, label = part.partition(":")
+        out.append({"id": tile, "label": label or None})
+    return out
+
+
+@parent.get("/parent/tasks/{task_id}/figure-tiles", response_class=HTMLResponse)
+@_action
+def task_figure_tiles(
+    task_id: int,
+    request: Request,
+    conn: Db,
+    page: int | None = None,
+    rect_px: str | None = None,
+    scale: float | None = None,
+    state: str | None = None,
+):
+    """Плитки и ввод ответа по текущей рамке: тот же фрагмент, что на карточке. Только чтение."""
+    task = get_task(conn, task_id)
+    figure = figure_of(task) if task is not None else None
+    if figure is None or task["excluded"]:
+        raise Refusal("У этого задания нет рисунка.", 404)
+    area = area_context(
+        ctx_of(request),
+        conn,
+        task,
+        figure,
+        frame=_frame_args(page, rect_px, scale),
+        state=_tile_state_arg(state),
+    )
+    return TEMPLATES.TemplateResponse(request, "parent/_figure_area.html", {"a": area})
+
+
+@parent.get("/parent/tasks/{task_id}/tile-preview/{tile_id}.png")
+@_action
+def task_tile_preview(
+    task_id: int,
+    tile_id: str,
+    request: Request,
+    conn: Db,
+    page: int | None = None,
+    rect_px: str | None = None,
+    scale: float | None = None,
+):
+    """Родительский предпросмотр одной плитки по текущей рамке; ребёнку недоступен."""
+    png = preview_tile_png(
+        ctx_of(request), conn, task_id, tile_id, **_frame_args(page, rect_px, scale)
+    )
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
 # ----------------------------------------------------------------------- ребёнок
 
 
@@ -687,7 +768,7 @@ def _published(conn, task_id: int):
     if task is None or not is_published(task):
         raise HTTPException(404, "Задание не найдено")
     material = conn.execute(
-        "SELECT year FROM material WHERE id = ?", (task["material_id"],)
+        "SELECT year, original_name FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
     return task, material
 
@@ -698,7 +779,7 @@ def api_tasks(conn: Db):
     for task in conn.execute("SELECT * FROM task_item ORDER BY id").fetchall():
         if is_published(task):
             material = conn.execute(
-                "SELECT year FROM material WHERE id = ?", (task["material_id"],)
+                "SELECT year, original_name FROM material WHERE id = ?", (task["material_id"],)
             ).fetchone()
             out.append(child_view(task, material))
     return {"tasks": out}
@@ -747,15 +828,32 @@ def tasks_page(
     )
 
 
-@public.get("/tasks/{task_id}/figure.png", dependencies=[Depends(child_notice_gate)])
-def task_figure_png(task_id: int, request: Request, conn: Db):
+def _figure_of_visible(request: Request, conn, task_id: int) -> tuple[dict, dict]:
+    """Подтверждённый рисунок, который можно отдать: родителю - любой подтверждённый, ребёнку -
+    только опубликованного задания. Общая проверка для вырезки и для каждой плитки."""
     task = get_task(conn, task_id)
     figure = figure_of(task) if task is not None else None
     if figure is None or not figure.get("confirmed") or not figure.get("file"):
         raise HTTPException(404, "Рисунка нет")
     if current_role(request) != PARENT and not is_published(task):
         raise HTTPException(404, "Рисунка нет")
+    return task, figure
+
+
+@public.get("/tasks/{task_id}/figure.png", dependencies=[Depends(child_notice_gate)])
+def task_figure_png(task_id: int, request: Request, conn: Db):
+    _task, figure = _figure_of_visible(request, conn, task_id)
     return FileResponse(ctx_of(request).material_path(figure["file"]), media_type="image/png")
+
+
+@public.get("/tasks/{task_id}/figure/{tile_id}.png", dependencies=[Depends(child_notice_gate)])
+def task_tile_png(task_id: int, tile_id: str, request: Request, conn: Db):
+    """Одна плитка рисунка: файл берётся из записи задания, а не из адреса."""
+    _task, figure = _figure_of_visible(request, conn, task_id)
+    found = next((t for t in stored_tiles(figure) or [] if t["id"] == tile_id), None)
+    if found is None or not found.get("file"):
+        raise HTTPException(404, "Рисунка нет")
+    return FileResponse(ctx_of(request).material_path(found["file"]), media_type="image/png")
 
 
 @public.get("/api/search", dependencies=[Depends(child_notice_gate)])

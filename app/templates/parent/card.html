@@ -1,4 +1,6 @@
-{% if card %}
+{% if card and card.kind == "needs_figure" %}
+{% include "parent/_figure_card.html" %}
+{% elif card %}
 <article class="card" data-task-id="{{ card.task_id }}" data-kind="{{ card.kind }}"
          data-counter="{{ counter or '' }}" data-figure-page="{{ card.figure_page or '' }}">
   <p><span class="badge">{{ card.label }}</span></p>
@@ -7,10 +9,9 @@
       {% if card.page_url %}<div class="page-wrap"><img id="page-img" src="{{ card.page_url }}" alt="Исходная страница">
         {% for o in card.overlays or [] %}<span class="region-frame" data-region="{{ o.number }}" style="left:{{ o.left }}%;top:{{ o.top }}%;width:{{ o.width }}%;height:{{ o.height }}%"><span class="region-badge">{{ o.number }}</span></span>{% endfor %}
       </div>{% endif %}
-      {% if card.kind == "needs_figure" %}<p class="hint">Зелёные рамки — то, что вырежется для ребёнка; цифра на рамке — номер области. Рамку рисуют мышью по странице: новая рамка заменяет область этой страницы.</p>{% endif %}
       {# Ссылки на страницы - только у карточек проверки текста: на карточке рисунка рамка
          привязана к одной странице, переключать её нельзя. #}
-      {% if card.kind != "needs_figure" and card.page_urls|length > 1 %}
+      {% if card.page_urls|length > 1 %}
       <p class="hint">Страницы:
         {% for p in card.page_urls %}<a class="page-link" href="{{ p.url }}" data-page-url="{{ p.url }}">стр. {{ p.page }}</a> {% endfor %}
       </p>
@@ -18,7 +19,6 @@
     </div>
     <div class="body">
       <p><strong>Задание {{ card.number }}</strong> ({{ card.type }})</p>
-      {% if card.kind != "needs_figure" or not card.child %}
       <p class="text">{{ card.text }}</p>
       <p class="hint">Тема: <b>{{ card.topic_title or "не размечено" }}</b> (подтверждается вместе с заданием; после этого ребёнок видит название темы в списке заданий)</p>
       {% if card.options %}
@@ -30,8 +30,7 @@
         {% endif %}
       </ul>
       {% endif %}
-      {% endif %}
-      {% if card.key and card.kind != "needs_figure" %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }})</p>{% endif %}
+      {% if card.key %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }})</p>{% endif %}
       {% if card.model_answer %}<p>Ответ модели (не проверен): <b>{{ card.model_answer }}</b></p>{% endif %}
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
       <p class="hint">{{ card.hint }}</p>
@@ -53,66 +52,6 @@
         <button class="primary" data-action="retry">Повторить запрос к модели</button>
       {% elif card.kind == "open_exclude" %}
         <button class="primary" data-action="exclude">Исключить</button>
-      {% elif card.kind == "needs_figure" %}
-        <section class="child-view" aria-label="Как увидит ребёнок">
-          <div class="child-view-head"><h2>Как увидит ребёнок</h2><span class="pill" id="mode-pill">{{ card.mode.label }}</span></div>
-          {% with task=card.child, v=card.child_screen, preview=True %}{% include "child/_task_view.html" %}{% endwith %}
-          <p class="hint" id="mode-hint">{{ card.mode.hint }}</p>
-        </section>
-        <ol class="steps">
-          <li>
-            <h3>На картинках выше нет ответа?</h3>
-            <p class="hint">Посмотрите на «Как увидит ребёнок»: подписей, стрелок с названиями, букв-ответов быть не должно.</p>
-            {% if card.figure_check.warning %}<p class="err" role="alert" id="raster-warning">{{ card.figure_check.warning }}</p>{% endif %}
-            {% if card.figure and card.figure.leak %}<p class="err" role="alert">В рамке напечатан текст ответа или вариантов: {{ card.figure.leak|join(", ") }}.</p>{% endif %}
-            <p class="choices">
-              <label><input type="radio" name="leak" value="none"> Да, ответа нет</label>
-              <label><input type="radio" name="leak" value="some"> Есть — поправлю рамку слева</label>
-            </p>
-            <p id="leak-ack-row" class="hint"{% if not (card.figure and card.figure.leak) %} hidden{% endif %}><label><input type="checkbox" id="leak_ack"> этот текст в рамке допустим, так и надо</label></p>
-          </li>
-          <li>
-            <h3>Правильный ответ</h3>
-            <p class="hint">{% if card.key_value is none %}Ключа нет — выберите сами. Без ключа задание не публикуется.{% elif card.key_is_candidate %}Ключ из загруженного файла — проверьте его.{% else %}Ключ задан — можно изменить.{% endif %}</p>
-            <div class="key-fields" data-type="{{ card.type }}" data-candidate="{{ 1 if card.key_is_candidate else 0 }}" data-current="{{ card.key or '' }}">
-            {% if card.type == "match" and card.options is mapping %}
-              {% for l in card.options.left %}
-              <label>рисунок {{ l.label }}
-                <select data-key-left="{{ l.label }}"><option value="">— выбери —</option>
-                  {% for r in card.options.right %}<option value="{{ r.label }}"{% if card.key_value is mapping and card.key_value.get(l.label) == r.label %} selected{% endif %}>{{ r.label }}) {{ r.text }}</option>{% endfor %}
-                </select></label>
-              {% endfor %}
-            {% elif card.type == "single" and card.options %}
-              <label>Вариант <select id="key_text"><option value="">— выбери —</option>
-                {% for o in card.options %}<option value="{{ o.label }}"{% if card.key == o.label %} selected{% endif %}>{{ o.label }}) {{ o.text }}</option>{% endfor %}
-              </select></label>
-            {% else %}
-              <label>Ответ <input id="key_text" size="12" value="{{ card.key or '' }}"></label>
-            {% endif %}
-            </div>
-          </li>
-          <li>
-            <h3>Что на рисунках <span class="hint">— по желанию, включает подсказки</span></h3>
-            <p class="hint">Помощник картинок не видит. Опишите каждое обозначение одной строкой — ребёнку эти строки не показываются.</p>
-            {% if card.figure_items %}
-              {% for it in card.figure_items %}
-              <label class="note-row">{{ it }} <input data-note="{{ it }}" size="40" value="{{ card.figure_notes.get(it, '') }}"></label>
-              {% endfor %}
-              <input type="hidden" id="note_rest" value="{{ card.figure_note_rest }}">
-            {% else %}
-              <textarea id="note_free" rows="3" cols="50">{{ card.figure.teacher_note if card.figure else '' }}</textarea>
-            {% endif %}
-            <p class="hint"><label><input type="checkbox" id="note_ack"{% if card.figure and card.figure.teacher_note_ack %} checked{% endif %}> Описание верное: подсказки могут на него опираться</label></p>
-            <p class="hint" id="note-status" role="status"></p>
-          </li>
-          <li>
-            <h3><label for="alt">Подпись к картинке для ребёнка</label></h3>
-            <input id="alt" size="50" value="{{ card.figure.alt if card.figure else '' }}">
-            <p class="hint">Её слышит экранный диктор и видно, если картинка не загрузилась. Без названий и ответа.</p>
-          </li>
-        </ol>
-        <p class="hint">{% if card.topic_title %}После подтверждения ребёнок увидит задание в теме «{{ card.topic_title }}».{% else %}Тема не размечена: ребёнок увидит задание без названия темы.{% endif %}</p>
-        <button class="primary" data-action="figure">Подтвердить и опубликовать</button>
       {% endif %}
       <p>
         <button data-action="skip">Пропустить (→)</button>
