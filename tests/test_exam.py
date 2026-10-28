@@ -1254,6 +1254,7 @@ _AUTOSAVE_SCENARIOS = [
     "redirect_to_results_is_not_a_saved_answer",
     "page_opened_inside_the_window_is_closed_at_once",
     "handlers_compare_the_deadline_not_only_the_flag",
+    "save_click_in_window_before_the_tick_keeps_the_answer",
 ]
 
 

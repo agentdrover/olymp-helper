@@ -57,28 +57,37 @@ const say = (text, role) => {
   note.textContent = text;
   form.before(note);
 };
+// Единственный путь закрытия бланка (тик, submit, click, открытие страницы). Порядок строгий:
+// форма собирается ДО lock() (выключенные поля в неё не попадают), затем lock(), затем отправка.
+// Поля нигде больше не выключаются, кроме lock() здесь и после обычной отправки формы.
+let closed = false;
+const closeBlank = () => {
+  if (closed) return;
+  closed = true;
+  let data = null;
+  if (!opened && remaining() > 0) {
+    data = new FormData(form);
+    data.set("action", "save");
+    data.set("action_id", "auto-" + Math.random().toString(36).slice(2));
+  }
+  lock();
+  if (!data) return;  // страница открыта в окне или срок вышел: сохранять нечего
+  fetch("/exam/act", {method: "POST", body: data, keepalive: true}).then(r => {
+    // Успех - только редирект на бланк; 409, редирект на итог (запрос пришёл после срока)
+    // и любой другой ответ: последнее могло не сохраниться.
+    if (r.ok && r.redirected && new URL(r.url).pathname === "/exam/run") say("Ответы сохранены", "status");
+    else say("Последние изменения могли не сохраниться", "alert");
+  }).catch(() => say("Последние изменения могли не сохраниться", "alert"));
+};
 // Закрыт ли бланк: сравниваем срок с часами, а не только флаг (тик может ещё не прийти).
-const isClosed = () => { if (remaining() <= 1500) { lock(); return true; } return false; };
-let autosaved = false;
-if (isClosed()) autosaved = true;
+const isClosed = () => { if (remaining() <= 1500) closeBlank(); return closed; };
+const opened = remaining() <= 1500;  // страница открыта уже внутри окна
+if (opened) closeBlank();
 setInterval(() => {
   const ms = remaining();
   const s = Math.max(0, Math.ceil(ms / 1000));
   left.textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  if (ms <= 1500 && ms > 0 && !autosaved) {
-    autosaved = true;
-    // Форма собирается до блокировки (выключенные поля в неё не попадают).
-    const data = new FormData(form);
-    data.set("action", "save");
-    data.set("action_id", "auto-" + Math.random().toString(36).slice(2));
-    lock();
-    fetch("/exam/act", {method: "POST", body: data, keepalive: true}).then(r => {
-      // Статус смотрим до чтения тела. Успех - только редирект на бланк; 409, редирект на итог
-      // (запрос пришёл после срока) и любой другой ответ: последнее могло не сохраниться.
-      if (r.ok && r.redirected && new URL(r.url).pathname === "/exam/run") say("Ответы сохранены", "status");
-      else say("Последние изменения могли не сохраниться", "alert");
-    }).catch(() => say("Последние изменения могли не сохраниться", "alert"));
-  }
+  if (ms <= 1500) closeBlank();
   if (ms <= 0) location.href = "/exam/results/{{ v.id }}";
 }, 250);
 form.addEventListener("submit", e => {

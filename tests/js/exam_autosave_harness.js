@@ -22,14 +22,25 @@ function build(reply, opts = {}) {
     mark: mk({ name: "action", value: "mark" }), submit: mk({ name: "action", value: "submit", id: "exam-submit" }),
     text: mk({ tag: "input", type: "text", name: "n", value: "28" }),
     pick: mk({ tag: "select", type: "select-one", name: "m.1", value: "B" }),
+    // multiple-ответ: три флажка с одним именем, выбраны А и В; радио-группа с невыбранным вариантом
+    cbA: mk({ tag: "input", type: "checkbox", name: "a", value: "A", checked: true }),
+    cbB: mk({ tag: "input", type: "checkbox", name: "a", value: "B", checked: false }),
+    cbC: mk({ tag: "input", type: "checkbox", name: "a", value: "C", checked: true }),
+    rdX: mk({ tag: "input", type: "radio", name: "r", value: "X", checked: false }),
+    rdY: mk({ tag: "input", type: "radio", name: "r", value: "Y", checked: true }),
   };
   const fields = [hidden("attempt_id", "7"), hidden("rev", "5"), hidden("shown", "1"), hidden("action_id", "orig")];
   const all = [...fields, ...Object.values(controls)];
   // Как в браузере: new FormData(form) берёт поля ответа с именем и без disabled; кнопки без submitter не входят.
   class FakeFormData {
-    constructor(form) { this.map = new Map(form.all.filter((f) => f.name && !f.disabled && f.tag !== "button").map((f) => [f.name, f.value])); }
-    set(k, v) { this.map.set(k, v); }
-    get(k) { return this.map.get(k); }
+    constructor(form) {
+      this.pairs = form.all
+        .filter((f) => f.name && !f.disabled && f.tag !== "button" && (f.type !== "checkbox" && f.type !== "radio" || f.checked))
+        .map((f) => [f.name, f.value]);
+    }
+    set(k, v) { const i = this.pairs.findIndex((x) => x[0] === k); this.pairs = this.pairs.filter((x) => x[0] !== k); this.pairs.splice(Math.max(i, 0), 0, [k, v]); }
+    get(k) { const x = this.pairs.find((p) => p[0] === k); return x ? x[1] : null; }
+    getAll(k) { return this.pairs.filter((p) => p[0] === k).map((p) => p[1]); }
   }
   const SELECTOR = "button, input:not([type=hidden]), select";
   const handlers = {};
@@ -125,7 +136,9 @@ const scenarios = {
     if (d.url !== "/exam/act" || d.data.get("action") !== "save") fail("не save: " + d.data.get("action"));
     if (!String(d.data.get("action_id")).startsWith("auto-")) fail("action_id " + d.data.get("action_id"));
     if (d.data.get("rev") !== "5") fail("rev в запросе " + d.data.get("rev"));
-    if (d.data.get("n") !== "28" || d.data.get("m.1") !== "B") fail("в POST нет ответа ребёнка: " + JSON.stringify([...d.data.map]));
+    if (d.data.get("n") !== "28" || d.data.get("m.1") !== "B") fail("в POST нет ответа ребёнка: " + JSON.stringify(d.data.pairs));
+    if (JSON.stringify(d.data.getAll("a")) !== '["A","C"]') fail("multiple-ответ в POST: " + JSON.stringify(d.data.pairs));
+    if (JSON.stringify(d.data.getAll("r")) !== '["Y"]') fail("радио в POST: " + JSON.stringify(d.data.pairs));
     if (p.form.elements.rev.value !== "5") fail("rev в форме изменился: " + p.form.elements.rev.value);
     if (alerts(p).length || !p.notes.some((n) => n.textContent === "Ответы сохранены")) fail("сообщение об успехе: " + JSON.stringify(p.notes));
     if (p.loc.href) fail("ушли со страницы до срока");
@@ -150,7 +163,18 @@ const scenarios = {
     p.clock.t = DEADLINE - 1000;  // окно наступило, тик ещё не был
     if (p.press(p.controls.submit)) fail("клик прошёл в окне без тика");
     if (p.forceSubmit(p.controls.mark)) fail("submit прошёл в окне без тика");
-    if (p.posts.length) fail("POST " + p.posts.length);
+    if (p.posts.length !== 1 || p.posts[0].data.get("action") !== "save") fail("POST " + p.posts.length);
+  },
+  async save_click_in_window_before_the_tick_keeps_the_answer() {
+    const p = build(ok());
+    p.clock.t = DEADLINE - 1450;  // окно наступило, тика ещё не было
+    if (p.press(p.controls.save)) fail("«Сохранить» ушла как обычная отправка");
+    p.at(1200); p.at(950); await flush();
+    if (p.posts.length !== 1) fail("POST " + p.posts.length);
+    const d = p.posts[0].data;
+    if (d.get("n") !== "28" || JSON.stringify(d.getAll("a")) !== '["A","C"]') fail("ответ потерян: " + JSON.stringify(d.pairs));
+    if (d.get("action") !== "save" || !String(d.get("action_id")).startsWith("auto-")) fail("не автосохранение");
+    if (!Object.values(p.controls).every((c) => c.disabled)) fail("бланк не закрыт");
   },
   async deadline_goes_to_results() {
     const p = build(ok());
