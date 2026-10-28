@@ -9,7 +9,6 @@ from app.model.service import LIMIT_MESSAGE, ModelService
 from app.model.types import ChannelError, ModelResult
 from app.tutor.flow import LONG_TALK
 from app.tutor.guard import GENERIC
-from app.tutor.prompts import JUDGE_SCHEMA
 from tests.tutor_helpers import Blocking, Judged, attempt, boot, events, out, post, seed, view
 
 OPTS = [
@@ -397,6 +396,18 @@ TWO_OBJECTS = (
 )
 
 
+DUPLICATE_KEY_ANSWERS = (
+    '{"reveals":true,"reveals":false,"reason":"ok"}',
+    '{"reveals":true,"\\u0072eveals":false,"reason":"ok"}',
+    '{"reveals":false,"reason":"ok","d":{"a":1,"a":2}}',
+)
+ONE_LINE_FENCES = (
+    '```json {"reveals":false,"reason":"ok"}```',
+    '```{"reveals":false,"reason":"ok"}```',
+    'Вердикт: ```JSON{"reveals":false,"reason":"ok"}```',
+)
+
+
 def judge_through_the_parser(content):
     """Ответ судьи идёт через настоящий разбор CLI, как в бою: ошибка разбора - сбой канала."""
     stdout = json.dumps({"type": "result", "result": TWO_OBJECTS})
@@ -416,21 +427,57 @@ JUDGE_ANSWERS = {
 }
 
 
+class ParsingJudge(Judged):
+    """Судья разбирает ответ тем, что реально передал flow: схема (и её метка strict) из вызова."""
+
+    def __init__(self, text, **kw):
+        super().__init__(**kw)
+        self.text = text
+
+    def complete_on(self, channel, system, messages, schema=None, session_id=None):
+        super().complete_on(channel, system, messages, schema, session_id)
+        stdout = json.dumps({"type": "result", "result": self.text})
+        try:
+            parsed = parse_cli_json(stdout, schema).json
+        except ChannelError as exc:
+            return ModelResult.failure("cursor", "stub", exc.kind)
+        return ModelResult(None, parsed, channel, "stub", 1, None)
+
+
+def hint_html_with_judge_text(tmp_path, text):
+    model = ParsingJudge(text, reply=generation(LEAK_TEXT, "Б"))
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        hint = post(c, tid, "hint", level=1).json()
+    return json.dumps([h["html"] for h in hint["hints_list"]], ensure_ascii=False), model
+
+
 def test_the_judge_never_lets_a_leak_through_on_a_doubtful_answer(tmp_path):
-    def through(text):
-        def judge(content):
-            stdout = json.dumps({"type": "result", "result": text})
-            try:
-                return parse_cli_json(stdout, JUDGE_SCHEMA).json
-            except ChannelError as exc:
-                return ModelResult.failure("cursor", "stub", exc.kind)
-
-        return judge
-
     for n, text in enumerate(JUDGE_ANSWERS.values()):
-        hint, _m = run_hint(tmp_path / f"d{n}", LEAK_TEXT, through(text))
-        html = json.dumps([h["html"] for h in hint["hints_list"]], ensure_ascii=False)
+        html, _model = hint_html_with_judge_text(tmp_path / f"d{n}", text)
         assert GENERIC["hint1"] in html and LEAK_TEXT not in html, text
+
+
+def test_the_flow_passes_the_strict_schema_to_the_judge(tmp_path):
+    # Скобка во вступлении: годно только в мягком режиме, строгий отвергает.
+    text = 'Ответ: {"reveals":false,"reason":"ok"} готово'
+    html, model = hint_html_with_judge_text(tmp_path, text)
+    assert model.judge_calls and model.judge_calls[0]["schema"].get("x-strict-json") is True
+    assert GENERIC["hint1"] in html and LEAK_TEXT not in html
+
+
+def test_the_judge_with_a_contradicting_duplicate_key_is_a_failure(tmp_path):
+    for n, text in enumerate(DUPLICATE_KEY_ANSWERS):
+        html, _model = hint_html_with_judge_text(tmp_path / f"k{n}", text)
+        assert GENERIC["hint1"] in html and LEAK_TEXT not in html, text
+
+
+def test_a_one_line_fence_with_a_tag_is_a_verdict(tmp_path):
+    for n, text in enumerate(ONE_LINE_FENCES):
+        html, _model = hint_html_with_judge_text(tmp_path / f"o{n}", text)
+        assert LEAK_TEXT in html, text
 
 
 class Sized(Judged):

@@ -83,6 +83,7 @@ _NOTHING = object()
 # Блок кода с любым тегом (json, JSON, jsonc, js, text, пробелы): тег не решает, что это не данные.
 _FENCE = re.compile(r"```[ \t]*[\w+.-]*[ \t]*\n?(.*?)```", re.DOTALL)
 _TAG_LINE = re.compile(r"[ \t]*[\w+.-]*[ \t]*")
+_TAG_BEFORE_OBJECT = re.compile(r"[ \t]*[\w+.-]+[ \t]*(?=\{)")
 STRICT_KEY = "x-strict-json"  # метка схемы: ответ - ровно один объект, без вступления
 
 
@@ -132,6 +133,15 @@ def _extract_json(text: str):
     return found[0] if found else _NOTHING
 
 
+def _no_duplicate_keys(pairs):
+    """object_pairs_hook строгого режима: повтор ключа (после декодирования escape) - ошибка,
+    на любой глубине; иначе json.loads молча берёт последнее значение (fail closed)."""
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
 def _strict_json(text: str):
     """Строгий режим (судья): вступление без скобок { } [ ], затем ровно один объект или один
     блок кода с любым тегом, затем только пробелы. Пример-объект во вступлении невозможен:
@@ -149,9 +159,12 @@ def _strict_json(text: str):
         first, _, tail = fenced.group(1).partition("\n")
         if tail and _TAG_LINE.fullmatch(first):  # первая строка - тег, только если она тег
             candidates.append(tail.strip())
+        one_line = _TAG_BEFORE_OBJECT.match(fenced.group(1))  # тег в одной строке с объектом
+        if one_line:
+            candidates.append(fenced.group(1)[one_line.end() :].strip())
     for cand in candidates:
         try:
-            obj = json.loads(cand)
+            obj = json.loads(cand, object_pairs_hook=_no_duplicate_keys)
         except ValueError:
             continue
         if isinstance(obj, dict):
