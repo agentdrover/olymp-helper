@@ -236,6 +236,44 @@ scenarios.stale_tiles_response_is_dropped = async function () {
   if (li.dataset.label !== "2") fail("привязка плитки изменилась: " + li.dataset.label);
 };
 
+scenarios.reorder_keeps_the_frame_update = async function () {
+  const list = [];
+  const mkTile = (id, label) => {
+    const li = {
+      dataset: { tileId: id, label }, querySelector: () => null,
+      get previousElementSibling() { return list[list.indexOf(li) - 1] || null; },
+      get nextElementSibling() { return list[list.indexOf(li) + 1] || null; },
+      parentNode: { insertBefore(node, ref) { list.splice(list.indexOf(node), 1); list.splice(list.indexOf(ref), 0, node); } },
+    };
+    list.push(li);
+    return li;
+  };
+  const a = mkTile("ta", "1"), b = mkTile("tb", "2");
+  const area = { innerHTML: "" };
+  const waiting = [];
+  const fetch = (url) => new Promise((resolve) => {
+    const q = decodeURIComponent(url);
+    const html = `frame:${q.includes("rect_px=")} order:${(q.match(/state=([^&]*)/) || [])[1]}`;
+    waiting.push(() => resolve({ ok: true, status: 200, text: async () => html, json: async () => ({}) }));
+  });
+  const listeners = {};
+  const img = { src: "", hidden: true, alt: "", dataset: {}, parentElement: null };
+  img.closest = () => null;
+  const page = {
+    naturalWidth: 900, naturalHeight: 1200, parentElement: { appendChild() {} },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 1200 }),
+    addEventListener(t, fn) { listeners[t] = fn; },
+  };
+  const p = build({ page, img }, { tiles: list, area, fetch });
+  listeners.mousedown({ preventDefault() {}, clientX: 100, clientY: 100 });
+  listeners.mouseup({ clientX: 400, clientY: 500 });   // новая рамка: запрос плиток ушёл
+  const mover = { dataset: { tileMove: "-1" }, closest: () => b };
+  p.handlers.click[0]({ target: { closest: (s) => (s === "[data-tile-move]" ? mover : null) } });  // порядок изменён до ответа
+  waiting.splice(0).forEach((release) => release());
+  await tick(); await tick(); await tick();
+  if (area.innerHTML !== "frame:true order:tb:2,ta:1") fail("рамка или порядок потеряны: " + area.innerHTML);
+};
+
 const name = process.argv[2];
 if (!scenarios[name]) fail("нет сценария " + name);
 scenarios[name]().then(() => process.exit(0), (e) => fail(String(e)));

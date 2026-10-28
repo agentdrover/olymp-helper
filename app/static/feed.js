@@ -268,6 +268,7 @@
   // Номер последнего действия над плитками. Ответ применяется, только если после запроса
   // не было ни другого запроса, ни ручной перестановки: иначе он вернул бы прежние номера.
   let tilesSeq = 0;
+  let tilesPending = 0;  // запросы плиток в пути
   async function refreshTiles() {
     const area = document.getElementById("figure-area");
     if (!area) return;
@@ -285,7 +286,9 @@
       q.set("rect_px", [frame.x0, frame.y0, frame.x1, frame.y1].join(","));
       q.set("scale", PAGE_SCALE);
     }
-    const r = await fetch(`/parent/tasks/${id}/figure-tiles?${q}`);
+    tilesPending += 1;
+    let r;
+    try { r = await fetch(`/parent/tasks/${id}/figure-tiles?${q}`); } finally { tilesPending -= 1; }
     if (!r.ok || taskId() !== id || seq !== tilesSeq) return;  // карточка или ответ устарели
     const html = await r.text();
     if (seq !== tilesSeq) return;
@@ -348,7 +351,11 @@
     }
     const mover = e.target.closest("[data-tile-move]");
     if (mover) {
+      // Запрос в пути (например, после новой рамки) перестановка обесценит: пошлём его заново
+      // с текущими рамкой, привязкой и порядком, чтобы обновление рамки не потерялось.
+      const inFlight = tilesPending > 0;
       moveTile(mover.closest("[data-tile-id]"), Number(mover.dataset.tileMove));
+      if (inFlight) refreshTiles();
       return refreshReady();
     }
     const b = e.target.closest("button[data-action]");
