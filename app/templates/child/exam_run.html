@@ -59,17 +59,31 @@ setInterval(() => {
     data.set("action_id", "auto-" + Math.random().toString(36).slice(2));
     // Автосохранение продвигает ревизию: страница берёт новую из ответа и остаётся действующей.
     inflight = true;
+    let stale = false;
     const finish = () => {
       inflight = false;
       if (!pending) return;
       const btn = pending; pending = null;
+      if (stale) return;  // страница устарела: отложенное действие не применяется
       // Нажатое во время автосохранения выполняется после ответа, с новой ревизией; после срока - итог.
       if (new Date(left.dataset.deadline) - (Date.now() + offset) <= 0) location.href = "/exam/results/{{ v.id }}";
       else form.requestSubmit(btn);
     };
-    fetch("/exam/act", {method: "POST", body: data, keepalive: true}).then(r => r.text()).then(t => {
-      const rev = new DOMParser().parseFromString(t, "text/html").querySelector('input[name="rev"]');
-      if (rev) form.elements["rev"].value = rev.value;
+    fetch("/exam/act", {method: "POST", body: data, keepalive: true}).then(async r => {
+      const t = await r.text();
+      const doc = new DOMParser().parseFromString(t, "text/html");
+      const rev = doc.querySelector('input[name="rev"]'), id = doc.querySelector('input[name="attempt_id"]');
+      // Ревизия берётся только из успешного автосохранения: 2xx, редирект на /exam/run того же варианта.
+      if (r.ok && r.redirected && new URL(r.url).pathname === "/exam/run" && rev && id && id.value === form.elements["attempt_id"].value) {
+        form.elements["rev"].value = rev.value;
+      } else if (r.status === 409) {
+        stale = true;  // вкладка остаётся устаревшей: сообщение видно, ревизия не берётся
+        const m = doc.querySelector(".err");
+        const note = document.createElement("p");
+        note.className = "err"; note.setAttribute("role", "alert");
+        note.textContent = m ? m.textContent : "Страница устарела: открой бланк заново.";
+        form.before(note);
+      }
     }).catch(() => {}).finally(finish);
   }
   if (ms <= 0) location.href = "/exam/results/{{ v.id }}";

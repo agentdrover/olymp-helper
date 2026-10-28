@@ -1234,3 +1234,25 @@ def test_action_pressed_during_autosave_waits_for_its_reply():
     assert ".finally(finish)" in script
     # после срока отложенное действие уходит на итог, а не на форму
     assert script.index("<= 0) location.href") < script.index("form.requestSubmit(btn)")
+
+
+def test_stale_autosave_reply_is_not_taken_and_defers_nothing(tmp_path):
+    c, _clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        start_real(c)
+        tab_a = form_of(c)
+        act(c, "save", {**tab_a, "action_id": "tab-b"}, a="Б")  # вкладка B сохранила раньше
+        auto = c.post(
+            "/exam/act", data={**tab_a, "action_id": "auto-a", "action": "save", "a": "А"},
+            headers={**CHILD, "Origin": "http://testserver"}, follow_redirects=True,
+        )  # fmt: skip
+        # ответ 409 несёт актуальную ревизию: брать её нельзя, иначе вкладка A применит действие
+        assert auto.status_code == 409 and "не сохранён" in auto.text
+        fresh = re.search(r'name="rev" value="(\d+)"', auto.text).group(1)
+        assert fresh != tab_a["rev"]
+        assert act(c, "submit", tab_a, a="А").status_code == 409
+    page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
+    assert "r.ok && r.redirected" in page and '=== "/exam/run"' in page
+    assert "id.value === form.elements" in page and "if (stale) return;" in page
