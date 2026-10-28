@@ -82,6 +82,7 @@ def _unfence(text: str) -> str:
 _NOTHING = object()
 # Блок кода с любым тегом (json, JSON, jsonc, js, text, пробелы): тег не решает, что это не данные.
 _FENCE = re.compile(r"```[ \t]*[\w+.-]*[ \t]*\n?(.*?)```", re.DOTALL)
+_TAG_LINE = re.compile(r"[ \t]*[\w+.-]*[ \t]*")
 STRICT_KEY = "x-strict-json"  # метка схемы: ответ - ровно один объект, без вступления
 
 
@@ -145,8 +146,9 @@ def _strict_json(text: str):
     if fenced:
         body = fenced.group(1).strip()
         candidates = [body]
-        if "\n" in body:
-            candidates.append(body.split("\n", 1)[1].strip())  # первая строка - тег
+        first, _, tail = fenced.group(1).partition("\n")
+        if tail and _TAG_LINE.fullmatch(first):  # первая строка - тег, только если она тег
+            candidates.append(tail.strip())
     for cand in candidates:
         try:
             obj = json.loads(cand)

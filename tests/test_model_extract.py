@@ -157,3 +157,38 @@ def test_strict_mode_takes_a_brace_free_preamble_before_one_object_or_fence():
         "Сначала посмотрю на текст.\n\n```JSON\n" + body + "\n```",
     ):
         assert parse_cli_json(out(text), JUDGE).json == VERDICT
+
+
+OBJ_T = '{"reveals": true, "reason": "r"}'
+OBJ_F = '{"reveals": false, "reason": "ok"}'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"```\n{OBJ_T}\n{OBJ_F}\n```",
+        f"```json {OBJ_T}\n{OBJ_F}\n```",
+        f"Вот:\n```json\n{OBJ_T}\n{OBJ_F}\n```",
+        f"```json\nещё слова\n{OBJ_F}\n```",
+    ],
+)
+def test_strict_mode_does_not_drop_a_first_line_that_is_not_a_tag(text):
+    with pytest.raises(ChannelError, match="bad_schema_json"):
+        parse_cli_json(out(text), JUDGE)
+    with pytest.raises(ChannelError, match="bad_schema_json"):
+        parse_cli_json(out(text), SCHEMA)  # мягкий режим: то же
+
+
+def test_the_judge_schema_is_strict_where_lenient_would_accept():
+    from app.tutor.prompts import JUDGE_SCHEMA
+
+    text = 'Ответ: {"reveals": false, "reason": "ok"} готово'
+    assert parse_cli_json(out(text), SCHEMA).json["reveals"] is False  # мягкий берёт
+    with pytest.raises(ChannelError, match="bad_schema_json"):
+        parse_cli_json(out(text), JUDGE_SCHEMA)
+
+
+def test_a_closed_broken_object_next_to_a_valid_one_is_an_error():
+    for text in ('Итог {"a": 1,} и {"a": 2}', '{"a": 2} и {"a": 1,}'):
+        with pytest.raises(ChannelError, match="bad_schema_json"):
+            parse_cli_json(out(text), SCHEMA)
