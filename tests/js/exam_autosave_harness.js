@@ -12,30 +12,38 @@ const fail = (m) => { console.error("FAIL: " + m); process.exit(1); };
 
 const DEADLINE = Date.parse("2026-01-01T10:10:00Z");
 
-function build(reply) {
-  const clock = { t: DEADLINE - 600000 };
+function build(reply, opts = {}) {
+  const clock = { t: DEADLINE - (opts.left || 600000) };
   class FakeDate extends Date { static now() { return clock.t; } }
-  class FakeFormData {
-    constructor(form) { this.map = new Map(form.fields.map((f) => [f.name, f.value])); }
-    set(k, v) { this.map.set(k, v); }
-    get(k) { return this.map.get(k); }
-  }
-  const mk = (extra) => Object.assign({ disabled: false, id: "", dataset: {} }, extra);
+  const mk = (extra) => Object.assign({ disabled: false, id: "", dataset: {}, tag: "button", type: "submit" }, extra);
+  const hidden = (name, value) => mk({ tag: "input", type: "hidden", name, value });
   const controls = {
     open: mk({ name: "action", value: "open:2" }), save: mk({ name: "action", value: "save" }),
     mark: mk({ name: "action", value: "mark" }), submit: mk({ name: "action", value: "submit", id: "exam-submit" }),
-    text: mk({ name: "n" }),
+    text: mk({ tag: "input", type: "text", name: "n", value: "28" }),
+    pick: mk({ tag: "select", type: "select-one", name: "m.1", value: "B" }),
   };
+  const fields = [hidden("attempt_id", "7"), hidden("rev", "5"), hidden("shown", "1"), hidden("action_id", "orig")];
+  const all = [...fields, ...Object.values(controls)];
+  // Как в браузере: new FormData(form) берёт поля ответа с именем и без disabled; кнопки без submitter не входят.
+  class FakeFormData {
+    constructor(form) { this.map = new Map(form.all.filter((f) => f.name && !f.disabled && f.tag !== "button").map((f) => [f.name, f.value])); }
+    set(k, v) { this.map.set(k, v); }
+    get(k) { return this.map.get(k); }
+  }
+  const SELECTOR = "button, input:not([type=hidden]), select";
   const handlers = {};
   const notes = [];
   const form = {
-    fields: [{ name: "attempt_id", value: "7" }, { name: "rev", value: "5" }, { name: "shown", value: "1" }, { name: "action_id", value: "orig" }],
-    elements: {},
+    all, elements: {},
     addEventListener(t, fn) { (handlers[t] = handlers[t] || []).push(fn); },
-    querySelectorAll() { return Object.values(controls); },
+    querySelectorAll(sel) {
+      if (sel !== SELECTOR) throw new Error("селектор вне модели: " + sel);
+      return all.filter((f) => f.tag === "button" || f.tag === "select" || (f.tag === "input" && f.type !== "hidden"));
+    },
     before(n) { notes.push(n); },
   };
-  for (const f of form.fields) form.elements[f.name] = f;
+  for (const f of fields) form.elements[f.name] = f;
   const left = { dataset: { deadline: new Date(DEADLINE).toISOString(), now: new Date(clock.t).toISOString() }, textContent: "" };
   const document = {
     getElementById: (id) => (id === "exam-left" ? left : id === "exam-form" ? form : null),
@@ -47,7 +55,7 @@ function build(reply) {
   const loc = { href: "" };
   let confirms = 0;
   const ctx = {
-    document, fetch, FormData: FakeFormData, Date: FakeDate, Math, String, Promise, console,
+    document, fetch, URL, FormData: FakeFormData, Date: FakeDate, Math, String, Promise, console,
     setInterval: (fn) => { tick = fn; }, setTimeout: (fn) => fn(), location: loc,
     confirm: () => { confirms++; return true; }, window: { addEventListener() {} },
   };
@@ -73,6 +81,7 @@ const ok = (body) => () => Promise.resolve({
   ok: true, status: 200, redirected: true, url: "http://x/exam/run",
   text: async () => '<input name="attempt_id" value="7"><input name="rev" value="99">',
 });
+const toResults = () => Promise.resolve({ ok: true, status: 200, redirected: true, url: "http://x/exam/results/7", text: async () => "" });
 const conflict = () => Promise.resolve({ ok: false, status: 409, redirected: false, text: () => Promise.reject(new Error("body lost")) });
 const flush = () => new Promise((r) => setTimeout(r, 5));
 const alerts = (p) => p.notes.filter((n) => n.attrs.role === "alert");
@@ -116,9 +125,32 @@ const scenarios = {
     if (d.url !== "/exam/act" || d.data.get("action") !== "save") fail("не save: " + d.data.get("action"));
     if (!String(d.data.get("action_id")).startsWith("auto-")) fail("action_id " + d.data.get("action_id"));
     if (d.data.get("rev") !== "5") fail("rev в запросе " + d.data.get("rev"));
+    if (d.data.get("n") !== "28" || d.data.get("m.1") !== "B") fail("в POST нет ответа ребёнка: " + JSON.stringify([...d.data.map]));
     if (p.form.elements.rev.value !== "5") fail("rev в форме изменился: " + p.form.elements.rev.value);
     if (alerts(p).length || !p.notes.some((n) => n.textContent === "Ответы сохранены")) fail("сообщение об успехе: " + JSON.stringify(p.notes));
     if (p.loc.href) fail("ушли со страницы до срока");
+  },
+  async redirect_to_results_is_not_a_saved_answer() {
+    const p = build(toResults);
+    p.at(1400); await flush();
+    if (alerts(p).length !== 1) fail("ответ после срока выдан за сохранённый: " + JSON.stringify(p.notes));
+    if (p.notes.some((n) => n.textContent === "Ответы сохранены")) fail("ложное «Ответы сохранены»");
+  },
+  async page_opened_inside_the_window_is_closed_at_once() {
+    const p = build(ok(), { left: 1000 });  // ни одного тика ещё не было
+    if (!Object.values(p.controls).every((c) => c.disabled)) fail("бланк открыт до первого тика");
+    if (p.forceSubmit(p.controls.submit) || p.forceSubmit(p.controls.save)) fail("отправка до первого тика");
+    p.at(900); await flush();
+    if (p.posts.length > 1) fail("POST " + p.posts.length);
+    p.at(500); await flush();
+    if (p.posts.length > 1) fail("POST " + p.posts.length);
+  },
+  async handlers_compare_the_deadline_not_only_the_flag() {
+    const p = build(ok());
+    p.clock.t = DEADLINE - 1000;  // окно наступило, тик ещё не был
+    if (p.press(p.controls.submit)) fail("клик прошёл в окне без тика");
+    if (p.forceSubmit(p.controls.mark)) fail("submit прошёл в окне без тика");
+    if (p.posts.length) fail("POST " + p.posts.length);
   },
   async deadline_goes_to_results() {
     const p = build(ok());

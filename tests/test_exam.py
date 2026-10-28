@@ -1215,6 +1215,21 @@ def test_second_tab_save_makes_the_first_tab_submit_stale_and_keeps_the_newer_an
         assert row[0] == '"Б"' and current(c)[1]["status"] == "running"
 
 
+def test_autosave_arriving_after_the_deadline_redirects_to_results_and_saves_nothing(tmp_path):
+    """Запрос после срока: 303 на итог (не на бланк), ответ не сохранён - вкладка не вправе считать его сохранённым."""
+    c, clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        a = start_real(c).json()["attempt_id"]
+        tab = form_of(c)
+        clock.advance(601)
+        late = act(c, "save", {**tab, "action_id": "auto-late"}, a="А")
+        assert late.status_code == 303 and late.headers["location"] == f"/exam/results/{a}"
+        row = db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 1").fetchone()
+        assert row[0] is None
+
+
 def test_results_page_closes_an_attempt_whose_deadline_passed_without_submit(tmp_path):
     """Бланк уводит на итог по сроку без нажатия «Сдать»: страница итога сама закрывает попытку."""
     c, clock, _ = boot(tmp_path)
@@ -1236,6 +1251,9 @@ _AUTOSAVE_SCENARIOS = [
     "network_error_shows_alert",
     "success_one_save_and_form_unchanged",
     "deadline_goes_to_results",
+    "redirect_to_results_is_not_a_saved_answer",
+    "page_opened_inside_the_window_is_closed_at_once",
+    "handlers_compare_the_deadline_not_only_the_flag",
 ]
 
 

@@ -44,46 +44,54 @@
 // Счёт от серверного срока (ceil: нуль только когда срок наступил). За ~1,5 с до срока бланк один
 // раз отправляет форму действием save тем же POST /exam/act и сразу закрывается: поля и кнопки
 // выключены, любая отправка отменяется. Ответ ничего не меняет в форме (ревизию из него не берём),
-// отложенных действий нет: старые данные уйти не могут. После срока - переход на страницу итога.
+// отложенных действий нет: старые данные уйти не могут. Страница, открытая уже в этом окне,
+// закрыта с первой секунды (автосохранение ей не нужно: данные только что пришли с сервера).
+// После срока - переход на страницу итога.
 const left = document.getElementById("exam-left"), form = document.getElementById("exam-form");
 const offset = new Date(left.dataset.now) - Date.now();
-let closed = false;
+const remaining = () => new Date(left.dataset.deadline) - (Date.now() + offset);
+const lock = () => form.querySelectorAll("button, input:not([type=hidden]), select").forEach(x => { x.disabled = true; });
 const say = (text, role) => {
   const note = document.createElement("p");
   note.className = role === "alert" ? "err" : "notice"; note.setAttribute("role", role);
   note.textContent = text;
   form.before(note);
 };
+// Закрыт ли бланк: сравниваем срок с часами, а не только флаг (тик может ещё не прийти).
+const isClosed = () => { if (remaining() <= 1500) { lock(); return true; } return false; };
+let autosaved = false;
+if (isClosed()) autosaved = true;
 setInterval(() => {
-  const ms = new Date(left.dataset.deadline) - (Date.now() + offset);
+  const ms = remaining();
   const s = Math.max(0, Math.ceil(ms / 1000));
   left.textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  if (ms <= 1500 && ms > 0 && !closed) {
-    closed = true;
+  if (ms <= 1500 && ms > 0 && !autosaved) {
+    autosaved = true;
     // Форма собирается до блокировки (выключенные поля в неё не попадают).
     const data = new FormData(form);
     data.set("action", "save");
     data.set("action_id", "auto-" + Math.random().toString(36).slice(2));
-    form.querySelectorAll("button, input:not([type=hidden]), select").forEach(x => { x.disabled = true; });
+    lock();
     fetch("/exam/act", {method: "POST", body: data, keepalive: true}).then(r => {
-      // Статус смотрим до чтения тела; 409 и любой не-успех: последнее могло не сохраниться.
-      if (r.status === 409 || !r.ok) say("Последние изменения могли не сохраниться", "alert");
-      else say("Ответы сохранены", "status");
+      // Статус смотрим до чтения тела. Успех - только редирект на бланк; 409, редирект на итог
+      // (запрос пришёл после срока) и любой другой ответ: последнее могло не сохраниться.
+      if (r.ok && r.redirected && new URL(r.url).pathname === "/exam/run") say("Ответы сохранены", "status");
+      else say("Последние изменения могли не сохраниться", "alert");
     }).catch(() => say("Последние изменения могли не сохраниться", "alert"));
   }
   if (ms <= 0) location.href = "/exam/results/{{ v.id }}";
 }, 250);
 form.addEventListener("submit", e => {
   // Закрытый бланк ничего не отправляет.
-  if (closed) { e.preventDefault(); e.stopImmediatePropagation(); }
+  if (isClosed()) { e.preventDefault(); e.stopImmediatePropagation(); }
 });
 form.addEventListener("click", e => {
-  if (closed) { e.preventDefault(); return; }
+  if (isClosed()) { e.preventDefault(); return; }
   if (e.target.id === "exam-submit" && !confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) e.preventDefault();
 });
 form.addEventListener("submit", () => {
   // Поля блокируются после того, как браузер собрал форму (выключенная кнопка не отправляется).
-  setTimeout(() => form.querySelectorAll("button, input:not([type=hidden]), select").forEach(x => { x.disabled = true; }), 0);
+  setTimeout(lock, 0);
 });
 window.addEventListener("pageshow", e => { if (e.persisted) location.reload(); });
 </script>
