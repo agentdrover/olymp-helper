@@ -1010,6 +1010,7 @@ def test_every_child_route_is_classified(tmp_path):
         # безопасная выдача условия: без ключа и признака верности
         ("GET", "/api/tasks"): safe, ("GET", "/api/tasks/{task_id}"): safe,
         ("GET", "/api/search"): safe, ("GET", "/tasks/{task_id}/figure.png"): safe,
+        ("GET", "/tasks/{task_id}/figure/{tile_id}.png"): safe,
         ("GET", "/exam/figure/{position}.png"): safe,
         # бланк: собственные ответы ребёнка текущего прохождения
         ("GET", "/exam/run"): exam_own, ("POST", "/exam/act"): exam_own,
