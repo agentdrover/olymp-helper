@@ -4,8 +4,10 @@ import json
 import threading
 
 from app.db import connect, migrate
+from app.model.adapters import parse_cli_json
 from app.model.service import LIMIT_MESSAGE, ModelService
-from app.model.types import ModelResult
+from app.model.types import ChannelError, ModelResult
+from app.tutor.flow import LONG_TALK
 from app.tutor.guard import GENERIC
 from tests.tutor_helpers import Blocking, Judged, attempt, boot, events, out, post, seed, view
 
@@ -386,3 +388,158 @@ def test_without_a_key_an_unavailable_judge_withholds_the_explanation(tmp_path):
         attempt(c, tid, "Б")
         got = post(c, tid, "explain", mode="simpler").json()
     assert got["explains"] == [] and "не получилось" in got["notice"]
+
+
+TWO_OBJECTS = (
+    'Пример: {"reveals": false, "reason": "пример"} ... '
+    'Итог: {"reveals": true, "reason": "раскрывает ответ"}'
+)
+
+
+DUPLICATE_KEY_ANSWERS = (
+    '{"reveals":true,"reveals":false,"reason":"ok"}',
+    '{"reveals":true,"\\u0072eveals":false,"reason":"ok"}',
+    '{"reveals":false,"reason":"ok","d":{"a":1,"a":2}}',
+)
+ONE_LINE_FENCES = (
+    '```json {"reveals":false,"reason":"ok"}```',
+    '```{"reveals":false,"reason":"ok"}```',
+    'Вердикт: ```JSON{"reveals":false,"reason":"ok"}```',
+)
+
+
+def judge_through_the_parser(content):
+    """Ответ судьи идёт через настоящий разбор CLI, как в бою: ошибка разбора - сбой канала."""
+    stdout = json.dumps({"type": "result", "result": TWO_OBJECTS})
+    try:
+        return parse_cli_json(stdout, {"type": "object"}).json
+    except ChannelError as exc:
+        return ModelResult.failure("cursor", "stub", exc.kind)
+
+
+LEAK_TEXT = "Подумай про энергетическую станцию клетки"
+JUDGE_ANSWERS = {
+    "hidden_fence": 'Пример: {"reveals": false, "reason": "пример"}\n'
+    '```JSON\n{"reveals": true, "reason": "раскрывает"}\n```',
+    "broken_outer": 'Итог: {"reveals": true, "reason": "r", "d": {"reveals": false, '
+    '"reason": "ok"},}',
+    "after_object": 'Вот вердикт: {"reveals": true, "reason": "r"} и ещё {"reveals": false, "reason": "x"}',
+}
+
+
+class ParsingJudge(Judged):
+    """Судья разбирает ответ тем, что реально передал flow: схема (и её метка strict) из вызова."""
+
+    def __init__(self, text, **kw):
+        super().__init__(**kw)
+        self.text = text
+
+    def complete_on(self, channel, system, messages, schema=None, session_id=None):
+        super().complete_on(channel, system, messages, schema, session_id)
+        stdout = json.dumps({"type": "result", "result": self.text})
+        try:
+            parsed = parse_cli_json(stdout, schema).json
+        except ChannelError as exc:
+            return ModelResult.failure("cursor", "stub", exc.kind)
+        return ModelResult(None, parsed, channel, "stub", 1, None)
+
+
+def hint_html_with_judge_text(tmp_path, text):
+    model = ParsingJudge(text, reply=generation(LEAK_TEXT, "Б"))
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        hint = post(c, tid, "hint", level=1).json()
+    return json.dumps([h["html"] for h in hint["hints_list"]], ensure_ascii=False), model
+
+
+def test_the_judge_never_lets_a_leak_through_on_a_doubtful_answer(tmp_path):
+    for n, text in enumerate(JUDGE_ANSWERS.values()):
+        html, _model = hint_html_with_judge_text(tmp_path / f"d{n}", text)
+        assert GENERIC["hint1"] in html and LEAK_TEXT not in html, text
+
+
+def test_the_flow_passes_the_strict_schema_to_the_judge(tmp_path):
+    # Скобка во вступлении: годно только в мягком режиме, строгий отвергает.
+    text = 'Ответ: {"reveals":false,"reason":"ok"} готово'
+    html, model = hint_html_with_judge_text(tmp_path, text)
+    assert model.judge_calls and model.judge_calls[0]["schema"].get("x-strict-json") is True
+    assert GENERIC["hint1"] in html and LEAK_TEXT not in html
+
+
+def test_the_judge_with_a_contradicting_duplicate_key_is_a_failure(tmp_path):
+    for n, text in enumerate(DUPLICATE_KEY_ANSWERS):
+        html, _model = hint_html_with_judge_text(tmp_path / f"k{n}", text)
+        assert GENERIC["hint1"] in html and LEAK_TEXT not in html, text
+
+
+def test_a_one_line_fence_with_a_tag_is_a_verdict(tmp_path):
+    for n, text in enumerate(ONE_LINE_FENCES):
+        html, _model = hint_html_with_judge_text(tmp_path / f"o{n}", text)
+        assert LEAK_TEXT in html, text
+
+
+class Sized(Judged):
+    """Мерка размера по модели канала: ответ задан, вызовы записаны."""
+
+    def __init__(self, fits_ok, **kw):
+        super().__init__(**kw)
+        self.fits_ok = fits_ok
+        self.fits_calls = []
+
+    def fits(self, system, messages, schema=None, channel=None):
+        self.fits_calls.append(channel)
+        return self.fits_ok
+
+
+def test_a_request_that_does_not_fit_by_the_channel_model_is_a_long_talk(tmp_path):
+    # Мерка по умолчанию (без имени модели) сочла бы запрос годным; мерка модели - нет.
+    model = Sized(False, reply=lambda kind, content: out("Б"))
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        got = post(c, tid, "hint", level=1).json()
+    assert model.fits_calls and model.calls == []
+    assert got["notice"] == LONG_TALK and got["panel"]["state"] != "down"
+
+
+def test_the_judge_request_is_measured_on_the_judge_channel(tmp_path):
+    model = Sized(True, reply=generation(LEAK_TEXT))
+    model.fits = lambda s, m, sc=None, ch=None: model.fits_calls.append(ch) or ch is None
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        got = post(c, tid, "hint", level=1).json()
+    assert "cursor" in model.fits_calls and model.judge_calls == []
+    assert got["notice"] == LONG_TALK
+
+
+def test_request_too_large_from_the_model_is_a_long_talk_not_a_failure_in_the_tutor(tmp_path):
+    big = ModelResult.failure("claude", "stub", "request_too_large")
+    c, _clock, model = boot(tmp_path, Judged(reply=lambda kind, content: big))
+    with c:
+        tid = seed(tmp_path, key="Б", options=OPTS, text=COND)
+        attempt(c, tid, "А")
+        got = post(c, tid, "hint", level=1).json()
+    assert model.calls and got["notice"] == LONG_TALK and got["panel"]["state"] != "down"
+
+
+def test_an_ambiguous_judge_answer_never_lets_a_leaking_hint_through(tmp_path):
+    leak = "Подумай про энергетическую станцию клетки"
+    hint, _model = run_hint(tmp_path, leak, judge_through_the_parser)
+    html = json.dumps([h["html"] for h in hint["hints_list"]], ensure_ascii=False)
+    assert GENERIC["hint1"] in html and leak not in html
+
+
+def test_a_too_large_judge_request_keeps_the_long_talk_notice_on_explain(tmp_path):
+    big = lambda content: ModelResult.failure("cursor", "stub", "request_too_large")
+    model = Judged(judge=big, reply=lambda kind, content: out("Б", "Это важный механизм."))
+    c, _clock, _m = boot(tmp_path, model)
+    with c:
+        tid = seed(tmp_path, key=None, model_answer="Б", options=OPTS, text=COND)
+        assert attempt(c, tid, "Б").json()["state"] == "solved_unknown"
+        got = post(c, tid, "explain", mode="simpler").json()
+    assert got["explains"] == [] and got["notice"] == LONG_TALK

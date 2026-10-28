@@ -14,11 +14,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app.model.adapters import ADAPTERS
+from app.model.images import decode_images
 from app.model.runner import cli_launcher, make_sweeper, run_cli
-from app.model.types import ModelResult
+from app.model.types import ChannelError, ModelResult
 
 log = logging.getLogger("app.model.executor")
-MAX_BODY = 1_000_000
+# Текст и до MAX_IMAGES PNG в base64 (app.model.images); клиент мерит тот же предел до вызова.
+MAX_BODY = 3_000_000
 KEY_HEADER = "X-Executor-Key"
 RESTART_DELAY_S = 30
 
@@ -97,6 +99,10 @@ def handle_request(
     if parts is None:
         return _failure(channel, "bad_request")
     model, system, messages, schema = parts
+    try:
+        images = decode_images(payload.get("images") or [])
+    except ChannelError as exc:  # неверное вложение отклоняется до замка и до запуска CLI
+        return _failure(channel, exc.kind)
     if gate is not None:
         if gate.fault_reason:  # быстрый ответ; окончательная проверка - под замком
             return _failure(channel, "faulty")
@@ -121,6 +127,7 @@ def handle_request(
             launcher=launcher,
             on_fault=gate.fault if gate is not None else None,
             sweeper=sweeper,
+            images=images,
         ).to_dict()
     except Exception:
         log.exception("run failed")
