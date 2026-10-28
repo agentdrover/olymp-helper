@@ -2,8 +2,11 @@
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import exam
@@ -21,6 +24,8 @@ FORMAT = {
     "count_single": "1", "count_multiple": "1", "count_match": "1", "count_numeric": "1",
     "points_single": "1", "points_multiple": "2", "points_match": "3", "points_numeric": "4",
 }  # fmt: skip
+
+NODE = shutil.which("node")
 
 
 def save_format(c, tmp_path, materials=True, **over):
@@ -1189,70 +1194,57 @@ def test_save_one_second_before_deadline_is_taken_and_template_autosaves(tmp_pat
         assert "/exam/results/" in late.headers["location"]
         row = db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 1").fetchone()
         assert row[0] == '"Б"'
-    page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
-    script = page[page.index("<script>") :]
-    assert "Math.round" not in script and "Math.ceil" in script
-    assert 'data.set("action", "save")' in script and 'fetch("/exam/act"' in script
-    assert 'location.href = "/exam/results/' in script and "location.reload();\n  }" not in script
 
 
-def test_page_stays_valid_after_its_own_autosave(tmp_path):
-    c, _clock, _ = boot(tmp_path)
-    with c:
-        four(tmp_path)
-        save_format(c, tmp_path)
-        start_real(c)
-        old_tab = form_of(c)
-        # автосохранение: свой action_id, ответ - страница с новой ревизией
-        auto = c.post(
-            "/exam/act", data={**old_tab, "action_id": "auto-1", "action": "save", "a": "Б"},
-            headers={**CHILD, "Origin": "http://testserver"}, follow_redirects=True,
-        )  # fmt: skip
-        fresh = re.search(r'name="rev" value="(\d+)"', auto.text).group(1)
-        assert int(fresh) == int(old_tab["rev"]) + 1
-        # та же страница с новой ревизией в форме: сдача проходит
-        r = act(c, "submit", {**old_tab, "rev": fresh}, a="Б")
-        assert r.status_code == 303 and "/exam/results/" in r.headers["location"]
-    c2, _clock2, _ = boot(tmp_path / "b")
-    with c2:
-        four(tmp_path / "b")
-        save_format(c2, tmp_path / "b")
-        start_real(c2)
-        tab = form_of(c2)
-        act(c2, "save", {**tab, "action_id": "auto-2"}, a="Б")
-        # вкладка без автосохранения со старой ревизией по-прежнему получает 409
-        assert act(c2, "submit", tab, a="А").status_code == 409
-    page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
-    assert 'form.elements["rev"].value' in page and '"auto-"' in page
+def test_second_tab_save_makes_the_first_tab_submit_stale_and_keeps_the_newer_answer(tmp_path):
+    """Серверная часть гонки двух вкладок: старая ревизия получает 409, чужой ответ не затирается.
 
-
-def test_action_pressed_during_autosave_waits_for_its_reply():
-    page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
-    script = page[page.index("<script>") :]
-    assert "inflight = true" in script and "if (inflight) { e.preventDefault()" in script
-    assert "pending = e.submitter" in script and "form.requestSubmit(btn)" in script
-    assert ".finally(finish)" in script
-    # после срока отложенное действие уходит на итог, а не на форму
-    assert script.index("<= 0) location.href") < script.index("form.requestSubmit(btn)")
-
-
-def test_stale_autosave_reply_is_not_taken_and_defers_nothing(tmp_path):
+    Клиентская часть (после окна 1,5 с бланк закрыт, отложенных действий нет) - в node-сценариях ниже.
+    """
     c, _clock, _ = boot(tmp_path)
     with c:
         four(tmp_path)
         save_format(c, tmp_path)
         start_real(c)
         tab_a = form_of(c)
-        act(c, "save", {**tab_a, "action_id": "tab-b"}, a="Б")  # вкладка B сохранила раньше
-        auto = c.post(
-            "/exam/act", data={**tab_a, "action_id": "auto-a", "action": "save", "a": "А"},
-            headers={**CHILD, "Origin": "http://testserver"}, follow_redirects=True,
-        )  # fmt: skip
-        # ответ 409 несёт актуальную ревизию: брать её нельзя, иначе вкладка A применит действие
-        assert auto.status_code == 409 and "не сохранён" in auto.text
-        fresh = re.search(r'name="rev" value="(\d+)"', auto.text).group(1)
-        assert fresh != tab_a["rev"]
+        assert act(c, "save", {**tab_a, "action_id": "tab-b"}, a="Б").status_code == 303
+        stale_auto = act(c, "save", {**tab_a, "action_id": "auto-a"}, a="А")
+        assert stale_auto.status_code == 409 and "не сохранён" in stale_auto.text
         assert act(c, "submit", tab_a, a="А").status_code == 409
-    page = (Path(__file__).parents[1] / "app/templates/child/exam_run.html").read_text()
-    assert "r.ok && r.redirected" in page and '=== "/exam/run"' in page
-    assert "id.value === form.elements" in page and "if (stale) return;" in page
+        row = db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 1").fetchone()
+        assert row[0] == '"Б"' and current(c)[1]["status"] == "running"
+
+
+def test_results_page_closes_an_attempt_whose_deadline_passed_without_submit(tmp_path):
+    """Бланк уводит на итог по сроку без нажатия «Сдать»: страница итога сама закрывает попытку."""
+    c, clock, _ = boot(tmp_path)
+    with c:
+        four(tmp_path)
+        save_format(c, tmp_path)
+        a = start_real(c).json()["attempt_id"]
+        assert act(c, "save", a="Б").status_code == 303
+        clock.advance(601)
+        page = c.get(f"/exam/results/{a}", headers=CHILD, follow_redirects=False)
+        assert page.status_code == 200
+        res = c.get(f"/api/exam/results/{a}", headers=CHILD).json()
+        assert res["status"] == "submitted" and res["end_reason"] == "time"
+
+
+_AUTOSAVE_SCENARIOS = [
+    "closed_after_window_sends_nothing",
+    "stale_409_with_broken_body_shows_alert_and_sends_nothing",
+    "network_error_shows_alert",
+    "success_one_save_and_form_unchanged",
+    "deadline_goes_to_results",
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node не установлен")
+@pytest.mark.parametrize("scenario", _AUTOSAVE_SCENARIOS)
+def test_exam_autosave_script_runs_in_the_harness(scenario):
+    """Скрипт бланка исполняется на модели DOM: последние 1,5 с бланк закрыт, ответ ничего не меняет."""
+    harness = Path(__file__).parent / "js" / "exam_autosave_harness.js"
+    r = subprocess.run(
+        [NODE, str(harness), scenario], check=False, capture_output=True, text=True, timeout=60
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
