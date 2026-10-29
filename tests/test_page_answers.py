@@ -1035,3 +1035,24 @@ def test_match_score_annotations_are_ignored_without_losing_pairs(raw):
 )
 def test_match_score_annotations_do_not_hide_unparsed_or_conflicting_data(raw):
     assert fit(raw, "match", MATCH).value is None
+
+
+@pytest.mark.parametrize("raw", [
+    "1-А; (по 0,5 балла); 2-Б",
+    "1-А; 2-Б; (по 0,5 балла)",
+    "1–А; 2–Б; (по 1,5 балла)",
+    "1-А,  (по 0,5 балла), 2-Б",
+])
+def test_match_score_after_separator_keeps_complete_pairs(raw):
+    got = fit(raw, "match", MATCH)
+    assert got.value == {"1": "А", "2": "Б"}
+
+
+@pytest.mark.parametrize("raw", [
+    "1-А; (по 0,5 балла; 3-Я); 2-Б",
+    "1-А; (по 0,5 балла); 1-Б; 2-Б",
+    "1-А; (по 0,5 балла); 2-Я",
+    "1; (по 0,5 балла)-А; 2-Б",
+])
+def test_match_score_after_separator_cannot_hide_invalid_data(raw):
+    assert fit(raw, "match", MATCH).value is None

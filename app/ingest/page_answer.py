@@ -33,7 +33,7 @@ from app.ingest.answers import (
     normalize_answer,
 )
 
-RULES_VERSION = 2  # растёт при смене правил разбора, схемы или текста запроса к модели
+RULES_VERSION = 3  # растёт при смене правил разбора, схемы или текста запроса к модели
 
 # Коды причин отказа.
 EMPTY = "empty"
@@ -183,7 +183,7 @@ def _covered(text: str, spans: list[tuple[int, int]]) -> bool:
 # Only a standalone, fully specified score annotation can be ignored. Other
 # parenthesized text must reach the parser so it cannot hide an answer.
 _MATCH_SCORE = re.compile(
-    r"\(\s*(?:по\s+)?\d+(?:[.,]\d+)?\s*балл(?:а|ов|у)?\s*\)", re.IGNORECASE
+    r"\s*\(\s*(?:по\s+)?\d+(?:[.,]\d+)?\s*балл(?:а|ов|у)?\s*\)", re.IGNORECASE
 )
 
 
