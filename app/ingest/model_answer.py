@@ -6,6 +6,7 @@ from app.ingest.answers import display, normalize_answer
 from app.ingest.keys import candidate
 from app.ingest.prompt import ANSWER_SCHEMA, build_task_request
 from app.ingest.store import figure_of, get_task, save_snapshot
+from app.tutor.seq import bump
 
 
 def compute_model_answer(ctx, conn, task_id: int) -> bool:
@@ -16,8 +17,10 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
     task = get_task(conn, task_id)
     if task is None or figure_of(task) is not None or task["type"] == "open":
         return False
-    if task["answer_key"] is not None or candidate(conn, task) is not None:
+    cand = candidate(conn, task)
+    if task["answer_key"] is not None or (cand is not None and not cand["unverified"]):
         return False  # ключ (в том числе загруженный) есть: ответ модели не нужен
+    # непроверенный кандидат ключом не считается: ответ модели остаётся единственным эталоном
     system, messages = build_task_request(task)
     result = ctx.model.complete(system, messages, ANSWER_SCHEMA)
     payload = getattr(result, "json", None)
@@ -47,6 +50,7 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
         )
         if cur.rowcount == 1:
             save_snapshot(conn, task_id)
+            bump(conn)
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:

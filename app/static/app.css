@@ -189,3 +189,80 @@ dialog.zoom img { display: block; width: min(90vw, 960px); min-width: 560px; max
 .voice-state { margin: 0; padding: 8px 12px; border-radius: 10px; background: #FCEFD8; color: #6E3F00; }
 .voice-state[data-voice-state="recognizing"] { background: #E4EAF6; color: var(--ink-2); font-weight: 600; }
 #voice-record.recording { background: var(--warn); color: #fff; }
+
+/* OH-K1a: карта блоков и поиск заданий */
+.search-form { padding: 16px; }
+.block-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.block-card h3 { margin: 0 0 6px; font-size: 16px; }
+.block-card p { margin: 4px 0; }
+.bar { display: flex; height: 10px; border-radius: 999px; background: var(--pill); overflow: hidden; }
+.bar-ok { background: var(--accent); }
+.bar-hint { background: #B8892B; }
+.bar-wrong { background: var(--warn); }
+.bar-model { background: var(--ink-3); opacity: .5; }
+.search-row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 8px; }
+.search-row .field { flex: 1 1 320px; }
+.filters summary { cursor: pointer; padding: 6px 0; color: var(--ink-3); }
+.filter-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 900px) { .filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .filter-grid { grid-template-columns: minmax(0, 1fr); } }
+.empty-blocks { margin-top: 16px; color: var(--ink-3); }
+.empty-blocks .chip { color: var(--ink-3); }
+/* итоги занятий */
+.facts { padding-left: 20px; margin: 8px 0 16px; }
+.facts li { margin: 4px 0; }
+.summary .conclusion { margin: 16px 0 0; }
+.journal { padding-left: 20px; }
+.journal li { margin: 6px 0; }
+
+/* Карточка рисунка: страница с рамками, вид ребёнка, шаги. */
+.page-wrap { position: relative; }
+.page-wrap img { display: block; }
+.region-frame { position: absolute; border: 2px dashed #2F6B4F; background: rgba(47, 107, 79, 0.1); border-radius: 4px; pointer-events: none; box-sizing: border-box; }
+.region-frame.draft { border-style: solid; }
+.region-badge { position: absolute; left: 4px; top: 4px; width: 22px; height: 22px; border-radius: 11px; background: #2F6B4F; color: #fff; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.child-view { border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px; margin: 0 0 12px; background: var(--card); }
+.child-view-head { display: flex; justify-content: space-between; align-items: center; }
+.child-view-head h2 { margin: 0; font-size: 1rem; }
+.steps { padding-left: 1.25rem; display: grid; gap: 14px; }
+.steps h3 { margin: 0 0 4px; font-size: 1rem; }
+.steps .choices { display: flex; gap: 12px; flex-wrap: wrap; }
+.key-fields { display: grid; gap: 8px; }
+.note-row { display: block; margin: 0 0 6px; }
+
+/* Карточка рисунка v2 (#2121): ноутбук от 1280 px — верхняя полоса и три колонки. */
+.content:has(.fc) { max-width: none; padding: 12px 20px 24px; }
+.shell:has(.fc) .rail { flex: 0 0 170px; max-width: 170px; }
+.fc { padding: 0; display: flex; flex-direction: column; gap: 0; }
+.fc-bar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.fc-title { flex: 1 1 200px; min-width: 0; }
+.fc-crumb { font-size: 12px; color: var(--ink-3); }
+.fc-h { margin: 2px 0 0; font-size: 18px; }
+.fc-bar button { margin: 0; min-height: 40px; padding: 0 12px; font-size: 14px; }
+.fc-bar button.primary:disabled { opacity: .45; cursor: not-allowed; }
+.fc-bar kbd { opacity: .7; font-size: 12px; margin-left: 4px; }
+.fc-notes-row { padding: 0 16px; }
+.fc-notes-row p { margin: 6px 0 0; }
+.fc-cols { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 16px; align-items: start; }
+.fc-col { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; min-width: 0; }
+.fc-col h3 { margin: 0 0 8px; font-size: 14px; }
+.fc-pages img { max-width: 100%; }
+@media (min-width: 1280px) {
+  .fc-cols { grid-template-columns: minmax(300px, 30%) minmax(0, 1fr) minmax(280px, 26%); }
+  .fc-col { max-height: calc(100vh - 190px); overflow: auto; }
+}
+.fc-tiles { list-style: none; margin: 0 0 8px; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; }
+.fc-tile { position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.fc-tile img { display: block; width: 100%; height: auto; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.fc-num { position: absolute; left: 6px; top: 6px; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 11px; background: var(--ink); color: #fff; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.fc-tile-tools { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.fc-tile-tools button { min-height: 30px; padding: 0 8px; margin: 0; }
+.fc-tile-key { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); }
+.fc-tile-key select { flex: 1; min-width: 0; min-height: 32px; }
+.tile-warning { margin: 0; font-size: 12px; color: var(--warn); }
+.fc-q h4 { margin: 0 0 4px; font-size: 14px; font-weight: 500; }
+.fc-notes { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin: 10px 0; }
+.fc-notes summary { cursor: pointer; }
+.fc-summary { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); display: grid; gap: 4px; font-size: 13px; }
+.fc-summary .bad { color: var(--warn); }
+.why-slot:not([hidden]) { margin-top: 12px; }

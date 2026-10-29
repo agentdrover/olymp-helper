@@ -4,7 +4,8 @@ import json
 import re
 import sqlite3
 
-from app.ingest.answers import display, fit_page_answer, normalize_answer
+from app.ingest.answers import display, normalize_answer
+from app.ingest.page_answer import fit_page, refusal_text, stored_candidate
 
 _LINE = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})?)\s*[.)\-–—:]\s*(.+?)\s*$")
 _LEADING_ZEROS = re.compile(r"^0+(?=\d)")
@@ -26,25 +27,59 @@ def parse_key_text(pages: list[tuple[int, str]]) -> dict[str, str]:
 
 
 def page_candidate(task) -> dict | None:
-    """Ответ, напечатанный на странице самого задания (answer_text), приведённый к заданию."""
+    """Ответ, напечатанный на странице самого задания (answer_text), приведённый к заданию.
+
+    Форма, которую принимал прежний разбор, - как раньше (unverified=False). Новая форма
+    (reason extended_form) помечена unverified=True: official она не становится."""
     options = json.loads(task["options"]) if task["options"] else None
-    value = fit_page_answer(task["answer_text"], task["type"], options)
+    fit = fit_page(task["answer_text"], task["type"], options)
+    if fit.value is None:
+        return None
+    return {
+        "answer": display(fit.value),
+        "value": fit.value,
+        "material_id": task["material_id"],
+        "source": "page",
+        "reason": "extended_form" if fit.extended else "legacy_form",
+        "revision": task["revision"],
+        "unverified": fit.extended,
+    }
+
+
+def model_candidate(conn: sqlite3.Connection, task) -> dict | None:
+    """Ответ со страницы, приведённый моделью-нормализатором и прошедший строгую проверку.
+    Всегда unverified: чтение карточки модель не вызывает, здесь только сохранённое."""
+    value = stored_candidate(conn, task)
     if value is None:
         return None
     return {
         "answer": display(value),
         "value": value,
         "material_id": task["material_id"],
-        "source": "page",
+        "source": "page_model",
+        "reason": "model_normalized",
+        "revision": task["revision"],
+        "unverified": True,
     }
 
 
-def candidate(conn: sqlite3.Connection, task) -> dict | None:
-    """Кандидат ключа: сначала загруженный ключ, затем ответ со страницы задания.
+def page_refusal(conn: sqlite3.Connection, task) -> str | None:
+    """Почему ответ, напечатанный на странице, не стал кандидатом: фраза для родителя.
+    None, если ключ или кандидат есть либо разбирать нечего (ответа на странице нет, открытое)."""
+    if task["answer_key"] is not None or task["type"] == "open":
+        return None
+    if not str(task["answer_text"] or "").strip() or candidate(conn, task) is not None:
+        return None
+    options = json.loads(task["options"]) if task["options"] else None
+    return refusal_text(fit_page(task["answer_text"], task["type"], options).reason)
 
-    Кандидат не ключ: official он становится только после подтверждения родителем.
-    """
-    return _uploaded_candidate(conn, task) or page_candidate(task)
+
+def candidate(conn: sqlite3.Connection, task) -> dict | None:
+    """Кандидат ключа: загруженный ключ, затем ответ со страницы (правило), затем модель.
+
+    Кандидат не ключ: official он становится только после подтверждения родителем, а при
+    unverified=True - только явного (см. review.confirm). Контракт полей - в page_answer."""
+    return _uploaded_candidate(conn, task) or page_candidate(task) or model_candidate(conn, task)
 
 
 def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
@@ -72,5 +107,8 @@ def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
                 "value": value,
                 "material_id": material_id,
                 "source": "key_file",
+                "reason": None,
+                "revision": task["revision"],
+                "unverified": False,
             }
     return None

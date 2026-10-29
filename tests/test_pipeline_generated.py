@@ -120,7 +120,7 @@ def test_a_question_that_passes_every_gate_is_published_with_the_mark(tmp_path):
         assert len(mine) == 2 and {t["source"] for t in mine} == {MARK}
         for r in made:
             assert MARK in c.get(f"/tasks/{r['id']}", headers=CHILD).text
-        assert MARK in c.get("/tasks", headers=CHILD).text
+        assert MARK in c.get("/tasks?source=generated", headers=CHILD).text
         # and they are not in the parent's feed
         queue = {
             x["task_id"] for x in c.get("/parent/review/queue", headers=PARENT).json()["cards"]
@@ -132,6 +132,16 @@ def test_a_question_that_passes_every_gate_is_published_with_the_mark(tmp_path):
 
 def reason_of(task):
     return task["review_note"]
+
+
+def test_a_clean_but_different_critic_solution_goes_to_the_parent(tmp_path):
+    c, model = make_pipeline(tmp_path, {"questions": NEW[:1]}, critic=agree("А"))
+    with c:
+        request_pack(c, 1)
+        (task,) = rows(tmp_path)
+        assert task["import_status"] == "draft" and task["auto_checked"] == 0
+        assert "критик решил иначе" in reason_of(task)
+        assert model.channels_of("tutor_judge") == []
 
 
 def test_a_disagreement_or_a_failed_gate_goes_to_the_parent(tmp_path):
@@ -166,10 +176,11 @@ def test_a_disagreement_or_a_failed_gate_goes_to_the_parent(tmp_path):
             return {"reveals": True, "reason": "условие намекает на вариант Г"}
         return NOBODY
 
-    c, _ = make_pipeline(tmp_path, pack, critic=critic, editor=editor, judge=judge)
+    c, model = make_pipeline(tmp_path, pack, critic=critic, editor=editor, judge=judge)
     with c:
         request_pack(c, 4)
         made = rows(tmp_path)
+        assert len(model.channels_of("tutor_judge")) == 2  # the duplicate stops before the judge
         by_text = {r["text"]: r for r in made}
         # only the clean one is published
         assert [r["import_status"] for r in made].count("checked") == 1
@@ -281,17 +292,16 @@ def test_an_unfixable_question_goes_to_the_parent(tmp_path):
         assert "нельзя исправить" in reason_of(task) and "ошибка" in reason_of(task)
 
 
-def test_the_prefilter_stops_a_leak_before_the_judge_is_asked(tmp_path):
-    leaky = good("Подскажу: правильный ответ Г, а теперь назови органоид с хлорофиллом?", "Г")
-    c, model = make_pipeline(
-        tmp_path, {"questions": [leaky]}, critic=by_fragment({"хлорофилл": agree("Г")})
+def test_the_prefilter_stops_a_leak_before_the_judge_is_asked():
+    from app.ingest.packs import check_item
+
+    task = check_item(good("Какой органоид содержит хлорофилл? Верный вариант Г.", "Г"), "single")
+    model = PipeModel([], None, critic=agree("Г"))
+    verdict = pipeline.vet_item(
+        pipeline.PackRun(model, "claude"), task, "single", TOPIC, {TOPIC: {"title": "t"}}, set()
     )
-    with c:
-        request_pack(c, 1)
-        made = rows(tmp_path)
-        # it either never gets past the structure check or is stopped by the prefilter
-        assert all(r["import_status"] == "draft" for r in made)
-        assert model.channels_of("tutor_judge") == []
+    assert not verdict.published and "признак ответа" in verdict.reason
+    assert model.channels_of("tutor_judge") == []
 
 
 def test_an_oversized_request_is_not_sent(tmp_path, monkeypatch):

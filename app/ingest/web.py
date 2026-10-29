@@ -3,8 +3,10 @@
 import functools
 import hashlib
 import json
+import logging
 import math
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Annotated
 
@@ -14,19 +16,25 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from app.ingest import packs, review
-from app.ingest.figure_service import confirm_figure
+from app.ingest import packs, page_normalizer, review
+from app.ingest.figure_card import area_context, mode_for
+from app.ingest.figure_service import confirm_figure, preview_png, preview_tile_png
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
+from app.ingest.names import clean_original_name
 from app.ingest.progress import progress_text
 from app.ingest.publish import child_view, is_published
+from app.ingest.reparse import UNAVAILABLE, reset_material, touched_materials
 from app.ingest.review import Refusal
 from app.ingest.store import figure_of, get_task, open_db
+from app.ingest.tiles import stored_tiles
 from app.ingest.topics import load_catalog
 from app.notice import notice_redirect, notice_seen
 from app.roles import PARENT, csrf_token, current_role, require_csrf, require_parent
 from app.search import search
 from app.search.tasks import search_published_tasks
+from app.tutor import catalog
 
+log = logging.getLogger("app.ingest")
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 TEMPLATES.env.globals["csrf_token"] = csrf_token
 KINDS = ("tasks", "key", "textbook")
@@ -38,6 +46,7 @@ TYPE_LABELS = {
     "numeric": "число",
 }
 
+REPARSE_LOCK = threading.Lock()
 parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)])
 public = APIRouter()
 
@@ -71,7 +80,7 @@ def child_notice_gate(request: Request, conn: Db) -> None:
 
 
 def _refusal(exc: Refusal) -> JSONResponse:
-    return JSONResponse({"error": exc.message}, status_code=exc.status)
+    return JSONResponse({**exc.extra, "error": exc.message}, status_code=exc.status)
 
 
 # ------------------------------------------------------------------------- вход
@@ -90,6 +99,7 @@ FLASH = {
     "queued": "Сборник принят, разбор идёт.",
     "duplicate": "Файл уже загружен.",
     "requeued": "Файл перезапущен, разбор идёт.",
+    "reparse": "Сборник разбирается заново.",
 }
 
 
@@ -132,6 +142,12 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
         "FROM material m ORDER BY m.id DESC"
     ).fetchall()
     progress = ctx_of(request).progress
+    touched = touched_materials(conn)
+    stuck = {  # queued без хода разбора: запуск потерян
+        m["id"]
+        for m in rows
+        if m["import_status"] == "queued" and progress.get(m["id"], m["run_id"]) is None
+    }
     page = TEMPLATES.TemplateResponse(
         request,
         "parent/materials.html",
@@ -143,6 +159,9 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
                 )
                 for m in rows
             },
+            "touched": touched,
+            "stuck": stuck,
+            "unavailable": UNAVAILABLE,
             "flash": flash,
             "error": error,
         },
@@ -154,7 +173,7 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
 @parent.get("/parent/materials", response_class=HTMLResponse)
 def materials_page(request: Request, conn: Db, msg: str = "", id: int = 0):
     flash = FLASH.get(msg)
-    if msg in ("queued", "requeued"):  # «разбор идёт» - только пока он правда идёт
+    if msg in ("queued", "requeued", "reparse"):  # «разбор идёт» - только пока он правда идёт
         row = conn.execute("SELECT import_status FROM material WHERE id = ?", (id,)).fetchone()
         if row is None or row["import_status"] not in ("queued", "running"):
             flash = None
@@ -182,6 +201,55 @@ def upload_material(
     return RedirectResponse(
         f"/parent/materials?msg={code}&id={body['material_id']}", status_code=303
     )
+
+
+class StartFailed(Exception):
+    """Разбор после сброса не запущен; материал уже помечен failed."""
+
+
+START_FAILED = "Не удалось запустить разбор. Нажмите «Разобрать заново» ещё раз."
+
+
+def _submit_or_fail(request: Request, material_id: int) -> None:
+    """Запуск после сброса: сбой не оставляет материал queued без задания - он становится
+    failed (отдельной короткой транзакцией), и та же кнопка повторяет разбор."""
+    try:
+        request.app.state.imports.submit(material_id)
+    except Exception:
+        log.exception("reparse %s: import not started", material_id)
+        conn = open_db(ctx_of(request).db_path)
+        try:
+            conn.execute(
+                "UPDATE material SET import_status = 'failed', import_error = ? "
+                "WHERE id = ? AND import_status IN ('queued', 'running')",
+                (START_FAILED, material_id),
+            )
+        finally:
+            conn.close()
+        raise StartFailed(START_FAILED) from None
+
+
+@parent.post("/parent/materials/{material_id}/reparse")
+def reparse_material(material_id: int, request: Request, conn: Db):
+    """«Разобрать заново»: только пока ни одно задание не тронуто (reparse.reset_material)."""
+    html = _wants_html(request)
+    try:
+        with REPARSE_LOCK:  # сброс и запуск - одно действие: второй щелчок видит ход разбора
+            started = reset_material(ctx_of(request), conn, material_id)
+            if started:
+                _submit_or_fail(request, material_id)
+    except Refusal as exc:
+        if html:
+            return _materials_view(request, conn, error=exc.message, status=exc.status)
+        return _refusal(exc)
+    except (sqlite3.Error, StartFailed):
+        message = "Не удалось начать разбор заново. Повторите позже."
+        if html:
+            return _materials_view(request, conn, error=message, status=500)
+        return JSONResponse({"error": message}, status_code=500)
+    if html:
+        return RedirectResponse(f"/parent/materials?msg=reparse&id={material_id}", status_code=303)
+    return JSONResponse({"material_id": material_id, "started": started}, status_code=202)
 
 
 def _store_upload(
@@ -241,8 +309,8 @@ def _store_upload(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         cur = conn.execute(
-            "INSERT INTO material (file, sha256, kind, olympiad, year, stage, variant, pages_total) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO material (file, sha256, kind, olympiad, year, stage, variant, pages_total, "
+            "original_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 relative,
                 sha,
@@ -252,6 +320,7 @@ def _store_upload(
                 stage.strip() or None,
                 variant.strip() or None,
                 pages,
+                clean_original_name(file.filename),
             ),
         )
         material_id = cur.lastrowid
@@ -402,11 +471,17 @@ class EditBody(BaseModel):
 
 class KeyBody(BaseModel):
     answer: str
+    keep_candidate: bool = False  # лента: ответ карточки без правки не делает ключ родительским
 
 
 class ResolveBody(BaseModel):
     choice: str
     answer: str | None = None
+
+
+class TileBody(BaseModel):
+    id: str
+    label: str | None = None
 
 
 class FigureBody(BaseModel):
@@ -419,6 +494,11 @@ class FigureBody(BaseModel):
     no_answer_ack: bool = False
     teacher_note_ack: bool = False
     leak_ack: bool = False  # явное решение: текст ответа в вырезке оставлен намеренно
+    leak_digest: str | None = None  # слепок рамки и плиток отметки; без него leak_ack не действует
+    column_digest: str | None = (
+        None  # слепок колонки плиток из ответа figure-tiles; 409, если не тот
+    )
+    tiles: list[TileBody] | None = None  # плитки в порядке показа и их привязка к номерам
 
 
 def _advance(request: Request, conn, task_id: int, *, stay_if_open: bool = False) -> dict:
@@ -439,6 +519,8 @@ def _advance(request: Request, conn, task_id: int, *, stay_if_open: bool = False
 def review_page(request: Request, conn: Db):
     feed = review.open_feed(ctx_of(request), conn)
     first = feed["cards"][0] if feed["cards"] else None
+    if first is not None:  # очередь строится без PDF, первая карточка - с ним
+        first = review.card_for(ctx_of(request), conn, first["task_id"]) or first
     counter = f"1 из {feed['total']}" if first else None
     return TEMPLATES.TemplateResponse(
         request, "parent/review.html", {"card": first, "counter": counter, "total": feed["total"]}
@@ -504,6 +586,40 @@ def task_confirm(task_id: int, request: Request, conn: Db, body: ConfirmBody | N
     return _advance(request, conn, task_id, stay_if_open=True)
 
 
+@parent.post("/parent/page-answers/normalize")
+@_action
+def page_answers_normalize(request: Request, conn: Db):
+    """Явный пакетный шаг: нормализовать ответы со страниц моделью. Карточки модель не зовут.
+    В работе - фоновый поток со своим соединением (один за раз); в тестах (sync) - в запросе."""
+    ctx = ctx_of(request)
+    if not page_normalizer.LOCK.acquire(blocking=False):
+        return {"started": False, "message": "Нормализация уже идёт."}
+    if request.app.state.imports.sync:
+        try:
+            return {"started": True, "counts": page_normalizer.normalize_pending(ctx, conn)}
+        finally:
+            page_normalizer.LOCK.release()
+
+    def background():
+        try:  # соединение открывается внутри: при любой ошибке замок отпускается
+            db = open_db(ctx.db_path)
+            try:
+                page_normalizer.normalize_pending(ctx, db)
+            finally:
+                db.close()
+        except Exception:
+            log.exception("page answer normalization failed")
+        finally:
+            page_normalizer.LOCK.release()
+
+    try:
+        threading.Thread(target=background, daemon=True, name="page-answers").start()
+    except BaseException:
+        page_normalizer.LOCK.release()
+        raise
+    return {"started": True}
+
+
 @parent.post("/parent/tasks/{task_id}/skip")
 @_action
 def task_skip(task_id: int, request: Request, conn: Db):
@@ -528,7 +644,9 @@ def task_edit(task_id: int, body: EditBody, request: Request, conn: Db):
 @parent.post("/parent/tasks/{task_id}/key")
 @_action
 def task_key(task_id: int, body: KeyBody, request: Request, conn: Db):
-    return review.set_parent_key(ctx_of(request), conn, task_id, body.answer)
+    return review.set_parent_key(
+        ctx_of(request), conn, task_id, body.answer, keep_candidate=body.keep_candidate
+    )
 
 
 @parent.post("/parent/tasks/{task_id}/resolve")
@@ -567,7 +685,113 @@ def task_figure(task_id: int, body: FigureBody, request: Request, conn: Db):
         no_answer_ack=body.no_answer_ack,
         teacher_note_ack=body.teacher_note_ack,
         leak_ack=body.leak_ack,
+        leak_digest_ack=body.leak_digest,
+        column_digest_ack=body.column_digest,
+        tile_state=None if body.tiles is None else [t.model_dump() for t in body.tiles],
     )
+
+
+class ModeBody(BaseModel):
+    teacher_note: str | None = None
+    teacher_note_ack: bool = False
+
+
+@parent.post("/parent/tasks/{task_id}/figure/mode")
+@_action
+def task_figure_mode(task_id: int, body: ModeBody, request: Request, conn: Db):
+    """Какой режим получит задание при таком описании: считает assist_mode, ничего не пишет."""
+    task = get_task(conn, task_id)
+    if task is None or figure_of(task) is None:
+        raise Refusal("У этого задания нет рисунка.", 404)
+    return mode_for(task, body.teacher_note, body.teacher_note_ack)
+
+
+@parent.get("/parent/tasks/{task_id}/figure-preview.png")
+@_action
+def task_figure_preview(
+    task_id: int,
+    request: Request,
+    conn: Db,
+    page: int | None = None,
+    rect_px: str | None = None,
+    scale: float | None = None,
+):
+    """Родительский предпросмотр вырезки по текущей рамке; ребёнку недоступен."""
+    frame = None
+    if rect_px:
+        try:
+            frame = [float(v) for v in rect_px.split(",")]
+        except ValueError:
+            raise Refusal("Рамка задана неверно: нужны четыре числа.") from None
+    png = preview_png(ctx_of(request), conn, task_id, rect_px=frame, scale=scale, page=page)
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+def _frame_args(page, rect_px, scale) -> dict:
+    """Правка рамки из адреса: пусто - рамку не трогали."""
+    if not rect_px:
+        return {}
+    try:
+        frame = [float(v) for v in rect_px.split(",")]
+    except ValueError:
+        raise Refusal("Рамка задана неверно: нужны четыре числа.") from None
+    return {"rect_px": frame, "scale": scale, "page": page}
+
+
+def _tile_state_arg(state: str | None):
+    """«id:номер,id:» -> [{id, label}] в порядке показа; пусто - карточка плитки не присылала."""
+    if not state:  # пусто - плиток на карточке ещё не было: привязка по умолчанию, как без state
+        return None
+    out = []
+    for part in filter(None, state.split(",")):
+        tile, _, label = part.partition(":")
+        out.append({"id": tile, "label": label or None})
+    return out
+
+
+@parent.get("/parent/tasks/{task_id}/figure-tiles", response_class=HTMLResponse)
+@_action
+def task_figure_tiles(
+    task_id: int,
+    request: Request,
+    conn: Db,
+    page: int | None = None,
+    rect_px: str | None = None,
+    scale: float | None = None,
+    state: str | None = None,
+):
+    """Плитки и ввод ответа по текущей рамке: тот же фрагмент, что на карточке. Только чтение."""
+    task = get_task(conn, task_id)
+    figure = figure_of(task) if task is not None else None
+    if figure is None or task["excluded"]:
+        raise Refusal("У этого задания нет рисунка.", 404)
+    area = area_context(
+        ctx_of(request),
+        conn,
+        task,
+        figure,
+        frame=_frame_args(page, rect_px, scale),
+        state=_tile_state_arg(state),
+    )
+    return TEMPLATES.TemplateResponse(request, "parent/_figure_area.html", {"a": area})
+
+
+@parent.get("/parent/tasks/{task_id}/tile-preview/{tile_id}.png")
+@_action
+def task_tile_preview(
+    task_id: int,
+    tile_id: str,
+    request: Request,
+    conn: Db,
+    page: int | None = None,
+    rect_px: str | None = None,
+    scale: float | None = None,
+):
+    """Родительский предпросмотр одной плитки по текущей рамке; ребёнку недоступен."""
+    png = preview_tile_png(
+        ctx_of(request), conn, task_id, tile_id, **_frame_args(page, rect_px, scale)
+    )
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 # ----------------------------------------------------------------------- ребёнок
@@ -578,7 +802,7 @@ def _published(conn, task_id: int):
     if task is None or not is_published(task):
         raise HTTPException(404, "Задание не найдено")
     material = conn.execute(
-        "SELECT year FROM material WHERE id = ?", (task["material_id"],)
+        "SELECT year, original_name FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
     return task, material
 
@@ -589,7 +813,7 @@ def api_tasks(conn: Db):
     for task in conn.execute("SELECT * FROM task_item ORDER BY id").fetchall():
         if is_published(task):
             material = conn.execute(
-                "SELECT year FROM material WHERE id = ?", (task["material_id"],)
+                "SELECT year, original_name FROM material WHERE id = ?", (task["material_id"],)
             ).fetchone()
             out.append(child_view(task, material))
     return {"tasks": out}
@@ -602,31 +826,68 @@ def api_task(task_id: int, conn: Db):
 
 
 @public.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, conn: Db):
+def tasks_page(
+    request: Request,
+    conn: Db,
+    q: str = "",
+    block: str = "",
+    theme: str = "",
+    type: str = "",
+    source: str = "",
+    variant: str = "",
+    status: str = "",
+):
     if current_role(request) != PARENT and not notice_seen(conn):
         return notice_redirect("/tasks")
-    data = api_tasks(conn)
-    # Ребёнку — название темы из справочника, не код; список уже содержит только опубликованные.
-    topics = {
-        row["id"]: row["title"]
-        for row in conn.execute(
-            "SELECT t.id, c.title FROM task_item t JOIN topic c ON c.code = t.topic"
-        )
-    }
+    theme = theme or block
+    blocks = catalog.build_blocks(conn)
+    params = {"q": q, "theme": theme, "type": type, "source": source, "variant": variant,
+              "status": status}  # fmt: skip
+    active = any(v.strip() for v in params.values())
+    found = catalog.filter_tasks(conn, **params)
+    current = next((b for b in blocks if str(b["pos"]) == theme), None)
     return TEMPLATES.TemplateResponse(
-        request, "child/tasks.html", {**data, "topics": topics, "type_labels": TYPE_LABELS}
+        request,
+        "child/tasks.html",
+        {
+            "blocks": blocks,
+            "found": found,
+            "active": active,
+            "params": params,
+            "current": current,
+            "type_labels": TYPE_LABELS,
+            "statuses": catalog.STATUSES,
+            "generated": catalog.GENERATED,
+        },
     )
 
 
-@public.get("/tasks/{task_id}/figure.png", dependencies=[Depends(child_notice_gate)])
-def task_figure_png(task_id: int, request: Request, conn: Db):
+def _figure_of_visible(request: Request, conn, task_id: int) -> tuple[dict, dict]:
+    """Подтверждённый рисунок, который можно отдать: родителю - любой подтверждённый, ребёнку -
+    только опубликованного задания. Общая проверка для вырезки и для каждой плитки."""
     task = get_task(conn, task_id)
     figure = figure_of(task) if task is not None else None
     if figure is None or not figure.get("confirmed") or not figure.get("file"):
         raise HTTPException(404, "Рисунка нет")
     if current_role(request) != PARENT and not is_published(task):
         raise HTTPException(404, "Рисунка нет")
+    return task, figure
+
+
+@public.get("/tasks/{task_id}/figure.png", dependencies=[Depends(child_notice_gate)])
+def task_figure_png(task_id: int, request: Request, conn: Db):
+    _task, figure = _figure_of_visible(request, conn, task_id)
     return FileResponse(ctx_of(request).material_path(figure["file"]), media_type="image/png")
+
+
+@public.get("/tasks/{task_id}/figure/{tile_id}.png", dependencies=[Depends(child_notice_gate)])
+def task_tile_png(task_id: int, tile_id: str, request: Request, conn: Db):
+    """Одна плитка рисунка: файл берётся из записи задания, а не из адреса."""
+    _task, figure = _figure_of_visible(request, conn, task_id)
+    found = next((t for t in stored_tiles(figure) or [] if t["id"] == tile_id), None)
+    if found is None or not found.get("file"):
+        raise HTTPException(404, "Рисунка нет")
+    return FileResponse(ctx_of(request).material_path(found["file"]), media_type="image/png")
 
 
 @public.get("/api/search", dependencies=[Depends(child_notice_gate)])

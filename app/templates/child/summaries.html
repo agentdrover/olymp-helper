@@ -1,0 +1,52 @@
+{% extends "base_child.html" %}
+{% block title %}Мои итоги{% endblock %}
+{% block content %}
+<header>
+  <div class="kicker">Сеченовская олимпиада · отборочный этап · биология 5–7</div>
+  <h1>Мои итоги</h1>
+</header>
+<section aria-label="Занятия">
+  <h2>Занятия</h2>
+  {% if d.sessions %}
+  <ul class="revisit" data-sessions>
+    {% for s in d.sessions %}
+    <li{% if s.id == d.selected_id %} aria-current="true"{% endif %}>
+      <a href="/my?session={{ s.id }}">Занятие №{{ s.id }}</a> · {{ s.started_at[:16].replace("T", " ") }}
+      {% if s.running %}<span class="pill">идёт</span>{% elif s.summary %}<span class="pill">{{ s.summary.attempts }} {{ plural(s.summary.attempts, "попытка", "попытки", "попыток") }}</span>{% endif %}
+      {% if not s.running %}
+      {% if s.id in d.shown_ids %}<span class="hint">переписка показана родителю</span>
+      {% else %}<button type="button" data-post="/my/sessions/{{ s.id }}/show-parent">Показать родителю</button>{% endif %}
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="hint">Занятий пока нет.</p>
+  {% endif %}
+</section>
+{% if d.selected %}{% with s = d.selected %}{% include "_summary.html" %}{% endwith %}{% endif %}
+<section aria-label="Стоит вернуться">
+  <h2>Стоит вернуться</h2>
+  {% if d.revisit %}
+  <ul class="revisit">
+    {% for r in d.revisit %}
+    <li>{% if r.task_id %}<a href="/tasks/{{ r.task_id }}">№ {{ r.number }}</a>{% else %}№ {{ r.number }}{% endif %} <span class="pill">{{ r.reason }}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="hint">Пока возвращаться не к чему.</p>
+  {% endif %}
+</section>
+<section aria-label="Журнал">
+  <h2>Журнал</h2>
+  <p class="hint">Здесь записано, когда родитель открывал переписку и когда ты показывал её сам.</p>
+  {% if d.journal %}
+  <ul class="journal">
+    {% for j in d.journal %}<li data-type="{{ j.type }}">{{ j.at[:16].replace("T", " ") }} · {{ j.text }}</li>{% endfor %}
+  </ul>
+  {% else %}
+  <p class="hint">Записей пока нет.</p>
+  {% endif %}
+</section>
+<p><a href="/how">Как это работает</a></p>
+{% endblock %}

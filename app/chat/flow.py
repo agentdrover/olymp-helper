@@ -25,10 +25,9 @@ from app.chat.prompts import (
 )
 from app.ingest.publish import assist_mode
 from app.ingest.store import atomic, get_task
-from app.model.client import MAX_REQUEST_BYTES, request_size
 from app.search.textbook import search_textbooks
-from app.tutor import state
-from app.tutor.flow import LONG_TALK, Flow
+from app.tutor import state, steps
+from app.tutor.flow import LONG_TALK, Flow, fits_limit, too_large
 from app.tutor.guard import plain, prefilter_reason, strip_claims, strip_markup
 from app.tutor.panel import failure_state
 from app.tutor.prompts import ModelOutputError
@@ -51,13 +50,17 @@ class ChatFlow(Flow):
         if assist_mode(task) == "key_only":
             self.panel_state = "no_hints"  # как у разбора: без подсказок модель не зовётся
             return
-        if not self._begin(task):
+        if not self._begin(task, mode):
             return
         try:
-            run = state.active_run(self.conn, task, self.now)
-            self._exchange(task, run, mode, message)
+            self._launch(task, "_chat_work", mode, message)
         finally:
-            self._end(task)
+            if not self.launched:
+                self._end(task)
+
+    def _chat_work(self, task, mode: str, message: str) -> None:
+        run = state.active_run(self.conn, task, self.now)
+        self._exchange(task, run, mode, message)
 
     # ------------------------------------------------------------------ обмен
 
@@ -71,7 +74,7 @@ class ChatFlow(Flow):
             history=history, fragments=fragments, use_note=True,
             opened_answer=opened, feedback=feedback, shorter=shorter,
         )  # fmt: skip
-        if request_size(system, messages, CHAT_SCHEMA) > MAX_REQUEST_BYTES:
+        if not fits_limit(self.model, system, messages, CHAT_SCHEMA):
             self.notice = LONG_TALK
             return OVERFLOW
         try:
@@ -80,6 +83,9 @@ class ChatFlow(Flow):
             self.panel_state = "down"
             return None
         if not getattr(result, "ok", False):
+            if too_large(result):
+                self.notice = LONG_TALK
+                return OVERFLOW
             self.panel_state = failure_state(result)
             return None
         self.channel = getattr(result, "channel", None)
@@ -195,4 +201,5 @@ class ChatFlow(Flow):
             "withheld": reason,
         }
         with atomic(self.conn):
+            steps.hold(self.conn, self.step_id)  # опоздавший шаг ничего не публикует
             state.add_event(self.conn, self.now, "chat", task["id"], data)

@@ -1,0 +1,22 @@
+{% extends "base_parent.html" %}
+{% block title %}Итоги занятий{% endblock %}
+{% block content %}
+<h1>Итоги занятий</h1>
+<p class="hint">Итоги видны всегда. Переписку занятия можно открыть по запросу: ребёнок увидит запись об этом в своём журнале.</p>
+<div class="panel"><table>
+  <thead><tr><th scope="col">Занятие</th><th scope="col">Начало</th><th scope="col">Попыток</th><th scope="col">Вывод</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
+  {% for s in sessions %}
+  <tr{% if s.id == selected_id %} aria-current="true"{% endif %}>
+    <td>{% if s.running %}№{{ s.id }} <span class="pill">идёт</span>{% else %}<a href="/parent/summaries/{{ s.id }}">№{{ s.id }}</a>{% endif %}</td>
+    <td>{{ s.started_at[:16].replace("T", " ") }}</td>
+    <td>{{ s.summary.attempts if s.summary else "—" }}</td>
+    <td>{{ s.summary.conclusion if s.summary else "занятие идёт" }}</td>
+    <td>{% if messages.get(s.id) %}<a href="/parent/sessions/{{ s.id }}/chat">Открыть переписку</a>{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5">Занятий пока нет.</td></tr>
+  {% endfor %}
+</table></div>
+{% if running_selected %}<p class="hint">Занятие ещё идёт, итог появится после окончания.</p>{% endif %}
+{% if selected %}{% with s = selected %}{% include "_summary.html" %}{% endwith %}{% endif %}
+{% endblock %}

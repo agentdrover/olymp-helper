@@ -6,6 +6,8 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
+from app.tutor.seq import bump
+
 IDLE_TIMEOUT = timedelta(minutes=30)
 
 EVENT_TYPES = frozenset(
@@ -93,6 +95,7 @@ class SessionService:
                     ),
                 )
                 event_id = cur.lastrowid
+                bump(self.conn)  # событие по заданию меняет его панель
         if closed:
             raise SessionClosedError(session_id)
         return event_id

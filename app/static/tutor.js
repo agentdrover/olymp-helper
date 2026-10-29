@@ -5,12 +5,13 @@
   var root = document.getElementById("tutor");
   if (!root) return;
   var base = root.getAttribute("data-url");
-  var THINKING = "Думаю… обычно 5–15 с";
+  var POLL_MS = 2500;       // опрос сервера, пока шаг идёт: цепочка setTimeout, запросы не накладываются
+  var LONG_WAIT_S = 60;
+  var LONG_TEXT = "Модель отвечает долго, жду…";
   var MODEL_ACTS = { attempt: 1, hint: 1, explain: 1, repeat: 0, chat: 1 };
   var MAX_RECORD_MS = 30000;
   var MAX_BYTES = 2 * 1024 * 1024;
   var draft = "";
-  var timer = null;
 
   function zoomDialog() { return root.querySelector("dialog.zoom"); }
   function closeZoom() {
@@ -21,49 +22,161 @@
     var d = zoomDialog();
     if (!d) return;
     ev.preventDefault();
+    var from = ev.target.closest("[data-zoom-src]");  // плитка: в окне крупно её картинка
+    var big = d.querySelector("img");
+    if (from && big) big.src = from.getAttribute("data-zoom-src");
     if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
   }
 
-  function schedule() {
-    clearTimeout(timer);
-    var busy = root.querySelector(".helper-status[data-panel='thinking'], .helper-status[data-panel='second_channel']");
+  var BUSY_SEL = ".helper-status[data-panel='thinking'], .helper-status[data-panel='second_channel']";
+  var NOTE = "Помощник сейчас не отвечает — проверка по ключу работает.";
+  var timer = null;       // единственная цепочка опроса: один таймер, перед новым старый снимается
+  var fetching = false;   // запрос опроса в пути: второй не стартует
+  var pollUntil = 0;      // до этого момента опрос идёт, даже если панель в покое (сервер мог начать шаг)
+  var appliedBusy = false;    // последнее применённое состояние: шаг идёт
+  var appliedPanel = "idle";
+  var lastVer = null;     // версия последнего применённого ответа
+  var tickTimer = null;
+  var tickBase = null;
+
+  function busyNode() { return root.querySelector(BUSY_SEL); }
+
+  // Версию отдаёт сервер в каждом ответе панели (POST и опрос): хранимый монотонный счётчик задания,
+  // он растёт при любой записи, меняющей экран. Ответ с меньшей версией, чем уже применённая,
+  // опоздал - отбрасывается, откуда бы он ни пришёл. Равная версия - то же состояние, применяется.
+  function versionOf(html) {
+    var m = /data-version="(\d+)"/.exec(html);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function isOld(html) {
+    var v = versionOf(html);
+    return v !== null && lastVer !== null && v < lastVer;
+  }
+
+  function nextDelay() {
+    if (appliedBusy || Date.now() < pollUntil) return POLL_MS;
     var wait = root.querySelector("[data-wait]");
-    if (busy) timer = setTimeout(refresh, 2000);
-    else if (wait) timer = setTimeout(refresh, (parseInt(wait.getAttribute("data-wait"), 10) + 1) * 1000);
+    if (wait) return (parseInt(wait.getAttribute("data-wait"), 10) + 1) * 1000;
+    return null;
+  }
+
+  // Перепланировать опрос по свежему состоянию. Единственное место, где ставится таймер.
+  function plan() {
+    clearTimeout(timer);
+    timer = null;
+    var d = nextDelay();
+    if (d !== null) timer = setTimeout(pollTick, d);
+    startTick();
+  }
+
+  function extend() {
+    pollUntil = Math.max(pollUntil, Date.now() + LONG_WAIT_S * 1000);
+    plan();
+  }
+
+  // Секунды ожидания идут по часам сервера: он отдаёт, сколько шаг уже идёт; здесь они только тикают.
+  function renderTick() {
+    var s = busyNode();
+    if (!s || s.getAttribute("data-panel") !== "thinking" || tickBase === null) return;
+    var n = tickBase.elapsed + Math.floor((Date.now() - tickBase.at) / 1000);
+    s.textContent = n >= LONG_WAIT_S ? LONG_TEXT : "Думаю… " + n + " с";
+  }
+
+  function startTick() {
+    clearTimeout(tickTimer);
+    var s = busyNode();
+    var e = s ? parseInt(s.getAttribute("data-elapsed"), 10) : NaN;
+    if (!s || isNaN(e)) { tickBase = null; return; }
+    tickBase = { elapsed: e, at: Date.now() };
+    (function loop() {
+      renderTick();
+      tickTimer = setTimeout(loop, 1000);
+    })();
   }
 
   function field() { return document.getElementById("chat-input"); }
 
-  function swap(html) {
-    var wasOpen = zoomDialog() && zoomDialog().open;
-    if (field()) draft = field().value;  // недописанный вопрос не пропадает при обновлении панели
-    root.innerHTML = html;
-    if (field()) field().value = draft;
-    if (wasOpen) openZoom({ preventDefault: function () {} });
-    schedule();
+  // Несохранённый ответ ребёнка (вариант, число, пары, «насколько уверен») переживает замену фрагмента опросом.
+  function formState() {
+    var out = [];
+    root.querySelectorAll(".answer-form input, .answer-form select").forEach(function (e) {
+      out.push({ name: e.getAttribute("name"), type: e.getAttribute("type"), value: e.value, checked: e.checked });
+    });
+    return out;
   }
 
-  function refresh() {
-    fetch(base + "/tutor", { headers: { "HX-Request": "true" } })
-      .then(function (r) { return r.text(); }).then(swap).catch(function () {});
+  function restoreForm(saved) {
+    var fresh = root.querySelectorAll(".answer-form input, .answer-form select");
+    saved.forEach(function (s) {
+      fresh.forEach(function (e) {
+        if (e.getAttribute("name") !== s.name) return;
+        if (s.type === "radio" || s.type === "checkbox") { if (e.value === s.value) e.checked = s.checked; }
+        else e.value = s.value;
+      });
+    });
+  }
+
+  function swap(html, keepForm) {
+    var wasOpen = zoomDialog() && zoomDialog().open;
+    var saved = keepForm ? formState() : null;
+    if (field()) draft = field().value;  // недописанный вопрос не пропадает при обновлении панели
+    root.innerHTML = html;
+    if (saved) restoreForm(saved);
+    if (field()) field().value = draft;
+    if (wasOpen) openZoom({ preventDefault: function () {} });
+    lastVer = versionOf(html) || lastVer;
+    var s = root.querySelector(".helper-status");
+    appliedPanel = s ? s.getAttribute("data-panel") : "idle";
+    appliedBusy = !!busyNode();
+    plan();
+  }
+
+  // Один цикл опроса: после каждого запроса (успех, сбой, опоздавший ответ) срок проверяется заново.
+  function pollTick() {
+    timer = null;
+    if (fetching) return;
+    fetching = true;
+    var s = busyNode();
+    var step = s ? s.getAttribute("data-step") : null;
+    var done = function () { fetching = false; plan(); };
+    fetch(base + "/tutor" + (step ? "?step=" + encodeURIComponent(step) : ""), { headers: { "HX-Request": "true" } })
+      .then(function (r) { return r.text(); })
+      .then(function (html) { if (!isOld(html)) swap(html, true); })
+      .then(done, done);
   }
 
   function setThinking() {
     var s = root.querySelector(".helper-status");
-    if (s) { s.textContent = THINKING; s.setAttribute("data-panel", "thinking"); }
+    if (s) { s.textContent = "Думаю…"; s.setAttribute("data-panel", "thinking"); }
     root.querySelectorAll(".helper button").forEach(function (b) { b.disabled = true; });
+  }
+
+  // POST не дал ответа, но сервер мог принять шаг: только пометка, кнопки по последнему применённому
+  // состоянию и продление срока опроса - опрос покажет то, что есть на самом деле.
+  function lostReply() {
+    var s = root.querySelector(".helper-status");
+    if (s) { s.setAttribute("data-panel", appliedPanel); s.textContent = NOTE; }
+    if (!appliedBusy) root.querySelectorAll(".helper button").forEach(function (b) { b.disabled = false; });
+    extend();
   }
 
   function send(act, body) {
     if (act in MODEL_ACTS && MODEL_ACTS[act]) setThinking();
+    extend();
+    var accepted = false;
     return fetch(base + "/" + act, {
       method: "POST",
       headers: { "Content-Type": "application/json", "HX-Request": "true" },
       body: JSON.stringify(body || {}),
-    }).then(function (r) { return r.text(); }).then(swap).catch(function () {
-      var s = root.querySelector(".helper-status");
-      if (s) s.textContent = "Помощник сейчас не отвечает — проверка по ключу работает.";
-    });
+    }).then(function (r) {
+      accepted = r.headers.get("X-Attempt") === "accepted";
+      return r.text();
+    }).then(function (html) {
+      // форму сбрасывает только принятая попытка; отказ (шаг держит замок) выбор ребёнка не трогает
+      if (!isOld(html)) swap(html, !(act === "attempt" && accepted));
+      extend();
+    }).catch(lostReply);
   }
 
   function collect(form) {
@@ -94,21 +207,25 @@
     var text = box ? box.value.trim() : "";
     if (!text) { if (box) box.focus(); return; }
     setThinking();
+    extend();
+    var started = false;
     fetch(base + "/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", "HX-Request": "true" },
       body: JSON.stringify({ message: text, mode: mode }),
-    }).then(function (r) { return r.text(); }).then(function (html) {
-      // вопрос ушёл и получил ответ, если панель не занята и не сообщает об отказе
-      var sent = html.indexOf('data-panel="idle"') !== -1;
+    }).then(function (r) {
+      started = r.headers.get("X-Step-Started") === "1";
+      return r.text();
+    }).then(function (html) {
+      // вопрос ушёл, если сервер начал шаг или сразу ответил и панель не сообщает об отказе
+      if (isOld(html)) return extend();
+      var sent = started || html.indexOf('data-panel="idle"') !== -1;
       if (sent && mode === "chat") draft = "";
       else if (field()) draft = field().value;
-      swap(html);
+      swap(html, true);  // вопрос не стирает ответ, который ещё не отправлен
       if (sent && mode === "chat" && field()) field().value = "";
-    }).catch(function () {
-      var s = root.querySelector(".helper-status");
-      if (s) s.textContent = "Помощник сейчас не отвечает — проверка по ключу работает.";
-    });
+      extend();
+    }).catch(lostReply);
   }
 
   // ------------------------------------------------------------------------ голос
@@ -239,5 +356,12 @@
     if (ev.key === "Escape") closeZoom();
   });
 
-  schedule();
+  (function init() {
+    var s = root.querySelector(".helper-status");
+    var v = s ? s.getAttribute("data-version") : null;
+    lastVer = v ? parseInt(v, 10) : null;
+    appliedPanel = s ? s.getAttribute("data-panel") : "idle";
+    appliedBusy = !!busyNode();
+    plan();
+  })();
 })();

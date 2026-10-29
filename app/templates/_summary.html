@@ -1,0 +1,37 @@
+{# Итог занятия: факты и один вывод «к чему вернуться». Без похвалы (SPEC-1.0 1.3, правило 8). #}
+{% set conf = {"sure": "уверен", "doubt": "сомневаюсь"} %}
+<article class="card summary" aria-label="Итог занятия №{{ s.session_id }}">
+  <h2>Занятие №{{ s.session_id }}</h2>
+  <p class="hint">{{ s.started_at[:16].replace("T", " ") }}{% if s.ended_at %} — {{ s.ended_at[11:16] }} · {{ "закончено кнопкой" if s.end_reason == "explicit" else "закрыто по простою 30 минут" }}{% endif %}</p>
+  <ul class="facts">
+    <li>Темы: {{ s.topics|join(", ") if s.topics else "не размечены" }}</li>
+    <li>Попыток: {{ s.attempts }} · совпало с ключом: {{ s.correct }} · не совпало с ключом: {{ s.wrong }} · без ключа: {{ s.unknown }}{% if s.unknown %} (ответ модели, не проверен){% endif %}</li>
+    <li>Подсказок: {{ s.hints }} · «Объясни иначе»: {{ s.explains }} · сообщений помощнику: {{ s.messages }}</li>
+    {% for f in s.fallbacks %}
+    <li>Переключение канала: {{ f.from }} → {{ f.to }}{% if f.reason %} ({{ f.reason }}){% endif %}</li>
+    {% endfor %}
+    {% if s.disputed %}
+    <li>Спорный ключ: {{ s.disputed|length }} {{ plural(s.disputed|length, "отметка", "отметки", "отметок") }}{% for d in s.disputed %}{% if d.number %}, задание {{ d.number }}{% endif %}{% endfor %}</li>
+    {% endif %}
+  </ul>
+  {% if s.tasks %}
+  <div class="panel"><table>
+    <thead><tr><th scope="col">Задание</th><th scope="col">Что было</th><th scope="col">Итог</th></tr></thead>
+    <tbody>
+    {% for t in s.tasks %}
+    <tr>
+      <td>{% if t.task_id %}<a href="/tasks/{{ t.task_id }}">№ {{ t.number }}</a>{% else %}—{% endif %}{% if t.topic %}<br><span class="hint">{{ t.topic }}</span>{% endif %}{% if t.repeat %}<br><span class="pill">повтор</span>{% endif %}</td>
+      <td>
+        {% for a in t.attempts %}
+        <div>{{ a.n }}-я попытка: {% if a.answer is not none %}{{ a.answer }} — {% endif %}{{ a.result }}{% if a.confidence %} ({{ conf[a.confidence] }}){% endif %}{% if a.note %} <span class="pill">{{ a.note }}</span>{% endif %}</div>
+        {% endfor %}
+        {% if t.hints %}<div>Подсказок: {{ t.hints }}</div>{% endif %}
+      </td>
+      <td>{{ t.outcome }}{% if t.key_note %}<br><span class="pill">{{ t.key_note }}</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+  <p class="conclusion"><strong>{{ s.conclusion }}</strong></p>
+</article>

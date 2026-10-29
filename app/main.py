@@ -21,7 +21,10 @@ from app.ingest.render import PageCache
 from app.ingest.web import parent as parent_router
 from app.ingest.web import public as public_router
 from app.sessions import utcnow
+from app.summary_web import child as summary_child
+from app.summary_web import parent as summary_parent
 from app.tutor.panel import Inflight
+from app.tutor.steps import StepRunner
 from app.tutor.web import router as tutor_router
 from app.voice.service import VoiceService
 from app.voice.web import router as voice_router
@@ -64,6 +67,7 @@ def create_app(
     import_max_per_chunk: float = IMPORT_MAX_PER_CHUNK_S,
     clock=None,
     voice: VoiceService | None = None,
+    sync_steps: bool = False,
 ) -> FastAPI:
     """model - объект с complete(system, messages, schema); тесты подменяют только его.
 
@@ -74,6 +78,9 @@ def create_app(
     распознаватель.
 
     sync_imports=True выполняет импорт в потоке запроса (тесты); в работе импорт идёт фоном.
+
+    sync_steps=True выполняет шаг с моделью (подсказка, разбор, чат) в потоке запроса (тесты); в
+    работе он идёт в фоне, а экран опрашивает сервер.
     """
     clock = clock or utcnow
     path = Path(db_path or os.environ.get("OLYMP_DB", DEFAULT_DB_PATH))
@@ -113,6 +120,7 @@ def create_app(
     # Часы одни на всё приложение (clock выше): тест подменяет их, и 60 секунд до подсказки,
     # простой занятия и сессия родителя идут по одному времени.
     app.state.inflight = Inflight()
+    app.state.steps = StepRunner(app.state, sync=sync_steps)
     app.state.voice = voice or VoiceService.from_env()
     ctx = AppContext(
         path,
@@ -137,6 +145,8 @@ def create_app(
     app.include_router(account_public)
     app.include_router(parent_router)
     app.include_router(tutor_router)
+    app.include_router(summary_child)
+    app.include_router(summary_parent)
     app.include_router(voice_router)
     app.include_router(public_router)
 

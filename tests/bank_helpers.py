@@ -29,6 +29,17 @@ OPTS4 = [{"label": c, "text": f"вариант {c.lower()}"} for c in "АБВГ"
 # ---------------------------------------------------------------- PDF builders
 
 
+def post_figure_acked(client, task_id, body):
+    """POST рисунка; leak_ack действует только со слепком текущей рамки, и сервер отдаёт его в
+    отказе о находке. Так родитель и получает слепок: видит находку, затем отмечает."""
+    url = f"/parent/tasks/{task_id}/figure"
+    first = client.post(url, headers=PARENT, json=body)
+    digest = first.json().get("leak_digest") if first.status_code == 422 else None
+    if not body.get("leak_ack") or "leak_digest" in body or not digest:
+        return first
+    return client.post(url, headers=PARENT, json={**body, "leak_digest": digest})
+
+
 def write_lines(page, lines, x=50, y=80, size=11, step=16):
     tw = pymupdf.TextWriter(page.rect)
     for i, line in enumerate(lines):
@@ -238,6 +249,7 @@ def seed_state(path, *, parent=True, notice=True) -> None:
 def build_app(tmp_path, model=None, *, parent=True, notice=True, **kw):
     tmp_path.mkdir(parents=True, exist_ok=True)
     kw.setdefault("sync_imports", True)
+    kw.setdefault("sync_steps", True)  # шаги с моделью в потоке запроса; фон - test_tutor_async.py
     seed_state(tmp_path / "olymp.db", parent=parent, notice=notice)
     return create_app(db_path=tmp_path / "olymp.db", model=model, **kw)
 

@@ -1,5 +1,6 @@
 """Запуск CLI в отдельном пустом каталоге; ошибки без деталей (SPEC-1.0 1.4)."""
 
+import base64
 import logging
 import os
 import shutil
@@ -9,7 +10,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 
-from app.model.adapters import ADAPTERS, TOKEN_VARS, build_env
+from app.model.adapters import ADAPTERS, TOKEN_VARS, build_env, image_names
 from app.model.redaction import redact, redact_json
 from app.model.types import ChannelError, ModelResult
 
@@ -145,6 +146,7 @@ def run_cli(
     on_fault=None,
     sweeper=None,
     kill_wait=5.0,
+    images=(),
 ) -> ModelResult:
     """Один запуск CLI. Не бросает исключений: любой сбой - ModelResult с error.
 
@@ -171,9 +173,11 @@ def run_cli(
     try:
         try:
             _make_dirs(spawn, launcher, helper_env, root, work, home)
-            cli = adapter.build(model, system, schema)
-            stdin = adapter.stdin(system, messages, schema)
+            cli = adapter.build(model, system, schema, images)
+            stdin = adapter.stdin(system, messages, schema, images)
             cli_env = build_env(channel, env, home)
+            if images and channel == "cursor":
+                _put_images(spawn, launcher, helper_env, work, images)
             if launcher:
                 # Сервер не может зайти в каталог пользователя CLI (0700): в него переходит
                 # уже CLI-пользователь, процесс сервера стартует из корня запуска. TMPDIR ставится
@@ -202,6 +206,22 @@ def run_cli(
         )
     finally:
         _cleanup(spawn, launcher, helper_env, root, work, home, sweeper, on_fault)
+
+
+def _put_images(spawn, launcher, helper_env, work, images):
+    """Файлы PNG в каталоге запуска (владелец - пользователь CLI): cursor-agent читает их по пути."""
+    for name, data in zip(image_names(len(images)), images, strict=True):
+        path = os.path.join(work, name)
+        if not launcher:
+            with open(path, "wb") as fh:
+                fh.write(data)
+            continue
+        res = as_cli(
+            launcher, ["sh", "-c", 'base64 -d > "$0"', path], helper_env, spawn=spawn,
+            input=base64.b64encode(data).decode("ascii"), timeout=30,
+        )  # fmt: skip
+        if res.returncode != 0:
+            raise ChannelError("workdir")
 
 
 def _make_dirs(spawn, launcher, helper_env, root, work, home):
