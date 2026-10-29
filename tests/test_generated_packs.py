@@ -340,8 +340,8 @@ def test_the_migration_upgrades_a_v9_database_keeping_the_data(tmp_path):
     assert migrate(conn) == SCHEMA_VERSION >= 10  # later migrations (0011_auth, ...) stack on top
     after = conn.execute("SELECT * FROM task_item").fetchall()
     assert [tuple(r) for r in after] == [
-        (*before[0], None, None)
-    ]  # every old column kept; pack_id, key_candidate_source empty
+        (*before[0], None, None, 0)
+    ]  # old columns kept; pack_id, key_candidate_source empty, auto_checked off
     assert conn.execute("SELECT COUNT(*) FROM task_revision").fetchone()[0] == 1
     conn.execute(
         "INSERT INTO question_pack(created_at, topic, task_type, requested_count) VALUES ('t', 'b10', 'single', 3)"

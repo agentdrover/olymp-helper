@@ -304,7 +304,7 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
         missing = uncovered_lefts(task, key_value(task["answer_key"]))
         if missing:
             raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
-    update_task(conn, task_id, import_status="checked")
+    update_task(conn, task_id, import_status="checked", auto_checked=0)
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
     task = get_task(conn, task_id)

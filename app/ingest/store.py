@@ -103,6 +103,8 @@ def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
     task = get_task(conn, task_id)
     status = "draft" if task["import_status"] == "checked" else task["import_status"]
     fields = {"revision": task["revision"] + 1, "import_status": status, "model_answer": None}
+    if status == "draft":  # правка родителя: «проверено двумя моделями» больше не про это задание
+        fields["auto_checked"] = 0
     fields.update(cols)
     update_task(conn, task_id, **fields)
     save_snapshot(conn, task_id)
