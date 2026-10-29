@@ -14,6 +14,7 @@ import threading
 from app.ingest.figure_service import recheck_materials_figures
 from app.ingest.keys import _uploaded_candidate
 from app.ingest.page_answer import (
+    NEEDS_UNIT,
     RULES_VERSION,
     UNPARSED,
     build_value,
@@ -88,7 +89,7 @@ def parse_payload(payload, task_type: str, options):
 
 
 def needs_model(conn, task) -> bool:
-    """Правило не разобрало ответ, ключа и кандидата из файла нет, прежний итог устарел."""
+    """Правило не разобрало ответ без контекста единицы, ключа и кандидата из файла нет."""
     if task["excluded"] or task["type"] == "open" or task["answer_key"] is not None:
         return False
     if not str(task["answer_text"] or "").strip():
@@ -96,7 +97,8 @@ def needs_model(conn, task) -> bool:
     options = json.loads(task["options"]) if task["options"] else None
     if task["type"] != "numeric" and not options:  # у numeric вариантов нет
         return False
-    if fit_page(task["answer_text"], task["type"], options).value is not None:
+    fit = fit_page(task["answer_text"], task["type"], options)
+    if fit.value is not None or fit.reason == NEEDS_UNIT:
         return False
     if _uploaded_candidate(conn, task) is not None:
         return False

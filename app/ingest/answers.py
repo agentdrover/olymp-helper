@@ -113,7 +113,7 @@ _RANGE = re.compile(rf"(?<![\w]){_END}\s*(?:…|\.{{2,}}|[-–—])\s*{_END}(?![
 _DASHES = re.compile(r"…|\.\.|[-–—]")
 
 
-def _expand_ranges(raw: str, order: list[str]) -> str | None:
+def _expand_ranges(raw: str, order: list[str], *, expanded=None) -> str | None:
     """«№ 2 … № 7», «2-7», «2...7» -> «2, 3, 4, 5, 6, 7»: все обозначения между концами по порядку
     вариантов. Если конец - не обозначение задания или диапазон идёт назад, None."""
     failed = False
@@ -124,7 +124,10 @@ def _expand_ranges(raw: str, order: list[str]) -> str | None:
         if a not in order or b not in order or order.index(a) > order.index(b):
             failed = True
             return ""
-        return ", ".join(order[order.index(a) : order.index(b) + 1])
+        labels = order[order.index(a) : order.index(b) + 1]
+        if expanded is not None:
+            expanded.append(labels)
+        return ", ".join(labels)
 
     out = _RANGE.sub(expand, raw)
     return None if failed or _DASHES.search(out) else out  # a range left unread is ambiguous

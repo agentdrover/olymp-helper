@@ -33,7 +33,7 @@ from app.ingest.answers import (
     normalize_answer,
 )
 
-RULES_VERSION = 1  # растёт при смене правил разбора, схемы или текста запроса к модели
+RULES_VERSION = 2  # растёт при смене правил разбора, схемы или текста запроса к модели
 
 # Коды причин отказа.
 EMPTY = "empty"
@@ -146,7 +146,10 @@ def build_value(task_type: str, options, *, labels=None, pairs=None, number=None
                 return None, CONFLICT
         value = folded or None
     else:
-        found = sorted({label_key(x) for x in labels or []})
+        found = [label_key(x) for x in labels or []]
+        if task_type == "multiple" and len(set(found)) != len(found):
+            return None, CONFLICT
+        found = sorted(set(found))
         if len(found) > 1 and task_type == "single":
             return None, CONFLICT
         value = (found[0] if task_type == "single" else found) if found else None
@@ -177,6 +180,13 @@ def _covered(text: str, spans: list[tuple[int, int]]) -> bool:
     return not text[pos:].strip()
 
 
+# Only a standalone, fully specified score annotation can be ignored. Other
+# parenthesized text must reach the parser so it cannot hide an answer.
+_MATCH_SCORE = re.compile(
+    r"\(\s*(?:по\s+)?\d+(?:[.,]\d+)?\s*балл(?:а|ов|у)?\s*\)", re.IGNORECASE
+)
+
+
 def _pair_tokens(text: str) -> list[tuple[str, str]] | None:
     items, pos = [], 0
     while text[pos:].strip():
@@ -190,6 +200,11 @@ def _pair_tokens(text: str) -> list[tuple[str, str]] | None:
             break
         items.append((a, b))
         pos = m.end()
+        score = _MATCH_SCORE.match(text, pos)
+        if score:
+            pos = score.end()
+            separator = re.match(r"\s*[;,]?", text[pos:])
+            pos += separator.end() if separator else 0
     if items:
         return items
     flat = text.replace(",", " ").replace(";", " ")
@@ -263,7 +278,8 @@ def _fit_choice(raw: str, task_type: str, options) -> tuple[object, str | None]:
     if not isinstance(options, list):
         return None, NO_OPTIONS
     order = [label_key(o["label"]) for o in options]
-    text = _expand_ranges(raw, order)
+    ranges = []
+    text = _expand_ranges(raw, order, expanded=ranges)
     if text is None:
         return None, UNPARSED
     if task_type == "multiple":  # «9, 9 (9 балл)»: пояснения после списка не обозначения
@@ -280,6 +296,14 @@ def _fit_choice(raw: str, task_type: str, options) -> tuple[object, str | None]:
         found = _names(text, options)
     if found is None:
         return None, FOREIGN_LABEL if plain else UNPARSED
+    if task_type == "multiple" and ranges:
+        ranged = [label for labels in ranges for label in labels]
+        if any(
+            ranged.count(label) > 1 or found.count(label) - ranged.count(label) > 1
+            for label in set(found)
+        ):
+            return None, CONFLICT
+        found = list(dict.fromkeys(found))
     return build_value(task_type, options, labels=found)
 
 

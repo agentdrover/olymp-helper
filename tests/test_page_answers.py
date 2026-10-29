@@ -886,3 +886,152 @@ def test_editing_option_texts_of_a_match_task_does_not_call_the_model_again(tmp_
         conn.close()
         assert detail(client, tid)["key_candidate"]["answer"] == "1-А; 2-Б"
         assert normalize(client)["stored"] == 0 and len(model.norm_calls) == 1
+
+
+# ------------------------------------------------------------- Hub #2134 RED
+
+
+@pytest.mark.parametrize(
+    ("raw", "options"),
+    [("А, А", LETTERS), ("A, А", LETTERS), ("1, 1, 3", DIGITS)],
+    ids=["cyrillic", "latin_twin", "digits"],
+)
+def test_hub2134_separated_duplicate_multiple_labels_are_conflict(raw, options):
+    got = fit(raw, "multiple", options)
+    assert got.value is None and got.reason == "conflict"
+
+
+@pytest.mark.parametrize(
+    ("raw", "options"),
+    [("А, А", LETTERS), ("A, А", LETTERS), ("1, 1, 3", DIGITS)],
+    ids=["cyrillic", "latin_twin", "digits"],
+)
+def test_hub2134_duplicate_page_answer_never_becomes_official(tmp_path, raw, options):
+    client, _, tid = start(tmp_path, raw, "multiple", options)
+    with client:
+        r = client.post(f"/parent/tasks/{tid}/confirm", headers=PARENT, json={})
+        assert r.status_code == 200, r.text
+        conn = db(tmp_path)
+        row = conn.execute(
+            "SELECT answer_key, key_source FROM task_item WHERE id = ?", (tid,)
+        ).fetchone()
+        conn.close()
+        assert row["answer_key"] is None and row["key_source"] is None
+
+
+@pytest.mark.parametrize(
+    ("options", "labels"),
+    [(LETTERS, ["А", "А"]), (LETTERS, ["A", "А"]), (DIGITS, ["1", "1", "3"])],
+    ids=["cyrillic", "latin_twin", "digits"],
+)
+def test_hub2134_model_duplicate_multiple_labels_are_conflict(tmp_path, options, labels):
+    client, _, tid = start(
+        tmp_path,
+        "несколько вариантов",
+        "multiple",
+        options,
+        {"status": "ok", "labels": labels},
+    )
+    with client:
+        assert normalize(client)["rejected"] == 1
+        row = stored(tmp_path, tid)
+        assert row["value"] is None and row["reason"] == "conflict"
+        assert detail(client, tid)["key_candidate"] is None
+
+
+@pytest.mark.parametrize(
+    ("options", "labels", "want", "shown"),
+    [
+        (LETTERS, ["A", "В"], ["А", "В"], "А, В"),
+        (DIGITS, ["1", "3"], ["1", "3"], "1, 3"),
+    ],
+    ids=["latin_twin", "digits"],
+)
+def test_hub2134_model_unique_multiple_labels_remain_candidates(
+    tmp_path, options, labels, want, shown
+):
+    client, _, tid = start(
+        tmp_path,
+        "несколько вариантов",
+        "multiple",
+        options,
+        {"status": "ok", "labels": labels},
+    )
+    with client:
+        assert normalize(client)["stored"] == 1
+        row = stored(tmp_path, tid)
+        assert json.loads(row["value"]) == want and row["reason"] == "model_normalized"
+        assert detail(client, tid)["key_candidate"]["answer"] == shown
+
+
+@pytest.mark.parametrize("raw", ["12 лет", "12 месяцев", "9l999 l"])
+def test_hub2134_unknown_numeric_unit_cannot_be_removed_by_model(tmp_path, raw):
+    client, _, tid = start(
+        tmp_path, raw, "numeric", payload={"status": "ok", "number": "12"}
+    )
+    with client:
+        got = fit(raw, "numeric", None)
+        assert got.value is None and got.reason == "needs_unit_context"
+        normalize(client)
+        row = stored(tmp_path, tid)
+        assert row is None or (row["value"] is None and row["reason"] == "needs_unit_context")
+        result = detail(client, tid)
+        assert result["key_candidate"] is None
+        assert result["card"]["key_refusal"] is not None
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [("0012,50 см", "12.5"), ("5 мм", "5"), ("2,5", "2.5"), ("12%", "12"), ("3 шт.", "3")],
+)
+def test_hub2134_numeric_units_and_number_normalization_still_work(raw, want):
+    got = fit(raw, "numeric", None)
+    assert got.value == want and got.reason is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "options"),
+    [
+        ("1-3, 2, 2", DIGITS),
+        ("1-3, 1-3", DIGITS),
+        ("1-3, 2-4", DIGITS),
+        ("А-В, A, А", LETTERS),
+    ],
+    ids=["explicit_after_range", "repeated_range", "overlapping_ranges", "latin_twin"],
+)
+def test_hub2134_duplicates_after_range_expansion_are_conflict(raw, options):
+    got = fit(raw, "multiple", options)
+    assert got.value is None and got.reason == "conflict"
+
+
+def test_hub2134_one_explicit_label_may_overlap_a_range():
+    options = [{"label": str(i), "text": f"утверждение {i}"} for i in range(1, 8)]
+    got = fit("2 … 7, 3", "multiple", options)
+    assert got.value == ["2", "3", "4", "5", "6", "7"] and got.reason is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "1-А; 2-Б (по 0,5 балла)",
+        "1-А (0,5 балла); 2-Б (0,5 балла)",
+        "1-А; 2-Б (по 1 баллу)",
+    ],
+)
+def test_match_score_annotations_are_ignored_without_losing_pairs(raw):
+    got = fit(raw, "match", MATCH)
+    assert got.value == {"1": "А", "2": "Б"}, (raw, got)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "1-А (0,5 балла; 3-Я); 2-Б",
+        "1 (0,5 балла)-А; 2-Б",
+        "1-А (или 1-Б за 0,5 балла); 2-Б",
+        "1-А (0,5 балла); 1-Б; 2-Б",
+        "1-А (0,5 балла); 2-Я",
+    ],
+)
+def test_match_score_annotations_do_not_hide_unparsed_or_conflicting_data(raw):
+    assert fit(raw, "match", MATCH).value is None
