@@ -62,9 +62,12 @@ def same_answer(task_type: str, key, given) -> bool:
 
 
 def _pairs(text: str) -> dict:
-    out = {}
+    """{левое: правое}; противоречивый повтор («1-А; 1-Б») -> {}: ответа нет. Повторы
+    сверяются до сворачивания в dict."""
+    out: dict[str, str] = {}
     for left, right in _PAIR.findall(text.replace(",", " ").replace(";", " ")):
-        out[_label(left)] = _label(right)
+        if out.setdefault(_label(left), _label(right)) != _label(right):
+            return {}
     return out
 
 
@@ -110,7 +113,7 @@ _RANGE = re.compile(rf"(?<![\w]){_END}\s*(?:…|\.{{2,}}|[-–—])\s*{_END}(?![
 _DASHES = re.compile(r"…|\.\.|[-–—]")
 
 
-def _expand_ranges(raw: str, order: list[str]) -> str | None:
+def _expand_ranges(raw: str, order: list[str], *, expanded=None) -> str | None:
     """«№ 2 … № 7», «2-7», «2...7» -> «2, 3, 4, 5, 6, 7»: все обозначения между концами по порядку
     вариантов. Если конец - не обозначение задания или диапазон идёт назад, None."""
     failed = False
@@ -121,17 +124,18 @@ def _expand_ranges(raw: str, order: list[str]) -> str | None:
         if a not in order or b not in order or order.index(a) > order.index(b):
             failed = True
             return ""
-        return ", ".join(order[order.index(a) : order.index(b) + 1])
+        labels = order[order.index(a) : order.index(b) + 1]
+        if expanded is not None:
+            expanded.append(labels)
+        return ", ".join(labels)
 
     out = _RANGE.sub(expand, raw)
     return None if failed or _DASHES.search(out) else out  # a range left unread is ambiguous
 
 
-def fit_page_answer(raw, task_type: str, options):
-    """Ответ со страницы задания, приведённый к заданию: обозначения вариантов или число.
-
-    None, если ответ не складывается в обозначения этого задания: тогда это не кандидат,
-    ключ вписывает родитель. Открытые задания ключа не имеют."""
+def _fit_legacy(raw, task_type: str, options):
+    """Прежний разбор. Нужен только чтобы отличить формы, которые принимались раньше (их
+    кандидат остаётся как был), от новых (они unverified). Значение для ключа он не даёт."""
     if task_type == "open":
         return None
     if task_type == "numeric":

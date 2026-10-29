@@ -113,7 +113,7 @@ ANSWER_SCHEMA = {
     },
 }
 
-_TAGS = re.compile(r"<(/?)(pdf_data|task_data|examples_data)", re.IGNORECASE)
+_TAGS = re.compile(r"<(/?)(pdf_data|task_data|examples_data|answer_data)", re.IGNORECASE)
 
 
 def neutralize(text: str) -> str:

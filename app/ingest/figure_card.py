@@ -228,13 +228,9 @@ def card_extras(ctx, conn, task, figure: dict, shown_page: int | None, deep: boo
     notes, rest = note_lines(figure.get("teacher_note"), items)
     view, screen = child_preview(conn, task, figure, regions)
     area = area_context(ctx, conn, task, figure) if deep else None
-    key = area["key"] if area else None
-    if area is None:
-        from app.ingest.review import key_info
+    from app.ingest.review import SOURCE_LABELS, key_info
 
-        key, _source, is_candidate = key_info(conn, task)
-    else:
-        is_candidate = area["key_is_candidate"]
+    key, source, is_candidate = key_info(conn, task)
     shown_tiles = area["tiles"] if area else []
     extras = {
         "figure_items": items,
@@ -246,6 +242,7 @@ def card_extras(ctx, conn, task, figure: dict, shown_page: int | None, deep: boo
         "mode": assist_caption(screen["assist"]),
         "key_value": key,
         "key_is_candidate": is_candidate,
+        "key_source_label": SOURCE_LABELS.get(source),
         "figure_check": {"raster_only": None, "warning": None},
         "overlays": [],
         "area": area,

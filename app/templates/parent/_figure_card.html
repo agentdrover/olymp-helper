@@ -44,6 +44,10 @@
         <p class="text">{{ card.text }}</p>
         <div id="figure-area" data-figure-area>{% with a=card.area %}{% include "parent/_figure_area.html" %}{% endwith %}</div>
         <p class="hint">Источник: {{ card.child.source }}</p>
+        <p class="hint" id="key-hint">{% if card.key_value is none %}Ключа нет — выберите сами. Без ключа задание не публикуется.{% elif card.key_source_label %}Кандидат: {{ card.key_source_label }} — проверьте его.{% elif card.key_is_candidate %}Ключ из загруженного файла — проверьте его.{% else %}Ключ задан — можно изменить.{% endif %}</p>
+        {% if card.key_refusal %}<p class="hint">{{ card.key_refusal }} Выберите ответ сами.</p>{% endif %}
+        {% if card.key_candidate_source_label %}<p class="hint">Ответ подтверждён родителем; предложен: {{ card.key_candidate_source_label }}.</p>{% endif %}
+        {% if card.key and card.key_unverified %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }}) <b>не проверен</b></p>{% endif %}
         {% if card.options %}
         <p class="hint">Варианты:
           {% if card.options is mapping %}{% for o in card.options.right %}{{ o.label }} {{ o.text }}{% if not loop.last %} · {% endif %}{% endfor %}
