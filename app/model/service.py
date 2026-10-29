@@ -17,7 +17,7 @@ __all__ = ["DEFAULT_MODELS", "LIMIT_MESSAGE", "ModelService", "model_family"]
 
 # claude закреплён; cursor - auto (gpt-5 через cursor-agent на k8 падает): без закреплённой
 # модели family(cursor) None, автопубликация невозможна - осознанное ограничение.
-DEFAULT_MODELS = {"claude": "sonnet", "cursor": "auto"}
+DEFAULT_MODELS = {"claude": "sonnet", "cursor": "auto", "codex": "gpt-6.1-sol"}
 _FAMILIES = (
     (re.compile(r"(claude|sonnet|opus|haiku)([-.:\d]|$)"), "anthropic"),
     (re.compile(r"(gpt|o[134]|codex)([-.:\d]|$)"), "openai"),
@@ -87,7 +87,7 @@ class ModelService:
 
     def family(self, channel: str) -> str | None:
         """Семейство модели канала по настройкам; auto или неизвестная модель - None."""
-        if channel not in CHANNELS:
+        if channel not in self._models():
             return None
         return model_family(self._models()[channel])
 
@@ -101,20 +101,37 @@ class ModelService:
         """Помещается ли запрос в лимит исполнителя с фактической моделью канала. Без названного
         канала - на обоих: запрос, который не лезет на запасной, нельзя считать пригодным."""
         models = self._models()
-        names = [channel] if channel in models else list(models)
+        names = [channel] if channel in models else list(CHANNELS)
         return all(
             request_size(system, messages, schema, (), n, models[n]) <= MAX_REQUEST_BYTES
             for n in names
         )
 
     def _models(self) -> dict:
-        claude_model, cursor_model = self.conn.execute(
-            "SELECT claude_model, cursor_model FROM settings WHERE id = 1"
+        claude_model, cursor_model, codex_model = self.conn.execute(
+            "SELECT claude_model, cursor_model, codex_model FROM settings WHERE id = 1"
         ).fetchone()
         return {
             "claude": claude_model or DEFAULT_MODELS["claude"],
             "cursor": cursor_model or DEFAULT_MODELS["cursor"],
+            "codex": codex_model or DEFAULT_MODELS["codex"],
         }
+
+    def judge_channel(self, author: str) -> str | None:
+        """Select an independent checker without generation fallback."""
+        if author not in CHANNELS:
+            return None
+        enabled = self.conn.execute("SELECT codex_enabled FROM settings WHERE id = 1").fetchone()[0]
+        if not enabled:
+            return "cursor" if author == "claude" else "claude"
+        return "codex"
+
+    def independent_checker(self, author: str) -> str | None:
+        """For automatic publication, both actual families must be known and distinct."""
+        checker = self.judge_channel(author)
+        author_family = self.family(author)
+        judge_family = self.family(checker) if checker else None
+        return checker if author_family and judge_family and author_family != judge_family else None
 
     def _attempt(self, name, model, system, messages, schema, fallback, images=None) -> ModelResult:
         # Размер тела (с вложениями и фактическим именем модели) - до резерва лимита:
