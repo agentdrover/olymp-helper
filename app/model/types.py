@@ -3,7 +3,7 @@
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
-CHANNELS = ("claude", "cursor")
+CHANNELS = ("codex", "cursor", "claude")  # claude remains readable for historical records
 
 # Единственное, что видит ребёнок: без технических подробностей и без трассы.
 ERROR_MESSAGE = "Помощник сейчас не отвечает — проверка по ключу работает."

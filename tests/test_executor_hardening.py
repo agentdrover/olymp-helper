@@ -317,18 +317,18 @@ def test_compose_and_sandbox_carry_the_shared_key_and_restart_policy():
     root = Path(__file__).parent.parent / "deploy" / "executor"
     compose = (root.parent / "compose.yaml").read_text(encoding="utf-8")
     services = yaml.safe_load(compose)["services"]
-    for name in ("executor-claude", "executor-cursor"):
+    for name in ("executor-codex", "executor-cursor"):
         svc = services[name]
         assert svc["environment"]["EXECUTOR_SHARED_KEY"].startswith("${EXECUTOR_SHARED_KEY:?")
         assert svc["init"] is True and "healthcheck" in svc
         assert svc["restart"] == "unless-stopped"
-    assert "EXECUTOR_SHARED_KEY" in (root / "sandbox.sh").read_text(encoding="utf-8")
-    assert "--init" in (root / "sandbox.sh").read_text(encoding="utf-8")
+    assert "EXECUTOR_SHARED_KEY" in (root / "sandbox-cursor.sh").read_text(encoding="utf-8")
+    assert "--init" in (root / "sandbox-cursor.sh").read_text(encoding="utf-8")
     # Без /dev/shm: иначе это место записи CLI, которое переживает запуск.
     assert compose.count("ipc: none") == 2
-    assert "--ipc none" in (root / "sandbox.sh").read_text(encoding="utf-8")
+    assert "--ipc none" in (root / "sandbox-cursor.sh").read_text(encoding="utf-8")
     assert "/dev/mqueue" not in compose  # настоящий mqueue: очереди видно и сбрасывает reset
-    assert "/dev/mqueue:" not in (root / "sandbox.sh").read_text(encoding="utf-8")
+    assert "/dev/mqueue:" not in (root / "sandbox-cursor.sh").read_text(encoding="utf-8")
     # Ключ не должен попасть в окружение CLI: белый список окружения его не содержит.
     from app.model.adapters import build_env
 
@@ -657,7 +657,7 @@ def test_zero_ipc_limits_are_pinned_in_compose_and_sandbox():
     """Слабый тест, но он закрепляет конфигурацию: объекты IPC невозможны по построению."""
     root = Path(__file__).parent.parent / "deploy" / "executor"
     compose = (root.parent / "compose.yaml").read_text(encoding="utf-8")
-    sandbox = (root / "sandbox.sh").read_text(encoding="utf-8")
+    sandbox = (root / "sandbox-cursor.sh").read_text(encoding="utf-8")
     assert compose.count("    sysctls:\n") == 2
     for name, value in SYSCTLS.items():
         assert compose.count(f'      {name}: "{value}"\n') == 2, name

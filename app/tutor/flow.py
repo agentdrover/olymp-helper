@@ -200,9 +200,9 @@ class Flow:
         """(раскрывает ли, причина) от ДРУГОГО канала; None - судья недоступен. Судья видит и то,
         что ребёнку уже показано по заданию (прошлые подсказки, разборы, попытки)."""
         call = getattr(self.model, "complete_on", None)
-        if call is None or self.channel not in ("claude", "cursor"):
+        if call is None or self.channel not in ("claude", "cursor", "codex"):
             return None
-        other = "cursor" if self.channel == "claude" else "claude"
+        other = "codex" if self.channel == "cursor" else "cursor"
         ref, _, options, _ = self._args(task)
         fresh = state.get_run(self.conn, run["id"])
         system, messages = build_judge_request(

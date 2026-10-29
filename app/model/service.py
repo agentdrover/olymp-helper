@@ -15,9 +15,8 @@ from app.tutor.seq import bump
 
 __all__ = ["DEFAULT_MODELS", "LIMIT_MESSAGE", "ModelService", "model_family"]
 
-# claude закреплён; cursor - auto (gpt-5 через cursor-agent на k8 падает): без закреплённой
-# модели family(cursor) None, автопубликация невозможна - осознанное ограничение.
-DEFAULT_MODELS = {"claude": "sonnet", "cursor": "auto"}
+# Codex закреплён; cursor остаётся auto. Его семейство неизвестно до явной фиксации модели.
+DEFAULT_MODELS = {"claude": "sonnet", "cursor": "auto", "codex": "gpt-6.1-sol"}
 _FAMILIES = (
     (re.compile(r"(claude|sonnet|opus|haiku)([-.:\d]|$)"), "anthropic"),
     (re.compile(r"(gpt|o[134]|codex)([-.:\d]|$)"), "openai"),
@@ -53,14 +52,9 @@ class ModelService:
         session_id: int | None = None,
     ) -> ModelResult:
         """Ответ модели. Никогда не бросает исключений; ребёнку - только безопасное сообщение."""
-        primary, claude_model, cursor_model = self.conn.execute(
-            "SELECT primary_channel, claude_model, cursor_model FROM settings WHERE id = 1"
-        ).fetchone()
-        models = {
-            "claude": claude_model or DEFAULT_MODELS["claude"],
-            "cursor": cursor_model or DEFAULT_MODELS["cursor"],
-        }
-        spare = next(c for c in CHANNELS if c != primary)
+        primary = self.conn.execute("SELECT primary_channel FROM settings WHERE id = 1").fetchone()[0]
+        models = self._models()
+        spare = "cursor" if primary in ("codex", "claude") else "codex"
         first = self._attempt(primary, models[primary], system, messages, schema, fallback=False)
         if first.ok or first.error_kind in ("limit", "request_too_large"):
             return first
@@ -101,19 +95,20 @@ class ModelService:
         """Помещается ли запрос в лимит исполнителя с фактической моделью канала. Без названного
         канала - на обоих: запрос, который не лезет на запасной, нельзя считать пригодным."""
         models = self._models()
-        names = [channel] if channel in models else list(models)
+        names = [channel] if channel in models else ["codex", "cursor"]
         return all(
             request_size(system, messages, schema, (), n, models[n]) <= MAX_REQUEST_BYTES
             for n in names
         )
 
     def _models(self) -> dict:
-        claude_model, cursor_model = self.conn.execute(
-            "SELECT claude_model, cursor_model FROM settings WHERE id = 1"
+        claude_model, cursor_model, codex_model = self.conn.execute(
+            "SELECT claude_model, cursor_model, codex_model FROM settings WHERE id = 1"
         ).fetchone()
         return {
             "claude": claude_model or DEFAULT_MODELS["claude"],
             "cursor": cursor_model or DEFAULT_MODELS["cursor"],
+            "codex": codex_model or DEFAULT_MODELS["codex"],
         }
 
     def _attempt(self, name, model, system, messages, schema, fallback, images=None) -> ModelResult:
