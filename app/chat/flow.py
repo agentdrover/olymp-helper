@@ -25,10 +25,9 @@ from app.chat.prompts import (
 )
 from app.ingest.publish import assist_mode
 from app.ingest.store import atomic, get_task
-from app.model.client import MAX_REQUEST_BYTES, request_size
 from app.search.textbook import search_textbooks
 from app.tutor import state, steps
-from app.tutor.flow import LONG_TALK, Flow
+from app.tutor.flow import LONG_TALK, Flow, fits_limit, too_large
 from app.tutor.guard import plain, prefilter_reason, strip_claims, strip_markup
 from app.tutor.panel import failure_state
 from app.tutor.prompts import ModelOutputError
@@ -75,7 +74,7 @@ class ChatFlow(Flow):
             history=history, fragments=fragments, use_note=True,
             opened_answer=opened, feedback=feedback, shorter=shorter,
         )  # fmt: skip
-        if request_size(system, messages, CHAT_SCHEMA) > MAX_REQUEST_BYTES:
+        if not fits_limit(self.model, system, messages, CHAT_SCHEMA):
             self.notice = LONG_TALK
             return OVERFLOW
         try:
@@ -84,6 +83,9 @@ class ChatFlow(Flow):
             self.panel_state = "down"
             return None
         if not getattr(result, "ok", False):
+            if too_large(result):
+                self.notice = LONG_TALK
+                return OVERFLOW
             self.panel_state = failure_state(result)
             return None
         self.channel = getattr(result, "channel", None)

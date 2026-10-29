@@ -58,4 +58,5 @@ class ModelChannel(Protocol):
         schema: dict | None = None,
         *,
         model: str | None = None,
+        images: list[bytes] | None = None,
     ) -> ModelResult: ...

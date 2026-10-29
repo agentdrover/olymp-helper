@@ -41,6 +41,19 @@ BUSY_ATTEMPT = "Помощник ещё думает — ответ не отп�
 LONG_TALK = "Слишком длинный разговор по этому заданию. Начни новое занятие или открой решение."
 
 
+def fits_limit(model, system, messages, schema, channel=None) -> bool:
+    """Мерка размера по фактической модели канала (ModelService.fits). Модель без неё -
+    тестовая подмена: тогда мерка по умолчанию."""
+    fits = getattr(model, "fits", None)
+    if fits is not None:
+        return bool(fits(system, messages, schema, channel))
+    return request_size(system, messages, schema) <= MAX_REQUEST_BYTES
+
+
+def too_large(result) -> bool:
+    return getattr(result, "error_kind", None) == "request_too_large"
+
+
 class Flow:
     def __init__(self, conn, model, inflight: Inflight, clock, runner=None):
         self.conn = conn
@@ -143,7 +156,7 @@ class Flow:
         )
         with state.atomic(self.conn):
             self.session = state.session_id_for(self.conn, self.now)
-        if request_size(system, messages, OUTPUT_SCHEMA) > MAX_REQUEST_BYTES:
+        if not fits_limit(self.model, system, messages, OUTPUT_SCHEMA):
             self.notice = LONG_TALK  # не помещается в лимит исполнителя: модель не зовём
             return None
         try:
@@ -152,7 +165,10 @@ class Flow:
             self.panel_state = "down"
             return None
         if not getattr(result, "ok", False):
-            self.panel_state = failure_state(result)
+            if too_large(result):  # не лимит и не сбой: разговор не помещается
+                self.notice = LONG_TALK
+            else:
+                self.panel_state = failure_state(result)
             return None
         self.channel = getattr(result, "channel", None)
         payload = result.json if getattr(result, "json", None) is not None else result.text
@@ -198,7 +214,7 @@ class Flow:
             + chat_store.visible_texts(self.conn, self.session, task["id"], run["id"]),
             attempts=json.loads(fresh["attempts_json"]),
         )
-        if request_size(system, messages, JUDGE_SCHEMA) > MAX_REQUEST_BYTES:
+        if not fits_limit(self.model, system, messages, JUDGE_SCHEMA, other):
             self.notice = LONG_TALK  # улики не режутся: судью не зовём, текст не показываем
             return None
         try:
@@ -206,6 +222,8 @@ class Flow:
         except Exception:  # noqa: BLE001
             return None
         if not getattr(result, "ok", False):
+            if too_large(result):
+                self.notice = LONG_TALK
             return None
         payload = result.json if getattr(result, "json", None) is not None else result.text
         try:
@@ -415,7 +433,8 @@ class Flow:
             elif verdict[0]:
                 reason = "judge"
         if reason:
-            self.notice = "Объяснение не получилось, попробуй другой способ."
+            if self.notice != LONG_TALK:  # «слишком длинный разговор» точнее и не перезаписывается
+                self.notice = "Объяснение не получилось, попробуй другой способ."
             return
         state.add_explain(
             self.conn, run["id"], mode, label, html, out.uncertainty, self.now, self.step_id
