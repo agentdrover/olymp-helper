@@ -38,7 +38,7 @@ def test_ac6(tmp_path, caplog):
         return json.loads(seen_payloads[-1])
 
     channels = {
-        n: ExecutorChannel(n, "http://executor:8099", post=post) for n in ("claude", "cursor")
+        n: ExecutorChannel(n, "http://executor:8099", post=post) for n in ("codex", "cursor")
     }
     svc = ModelService(conn, channels, lambda: datetime(2026, 10, 23, 10, 0, tzinfo=UTC))
     res = svc.complete("sys", [{"role": "user", "content": "q"}])

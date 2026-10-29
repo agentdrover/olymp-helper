@@ -28,8 +28,8 @@ def build_env(channel: str, source: dict, home: str) -> dict:
     # Корень контейнера только для чтения: временные файлы CLI - в записываемом каталоге запуска.
     # Под лаунчером с capabilities (secure-execution) glibc эту переменную выбросит: runner ставит её заново.
     env["TMPDIR"] = home
-    token = TOKEN_VARS[channel]
-    if source.get(token):
+    token = TOKEN_VARS.get(channel)
+    if token and source.get(token):
         env[token] = source[token]
     return env
 
@@ -306,4 +306,147 @@ class CursorAdapter:
     parse = staticmethod(parse_cli_json)
 
 
-ADAPTERS = {"claude": ClaudeAdapter(), "cursor": CursorAdapter()}
+def parse_codex_jsonl(stdout: str, schema: dict | None) -> Parsed:
+    """Accept only the final agent message of a successful, tool-free Codex turn."""
+    text = None
+    complete = False
+    usage = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            raise ChannelError("bad_json") from None
+        if not isinstance(event, dict):
+            raise ChannelError("bad_json")
+        kind = event.get("type")
+        if kind in ("turn.failed", "error"):
+            raise ChannelError("cli_error")
+        if kind == "item.completed":
+            item = event.get("item")
+            if not isinstance(item, dict):
+                raise ChannelError("bad_json")
+            if item.get("type") == "agent_message":
+                text = item.get("text")
+            elif item.get("type") in ("command_execution", "file_change", "mcp_tool_call", "web_search"):
+                raise ChannelError("unexpected_tool")
+        if kind == "turn.completed":
+            complete = True
+            usage = event.get("usage")
+    if not complete or not isinstance(text, str) or not text.strip():
+        raise ChannelError("empty_result")
+    parsed = parse_cli_json(json.dumps({"result": text, "usage": usage}), schema)
+    return Parsed(parsed.text, restore_optional_fields(parsed.json, schema), parsed.usage)
+
+
+def codex_error_kind(stdout: str, stderr: str) -> str:
+    """Classify process errors without returning stderr or model-authored text."""
+    messages = [stderr]
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") not in ("error", "turn.failed"):
+            continue
+        error = event.get("error")
+        message = error.get("message", "") if isinstance(error, dict) else event.get("message", "")
+        if isinstance(message, str):
+            messages.append(message)
+    text = "\n".join(messages).lower()
+    if re.search(r"usage limit|quota exceeded|subscription.*limit", text):
+        return "provider_limit"
+    if re.search(r"rate[ -]?limit|too many requests|\b429\b", text):
+        return "provider_rate_limit"
+    if re.search(r"not logged in|not authenticated|\b401\b|unauthorized", text):
+        return "codex_auth_unavailable"
+    return "exit_code"
+
+
+class CodexAdapter:
+    """Codex CLI contract; caller creates schema.json and PNG files in the run directory."""
+
+    channel = "codex"
+
+    def build(self, model: str, system: str, schema: dict | None, images=()) -> list[str]:
+        return [
+            # sbx's trusted config supplies its host-side OAuth proxy; discarding it breaks login.
+            # The caller must supply an isolated HOME with a trusted config, never a prior run's.
+            "codex", "exec", "--skip-git-repo-check", "--ephemeral",
+            "--sandbox", "read-only", "-c", "approval_policy=never", "-c", "features.shell_tool=false",
+            "-c", "web_search=disabled", "--json", "-m", _check_model(model),
+            *(["--output-schema", "schema.json"] if schema is not None else []),
+            "-", *(part for name in image_names(len(images)) for part in ("-i", name)),
+        ]
+
+    def stdin(self, system: str, messages: list[dict], schema: dict | None, images=()) -> str:
+        return system + (UNTRUSTED_IMAGE_RULE if images else "") + "\n\n" + render_conversation(messages)
+
+    parse = staticmethod(parse_codex_jsonl)
+
+
+def codex_schema(schema: dict) -> dict:
+    """Prepare the supported schema subset for OpenAI structured output.
+
+    Optional properties become nullable; the caller must remove those nulls after parsing.
+    Unknown unrestricted shapes are rejected rather than silently narrowing the contract.
+    """
+    if not isinstance(schema, dict) or not schema:
+        raise ChannelError("unsupported_schema")
+    result = {k: v for k, v in schema.items() if k != STRICT_KEY}
+    if "enum" in result and "type" not in result:
+        vals = result["enum"]
+        if vals and all(isinstance(v, str) for v in vals):
+            result["type"] = "string"
+        else:
+            raise ChannelError("unsupported_schema")
+    if "anyOf" in result:
+        result["anyOf"] = [codex_schema(item) for item in result["anyOf"]]
+    if result.get("type") == "array":
+        result["items"] = codex_schema(result.get("items"))
+    if result.get("type") == "object":
+        props = result.get("properties", {})
+        required = set(result.get("required", []))
+        converted = {}
+        for name, definition in props.items():
+            child = codex_schema(definition)
+            converted[name] = child if name in required else {"anyOf": [child, {"type": "null"}]}
+        result["properties"] = converted
+        result["required"] = list(converted)
+        result["additionalProperties"] = False
+    return result
+
+
+def restore_optional_fields(value, schema):
+    """Remove null placeholders introduced for optional object properties."""
+    if not isinstance(schema, dict):
+        return value
+    if isinstance(value, dict) and schema.get("type") == "object":
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        restored = {}
+        for key, child in value.items():
+            definition = props.get(key, {})
+            if child is None and key not in required and not _schema_allows_null(definition):
+                continue
+            restored[key] = restore_optional_fields(child, definition)
+        return restored
+    if isinstance(value, list) and schema.get("type") == "array":
+        return [restore_optional_fields(item, schema.get("items", {})) for item in value]
+    if "anyOf" in schema:
+        for option in schema["anyOf"]:
+            typ = option.get("type") if isinstance(option, dict) else None
+            if (typ == "object" and isinstance(value, dict)) or (
+                typ == "array" and isinstance(value, list)
+            ):
+                return restore_optional_fields(value, option)
+    return value
+
+
+def _schema_allows_null(schema):
+    typ = schema.get("type")
+    return typ == "null" or (isinstance(typ, list) and "null" in typ) or any(
+        _schema_allows_null(item) for item in schema.get("anyOf", []) if isinstance(item, dict)
+    ) or ("enum" in schema and None in schema["enum"])
+
+
+ADAPTERS = {"claude": ClaudeAdapter(), "cursor": CursorAdapter(), "codex": CodexAdapter()}

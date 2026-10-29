@@ -9,8 +9,8 @@
 | Контейнер | Образ | Что внутри | Секреты |
 |---|---|---|---|
 | `app` | `Containerfile` этого репозитория | Python 3.12, FastAPI, ffmpeg, whisper.cpp (закреплён по коммиту), веса multilingual `small` (контрольная сумма проверена при сборке) | нет |
-| `executor-claude` | образ OH-T03 (#2013), имя в `OLYMP_EXECUTOR_IMAGE` | CLI Claude; без тома с данными, корень только для чтения, рабочий каталог `/work` — tmpfs | `CLAUDE_CODE_OAUTH_TOKEN` |
-| `executor-cursor` | тот же образ | cursor-agent; то же ограничение | `CURSOR_API_KEY` |
+| `executor-codex` | `deploy/executor/Containerfile.codex` | Codex CLI; корень только для чтения, `/work` — tmpfs; только заглушка прокси sbx | вход OpenAI остаётся на хосте |
+| `executor-cursor` | `deploy/executor/Containerfile.cursor`, имя в `OLYMP_EXECUTOR_IMAGE` | cursor-agent; то же ограничение | `CURSOR_API_KEY` |
 
 Во время работы `app` ничего не скачивает: распознавание речи идёт внутри образа, голос наружу не уходит.
 
@@ -28,17 +28,17 @@
 | `OLYMP_PARENT_KEY` | app | нет (PIN задать нельзя) | ключ первого входа (OH-T08): нужен один раз, чтобы задать PIN родителя на `/parent/login`; после установки PIN ключ ни во что не пускает и не меняет PIN. Сессия родителя - серверная, cookie `olymp_parent` = случайный id (HttpOnly, SameSite=Strict), простой 30 минут; значение ключа в compose не пишется. Забытый PIN: обнулить `settings.parent_pin_hash` в базе и задать заново по ключу |
 | `OLYMP_TZ` | app | пояс сервера | имя пояса IANA для времени «Вход закрыт до ЧЧ:ММ» |
 | `OLYMP_DATA_DIR` | app | каталог базы (`/srv/olymp`) | PDF материалов, PNG рисунков и кэш рендера страниц (лимит кэша 500 МБ) |
-| `EXECUTOR_CLAUDE_URL`, `EXECUTOR_CURSOR_URL` | app | `http://executor-claude:8099`, `http://executor-cursor:8099` | адреса исполнителей, к которым приложение обращается при разборе заданий |
+| `EXECUTOR_CODEX_URL`, `EXECUTOR_CURSOR_URL` | app | `http://executor-codex:8099`, `http://executor-cursor:8099` | адреса исполнителей, к которым приложение обращается при разборе заданий |
 | `OLYMP_CERT_DIR` | хост | `/srv/olymp-certs` | каталог на хосте с `server.pem` и `server.key`, монтируется в `/certs` только для чтения |
 | `OLYMP_EXECUTOR_IMAGE` | хост | обязательна | образ исполнителя (OH-T03) |
 | `OLYMP_EXECUTOR_UID` | хост | `10002` | uid исполнителя, владелец tmpfs `/work` |
 | `EXECUTOR_WORKROOT` | executor-* | `/work` | рабочий корень запусков CLI; задан в compose |
-| `EXECUTOR_CHANNEL` | executor-* | нет | канал контейнера: `claude` или `cursor`; задан в compose |
+| `EXECUTOR_CHANNEL` | executor-* | нет | канал контейнера: `codex` или `cursor`; задан в compose |
 | `EXECUTOR_SHARED_KEY` | app, executor-* | нет | общий ключ приложения и исполнителей (заголовок `X-Executor-Key`); передаётся при запуске, в окружение CLI не попадает |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `NODE_USE_ENV_PROXY` | executor-* | нет | прокси исходящих CLI; на k8 исполнители выходят наружу только через egress: `HTTPS_PROXY=http://egress:3128`; передаются CLI, если заданы |
 | `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` | executor-* | нет | пути к CA прокси sbx (он подменяет TLS своим сертификатом); файлы, не секреты; передаются CLI, если заданы |
 | `TMPDIR` | - | - | в окружении исполнителя не нужен: для CLI он всегда равен записываемому `HOME` запуска (корень контейнера только для чтения) |
-| `CLAUDE_CODE_OAUTH_TOKEN` | executor-claude | нет | токен подписки Claude; передаётся при запуске, значение в compose не пишется |
+| `CODEX_SEED_DIR` | executor-codex | нет | каталог доступных только для чтения заглушек прокси и конфигурации sbx; настоящий вход OpenAI остаётся на хосте |
 | `CURSOR_API_KEY` | executor-cursor | нет | ключ Cursor; передаётся при запуске, значение в compose не пишется |
 
 HTTPS обязателен: без `OLYMP_TLS_CERT` и `OLYMP_TLS_KEY` контейнер не стартует. HTTP возможен только при явном `OLYMP_INSECURE_HTTP=1` (проверка и CI); на адресе LAN HTTP исключением не является.
@@ -56,7 +56,7 @@ HTTPS обязателен: без `OLYMP_TLS_CERT` и `OLYMP_TLS_KEY` конт�
 
 | Канал | Хосты | Примечание |
 |---|---|---|
-| Claude | `api.anthropic.com` | запросы моделей; если `claude` при выпуске или обновлении токена потребует ещё хост, он появится в журнале `k8_guard` как отказ |
+| Codex | `chatgpt.com` | запросы через прокси sbx; доступ и авторизация проверяются на K8 |
 | Cursor | `api2.cursor.sh` | запросы `cursor-agent`; дополнительные хосты — так же по журналу отказов |
 
 Список проверяется в OH-T09 живым запуском каждого канала: разрешаются ровно те хосты, на которых канал отказывает, и только для контейнера своего исполнителя. Пока список не подтверждён живым запуском, считать его начальным, а не окончательным.
@@ -85,19 +85,12 @@ OLYMP_EXTRA_SAN="DNS:olymp.lan" deploy/make-certs.sh ~/olymp-certs   # если 
 
 ## Выпуск токена
 
-- Claude: на машине владельца выполнить `claude setup-token`, войти в аккаунт с подпиской, скопировать выданный токен. Значение — только в хранилище секретов home-infra, не в чат, не в репозиторий, не в журнал.
-- Cursor: ключ создаёт владелец в кабинете Cursor (раздел API keys), значение — в то же хранилище.
-- Доставка: home-infra передаёт значения как переменные окружения `CLAUDE_CODE_OAUTH_TOKEN` и `CURSOR_API_KEY` только своему исполнителю: Claude — `executor-claude`, Cursor — `executor-cursor`. В `app` их нет.
+- OpenAI: владелец авторизует sbx на хосте; значение входа остаётся в хранилище sbx. Каталог `CODEX_SEED_DIR` содержит только проверенные заглушки прокси и конфигурацию для Codex.
+- Cursor: ключ создаёт владелец в кабинете Cursor и передаёт home-infra только исполнителю Cursor.
 
 ## Замена токена
 
-Нужна, когда канал отвечает ошибкой авторизации или токен подозревается в утечке.
-
-1. Выпустить новый токен тем же способом (см. выше).
-2. Заменить значение в хранилище секретов home-infra.
-3. Пересоздать только исполнитель этого канала: `docker compose -f deploy/compose.yaml up -d --force-recreate executor-claude`  (для Cursor — `executor-cursor`). `app` и данные на томе не затрагиваются.
-4. Проверить: сделать запрос в приложении и убедиться, что канал ответил без ошибки.
-5. Отозвать старый токен (Claude — в аккаунте; Cursor — удалить старый ключ в кабинете).
+При ошибке входа OpenAI владелец обновляет авторизацию sbx на хосте. При замене ключа Cursor нужно обновить хранилище home-infra, пересоздать `executor-cursor` и проверить ответ канала. Секреты не передаются в чат.
 
 ## Проверка образа в CI
 
