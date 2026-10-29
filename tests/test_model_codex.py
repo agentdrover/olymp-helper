@@ -206,3 +206,48 @@ def test_wrong_auth_directory_is_never_cleaned(tmp_path):
     )
     assert result.error_kind == "bad_auth_path"
     assert (state / "valuable-file").read_text() == "keep"
+
+
+def test_trailing_empty_messages_do_not_hide_valid_judge_result():
+    import json
+
+    from app.model.adapters import ADAPTERS
+
+    events = [
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": '{"reveals": false, "reason": "нет утечки"}'},
+        },
+        {"type": "item.completed", "item": {"type": "agent_message", "text": " \n "}},
+        {"type": "turn.completed"},
+    ]
+    parsed = ADAPTERS["codex"].parse("\n".join(map(json.dumps, events)), {"type": "object"})
+    assert parsed.json == {"reveals": False, "reason": "нет утечки"}
+
+
+def test_empty_or_incomplete_codex_turn_still_fails_closed():
+    import json
+
+    import pytest
+
+    from app.model.adapters import ADAPTERS
+    from app.model.types import ChannelError
+
+    blank = {"type": "item.completed", "item": {"type": "agent_message", "text": " "}}
+    good = {"type": "item.completed", "item": {"type": "agent_message", "text": "answer"}}
+    complete = {"type": "turn.completed"}
+    for events in ([blank, complete], [good], [good, {"type": "turn.failed"}, complete]):
+        with pytest.raises(ChannelError):
+            ADAPTERS["codex"].parse("\n".join(map(json.dumps, events)), None)
+
+
+def test_unrecognized_codex_family_cannot_be_selected_as_checker(tmp_path):
+    from app.db import connect, migrate
+    from app.model.service import ModelService
+
+    conn = connect(tmp_path / "settings.sqlite")
+    migrate(conn)
+    conn.execute("UPDATE settings SET codex_enabled=1, codex_model='unknown-model'")
+    svc = ModelService(conn, {})
+    assert svc.judge_channel("claude") is None
+    assert svc.independent_checker("claude") is None

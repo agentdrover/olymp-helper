@@ -376,7 +376,11 @@ class CodexAdapter:
                 raise ChannelError("cli_error")
             item = event.get("item") or {}
             if event.get("type") == "item.completed" and item.get("type") == "agent_message":
-                final = item.get("text")
+                message = item.get("text")
+                if not isinstance(message, str):
+                    raise ChannelError("bad_json")
+                if message.strip():
+                    final = message
             if event.get("type") == "turn.completed":
                 completed = True
         if not completed or not isinstance(final, str) or not final.strip():

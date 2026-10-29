@@ -124,7 +124,7 @@ class ModelService:
         enabled = self.conn.execute("SELECT codex_enabled FROM settings WHERE id = 1").fetchone()[0]
         if not enabled:
             return "cursor" if author == "claude" else "claude"
-        return "codex"
+        return "codex" if self.family("codex") == "openai" else None
 
     def independent_checker(self, author: str) -> str | None:
         """For automatic publication, both actual families must be known and distinct."""
