@@ -75,10 +75,11 @@ def test_codex_error_classification_ignores_model_authored_content():
 def test_all_product_schemas_can_be_prepared():
     from app.chat.prompts import CHAT_SCHEMA
     from app.ingest.packs import SCHEMA as PACK_SCHEMA
+    from app.ingest.page_normalizer import SCHEMA as PAGE_ANSWER_SCHEMA
     from app.ingest.prompt import ANSWER_SCHEMA, TASKS_SCHEMA
     from app.tutor.prompts import JUDGE_SCHEMA, OUTPUT_SCHEMA
 
-    for schema in (CHAT_SCHEMA, PACK_SCHEMA, ANSWER_SCHEMA, TASKS_SCHEMA, JUDGE_SCHEMA, OUTPUT_SCHEMA):
+    for schema in (CHAT_SCHEMA, PACK_SCHEMA, PAGE_ANSWER_SCHEMA, ANSWER_SCHEMA, TASKS_SCHEMA, JUDGE_SCHEMA, OUTPUT_SCHEMA):
         assert codex_schema(schema)['additionalProperties'] is False
 
 
