@@ -3,7 +3,7 @@
 import json
 
 from app.ingest.answers import display, key_json, key_value, normalize_answer
-from app.ingest.keys import candidate
+from app.ingest.keys import candidate, page_refusal
 from app.ingest.model_answer import compute_model_answer, model_value
 from app.ingest.publish import leak_notice, publication
 from app.ingest.schema import InvalidStructure, check_options
@@ -50,12 +50,31 @@ def _task(conn, task_id: int):
 # ------------------------------------------------------------------------- ключ
 
 
+UNVERIFIED_SOURCES = {
+    "page": "page_rule",
+    "page_model": "page_model",
+}
+CANDIDATE_SOURCE_LABELS = {
+    "key_file": "загруженный ключ",
+    "page": "правило по ответу на странице",
+    "page_model": "модель по ответу на странице",
+}
+SOURCE_LABELS = {
+    "page_rule": "кандидат со страницы по правилу, не проверен",
+    "page_model": "кандидат со страницы через модель, не проверен",
+}
+
+
 def key_info(conn, task):
-    """(значение, источник, это кандидат из загруженного ключа). Кандидат ещё не ключ."""
+    """(значение, источник, это кандидат). Кандидат ещё не ключ. Источник "official" только у
+    загруженного ключа и у формы со страницы, которую принимал прежний разбор; непроверенные
+    кандидаты получают источник page_rule / page_model и official не называются."""
     if task["answer_key"] is not None:
         return key_value(task["answer_key"]), task["key_source"], False
     cand = candidate(conn, task)
     if cand:
+        if cand.get("unverified"):
+            return cand["value"], UNVERIFIED_SOURCES[cand["source"]], True
         return cand["value"], "official", True
     return None, None, False
 
@@ -94,7 +113,9 @@ def _parse_answer(task, raw) -> object:
     return value
 
 
-def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
+def set_key(
+    ctx, conn, task_id: int, value, source: str, candidate_source: str | None = None
+) -> dict:
     """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято.
     Подтверждённый рисунок проходит защиту от текста ответа заново: решение было для другого ключа;
     то же для рисунков других заданий материала: новый ключ не должен быть напечатан в их вырезках."""
@@ -113,6 +134,7 @@ def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
             "answer_key": key_json(value, task["type"]),
             "key_source": source,
             "key_version": task["key_version"] + 1,
+            "key_candidate_source": candidate_source,
         }
         if task["import_status"] == "checked":
             new_revision(conn, task_id, **cols)
@@ -137,9 +159,17 @@ def set_parent_key(ctx, conn, task_id: int, raw, keep_candidate: bool = False) -
     # POST /key без флага по-прежнему ставит ключ родителя.
     if keep_candidate and task["answer_key"] is None:
         cand = candidate(conn, task)
-        if cand and cand["value"] == value:
+        if cand and cand["value"] == value and not cand.get("unverified"):
             return {"revision": task["revision"], "key_version": task["key_version"]}
-    return set_key(ctx, conn, task_id, value, "parent")
+    return set_key(ctx, conn, task_id, value, "parent", _candidate_source(conn, task, value))
+
+
+def _candidate_source(conn, task, value) -> str | None:
+    """Источник кандидата, с которым совпал ответ родителя (ключа ещё нет); иначе None."""
+    if task["answer_key"] is not None:
+        return None
+    cand = candidate(conn, task)
+    return cand["source"] if cand and cand["value"] == value else None
 
 
 # ------------------------------------------------------------------------ правки
@@ -257,9 +287,14 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     if has_answer:
         value = _parse_answer(task, answer)
         if value != key_value(task["answer_key"]):
-            set_key(ctx, conn, task_id, value, "parent")
+            set_key(ctx, conn, task_id, value, "parent", _candidate_source(conn, task, value))
     elif task["answer_key"] is None:
         cand = candidate(conn, task)
+        if cand and cand.get("unverified"):
+            raise Refusal(
+                "Ответ со страницы не проверен: подтвердите его явно "
+                f"(«{cand['answer']}») или впишите свой."
+            )
         if cand:
             set_key(ctx, conn, task_id, cand["value"], "official")
     task = _task(conn, task_id)
@@ -282,7 +317,7 @@ def resolve(ctx, conn, task_id: int, choice: str, answer=None) -> None:
     task = _task(conn, task_id)
     seen = model_value(task)
     if choice == "key":
-        confirm(ctx, conn, task_id)
+        confirm(ctx, conn, task_id, answer=answer)  # у непроверенного кандидата ответ явный
     elif choice == "mine":
         if answer is None or not str(answer).strip():
             raise Refusal("Укажите свой ответ.")
@@ -306,7 +341,8 @@ def retry_model(ctx, conn, task_id: int) -> bool:
             "затем повторяйте запрос к модели.",
             409,
         )
-    if key_info(conn, task)[0] is not None:
+    value, source, _ = key_info(conn, task)
+    if value is not None and source not in SOURCE_LABELS:
         raise Refusal("У задания есть ключ: ответ модели не нужен.", 409)
     if task["model_answer"] is not None:
         raise Refusal(
@@ -334,6 +370,9 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     figure = figure_of(task)
     status = task["import_status"]
     key, source, _ = key_info(conn, task)
+    unverified = source in SOURCE_LABELS
+    # Непроверенный кандидат показывается, но ключом не считается: он не убирает задание из ленты.
+    trusted = None if unverified else key
     model = model_value(task)
     kind, hint = None, ""
     if status == "checked" and _open_dispute(conn, task):
@@ -348,9 +387,15 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
                 "Нужен рисунок: подтвердите найденный или поправьте рамку и alt, либо впишите "
                 "самодостаточное условие."
             )
-    elif status == "checked" and figure is None and key is None and task["model_answer"] is None:
+    elif (
+        status == "checked" and figure is None and trusted is None and task["model_answer"] is None
+    ):
         kind, hint = "model_missing", "Ответ модели не получен. Повторите запрос."
-    elif key is None and (figure is not None or status == "draft"):
+    elif (
+        trusted is None
+        and not (unverified and figure is None)
+        and (figure is not None or status == "draft")
+    ):
         kind = "no_key"
         hint = (
             "Для задания с рисунком нужен ключ или ваш ответ: без него оно не публикуется."
@@ -406,7 +451,12 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "page_url": f"/materials/{material}/pages/{shown}.png" if shown else None,
         "page_urls": [{"page": p, "url": f"/materials/{material}/pages/{p}.png"} for p in pages],
         "key": None if key is None else display(key),
-        "key_source": source,
+        "key_source": SOURCE_LABELS.get(source, source),
+        "key_unverified": unverified,
+        "key_refusal": page_refusal(conn, task),
+        "key_candidate_source": task["key_candidate_source"],
+        "key_candidate_source_label": CANDIDATE_SOURCE_LABELS.get(task["key_candidate_source"]),
+        "button_answer": display(key) if unverified else None,
         "model_answer": None if model is None else display(model),
         "model_explanation": json.loads(task["model_answer"]).get("explanation")
         if task["model_answer"]
@@ -444,12 +494,16 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         "options": options_of(task),
         "key": None if not task["answer_key"] else display(key_value(task["answer_key"])),
         "key_source": task["key_source"],
+        "key_candidate_source": task["key_candidate_source"],
+        "key_refusal": page_refusal(conn, task),
         "key_candidate": None
         if cand is None
         else {
             "answer": cand["answer"],
             "material_id": cand["material_id"],
             "source": cand["source"],
+            "reason": cand.get("reason"),
+            "unverified": bool(cand.get("unverified")),
         },
         "answer_text": task["answer_text"],
         "parent_note": task["parent_note"],
