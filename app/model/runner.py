@@ -1,6 +1,7 @@
 """Запуск CLI в отдельном пустом каталоге; ошибки без деталей (SPEC-1.0 1.4)."""
 
 import base64
+import json
 import logging
 import os
 import shutil
@@ -15,6 +16,7 @@ from app.model.redaction import redact, redact_json
 from app.model.types import ChannelError, ModelResult
 
 TIMEOUT_S = 120
+CODEX_STATE_ROOT = "/codex-auth"
 log = logging.getLogger("app.model")
 
 
@@ -176,8 +178,46 @@ def run_cli(
             cli = adapter.build(model, system, schema, images)
             stdin = adapter.stdin(system, messages, schema, images)
             cli_env = build_env(channel, env, home)
-            if images and channel == "cursor":
+            if channel == "codex":
+                if not cli_env.get("CODEX_HOME"):
+                    raise ChannelError("not_logged_in")
+                if not _valid_codex_home(cli_env["CODEX_HOME"]):
+                    raise ChannelError("bad_auth_path")
+                check = as_cli(
+                    launcher,
+                    ["test", "-s", os.path.join(cli_env["CODEX_HOME"], "auth.json")],
+                    cli_env,
+                    spawn=spawn,
+                    cwd=root,
+                    timeout=10,
+                )
+                if check.returncode:
+                    raise ChannelError("not_logged_in")
+                _clean_codex_home(spawn, launcher, cli_env, root)
+                snapshot = as_cli(
+                    launcher,
+                    [
+                        "cp",
+                        os.path.join(cli_env["CODEX_HOME"], "auth.json"),
+                        os.path.join(home, "auth-before.json"),
+                    ],
+                    cli_env,
+                    spawn=spawn,
+                    cwd=root,
+                    timeout=10,
+                )
+                if snapshot.returncode:
+                    raise ChannelError("auth_unavailable")
+            if images and channel in ("cursor", "codex"):
                 _put_images(spawn, launcher, helper_env, work, images)
+            if channel == "codex" and schema is not None:
+                _put_file(
+                    spawn,
+                    launcher,
+                    helper_env,
+                    os.path.join(work, "schema.json"),
+                    json.dumps(_codex_schema(schema)).encode("utf-8"),
+                )
             if launcher:
                 # Сервер не может зайти в каталог пользователя CLI (0700): в него переходит
                 # уже CLI-пользователь, процесс сервера стартует из корня запуска. TMPDIR ставится
@@ -191,8 +231,13 @@ def run_cli(
             else:
                 proc = spawn(cli, input=stdin, env=cli_env, cwd=work, timeout=timeout)
             if proc.returncode != 0:
+                if channel == "codex":
+                    raise ChannelError(_codex_error(proc.stderr + "\n" + proc.stdout))
                 raise ChannelError("exit_code")
-            parsed = adapter.parse(proc.stdout, schema)
+            stdout = proc.stdout
+            if channel == "codex":
+                stdout = _scrub_codex_auth(spawn, launcher, cli_env, work, stdout)
+            parsed = adapter.parse(stdout, schema)
         except subprocess.TimeoutExpired:
             return _fail(channel, model, "timeout", elapsed())
         except ChannelError as exc:
@@ -206,22 +251,132 @@ def run_cli(
         )
     finally:
         _cleanup(spawn, launcher, helper_env, root, work, home, sweeper, on_fault)
+        if channel == "codex" and _valid_codex_home(env.get("CODEX_HOME")):
+            try:
+                _clean_codex_home(
+                    spawn, launcher, {**minimal_env(env), "CODEX_HOME": env["CODEX_HOME"]}, workroot
+                )
+            except Exception:  # noqa: BLE001 - unsafe cleanup fails closed
+                if on_fault:
+                    on_fault("codex_cleanup")
+                raise ChannelError("auth_cleanup") from None
+
+
+def _valid_codex_home(path):
+    return path == CODEX_STATE_ROOT and os.path.realpath(path) == CODEX_STATE_ROOT
 
 
 def _put_images(spawn, launcher, helper_env, work, images):
     """Файлы PNG в каталоге запуска (владелец - пользователь CLI): cursor-agent читает их по пути."""
     for name, data in zip(image_names(len(images)), images, strict=True):
-        path = os.path.join(work, name)
-        if not launcher:
-            with open(path, "wb") as fh:
-                fh.write(data)
+        _put_file(spawn, launcher, helper_env, os.path.join(work, name), data)
+
+
+def _put_file(spawn, launcher, helper_env, path, data):
+    if not launcher:
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return
+    res = as_cli(
+        launcher, ["sh", "-c", 'base64 -d > "$0"', path], helper_env, spawn=spawn,
+        input=base64.b64encode(data).decode("ascii"), timeout=30,
+    )  # fmt: skip
+    if res.returncode != 0:
+        raise ChannelError("workdir")
+
+
+# Only the login file may survive; all other state is discarded between requests.
+_AUTH_CLEAN = r"""
+import os, shutil, sys
+try:
+    root = os.environ['CODEX_HOME']
+    for entry in os.scandir(root):
+        if entry.name == 'auth.json' and entry.is_file(follow_symlinks=False):
             continue
-        res = as_cli(
-            launcher, ["sh", "-c", 'base64 -d > "$0"', path], helper_env, spawn=spawn,
-            input=base64.b64encode(data).decode("ascii"), timeout=30,
-        )  # fmt: skip
-        if res.returncode != 0:
-            raise ChannelError("workdir")
+        if entry.is_dir(follow_symlinks=False): shutil.rmtree(entry.path)
+        else: os.unlink(entry.path)
+except FileNotFoundError:
+    pass
+except Exception:
+    sys.exit(1)
+"""
+
+
+def _clean_codex_home(spawn, launcher, env, cwd):
+    result = as_cli(launcher, ["python3", "-c", _AUTH_CLEAN], env, spawn=spawn, cwd=cwd, timeout=30)
+    if result.returncode:
+        raise ChannelError("auth_cleanup")
+
+
+def _codex_schema(value):
+    """Remove internal parser metadata and close objects for structured output."""
+    if isinstance(value, list):
+        return [_codex_schema(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    result = {k: _codex_schema(v) for k, v in value.items() if k != "x-strict-json"}
+    if result.get("type") == "object" and "properties" in result:
+        result.setdefault("additionalProperties", False)
+    return result
+
+
+# Read auth only inside the CLI UID; send back only the already scrubbed model output.
+_AUTH_SCRUB = r"""
+import json, os, sys
+try:
+    with open(os.path.join(os.environ['CODEX_HOME'], 'auth.json'), encoding='utf-8') as f:
+        after = json.load(f)
+    with open(os.path.join(os.environ['HOME'], 'auth-before.json'), encoding='utf-8') as f:
+        before = json.load(f)
+    def strings(value):
+        if isinstance(value, dict):
+            for item in value.values(): yield from strings(item)
+        elif isinstance(value, list):
+            for item in value: yield from strings(item)
+        elif isinstance(value, str) and len(value) >= 8:
+            yield value
+    tokens = sorted(set(strings([before, after])), key=len, reverse=True)
+    def clean(value):
+        if isinstance(value, str):
+            for token in tokens:
+                value = value.replace(token, '[redacted]')
+            return value
+        if isinstance(value, list): return [clean(v) for v in value]
+        if isinstance(value, dict): return {clean(k): clean(v) for k, v in value.items()}
+        return value
+    for line in sys.stdin:
+        sys.stdout.write(json.dumps(clean(json.loads(line)), ensure_ascii=False) + '\n')
+except Exception:
+    sys.exit(1)
+"""
+
+
+def _scrub_codex_auth(spawn, launcher, env, work, stdout):
+    if not env.get("CODEX_HOME"):
+        raise ChannelError("not_logged_in")
+    result = as_cli(
+        launcher,
+        ["python3", "-c", _AUTH_SCRUB],
+        env,
+        spawn=spawn,
+        cwd=os.path.dirname(work),
+        input=stdout,
+        timeout=30,
+    )
+    if result.returncode:
+        raise ChannelError("auth_unavailable")
+    return result.stdout
+
+
+def _codex_error(stderr):
+    text = (stderr or "").lower()
+    if "not logged in" in text or "not authenticated" in text or "please log in" in text:
+        return "not_logged_in"
+    if "usage limit" in text or "quota exceeded" in text:
+        return "subscription_limit"
+    if "rate limit" in text or "too many requests" in text or "429" in text:
+        return "rate_limit"
+    return "exit_code"
 
 
 def _make_dirs(spawn, launcher, helper_env, root, work, home):

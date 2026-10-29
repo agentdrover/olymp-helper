@@ -28,9 +28,11 @@ def build_env(channel: str, source: dict, home: str) -> dict:
     # Корень контейнера только для чтения: временные файлы CLI - в записываемом каталоге запуска.
     # Под лаунчером с capabilities (secure-execution) glibc эту переменную выбросит: runner ставит её заново.
     env["TMPDIR"] = home
-    token = TOKEN_VARS[channel]
-    if source.get(token):
+    token = TOKEN_VARS.get(channel)
+    if token and source.get(token):
         env[token] = source[token]
+    if channel == "codex" and source.get("CODEX_HOME"):
+        env["CODEX_HOME"] = source["CODEX_HOME"]
     return env
 
 
@@ -306,4 +308,84 @@ class CursorAdapter:
     parse = staticmethod(parse_cli_json)
 
 
-ADAPTERS = {"claude": ClaudeAdapter(), "cursor": CursorAdapter()}
+class CodexAdapter:
+    channel = "codex"
+
+    def build(self, model: str, system: str, schema: dict | None, images=()) -> list[str]:
+        argv = [
+            "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "-s",
+            "read-only",
+            "-c",
+            "approval_policy=never",
+            "-c",
+            "features.shell_tool=false",
+            "--disable",
+            "unified_exec",
+            "--disable",
+            "hooks",
+            "--disable",
+            "plugins",
+            "--disable",
+            "apps",
+            "--disable",
+            "browser_use",
+            "--disable",
+            "computer_use",
+            "--disable",
+            "multi_agent",
+            "--disable",
+            "code_mode_host",
+            "-c",
+            "web_search=disabled",
+            "--json",
+            "-m",
+            _check_model(model),
+        ]
+        if schema is not None:
+            argv += ["--output-schema", "schema.json"]
+        for name in image_names(len(images)):
+            argv += ["-i", name]
+        return argv + ["-"]
+
+    def stdin(self, system: str, messages: list[dict], schema: dict | None, images=()) -> str:
+        return (
+            system
+            + (UNTRUSTED_IMAGE_RULE if images else "")
+            + "\n\n"
+            + render_conversation(messages)
+        )
+
+    @staticmethod
+    def parse(stdout: str, schema: dict | None) -> Parsed:
+        final = None
+        completed = False
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                raise ChannelError("bad_json") from None
+            if not isinstance(event, dict):
+                raise ChannelError("bad_json")
+            if event.get("type") in ("turn.failed", "error"):
+                raise ChannelError("cli_error")
+            item = event.get("item") or {}
+            if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+                message = item.get("text")
+                if not isinstance(message, str):
+                    raise ChannelError("bad_json")
+                if message.strip():
+                    final = message
+            if event.get("type") == "turn.completed":
+                completed = True
+        if not completed or not isinstance(final, str) or not final.strip():
+            raise ChannelError("empty_result")
+        return parse_cli_json(json.dumps({"result": final}), schema)
+
+
+ADAPTERS = {"claude": ClaudeAdapter(), "cursor": CursorAdapter(), "codex": CodexAdapter()}

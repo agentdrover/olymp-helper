@@ -202,7 +202,14 @@ class Flow:
         call = getattr(self.model, "complete_on", None)
         if call is None or self.channel not in ("claude", "cursor"):
             return None
-        other = "cursor" if self.channel == "claude" else "claude"
+        selector = getattr(self.model, "judge_channel", None)
+        other = (
+            selector(self.channel)
+            if selector
+            else ("cursor" if self.channel == "claude" else "claude")
+        )
+        if other is None:
+            return None
         ref, _, options, _ = self._args(task)
         fresh = state.get_run(self.conn, run["id"])
         system, messages = build_judge_request(

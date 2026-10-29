@@ -33,6 +33,12 @@ class ExecutorModel:
         """Семейство закреплённой модели канала; auto и неизвестная модель - None."""
         return self._run(lambda svc: svc.family(channel))
 
+    def judge_channel(self, author):
+        return self._run(lambda svc: svc.judge_channel(author))
+
+    def independent_checker(self, author):
+        return self._run(lambda svc: svc.independent_checker(author))
+
     def fits(self, system, messages, schema=None, channel=None) -> bool:
         """Помещается ли запрос в лимит исполнителя с фактической моделью канала."""
         return self._run(lambda svc: svc.fits(system, messages, schema, channel))
@@ -48,6 +54,9 @@ class ExecutorModel:
                     "cursor", os.environ.get("EXECUTOR_CURSOR_URL", "http://executor-cursor:8099")
                 ),
             }
+            channels["codex"] = ExecutorChannel(
+                "codex", os.environ.get("EXECUTOR_CODEX_URL", "http://executor-codex:8099")
+            )
             return call(ModelService(conn, channels))
         finally:
             conn.close()
