@@ -35,16 +35,18 @@ services:
   # Единственное описание исполнителей (сверка #2013 и #2014): корень только для чтения, /work -
   # tmpfs сервера исполнителя (uid 10001, 0711), без /tmp и /dev/shm, нулевые лимиты IPC, общий
   # ключ с приложением. Почему каждая строка такая - SPEC-1.0 §1.4 и deploy/executor/sandbox.sh.
-  executor-claude:
+  executor-codex:
     build:
       context: ..
-      dockerfile: deploy/executor/Containerfile
-    image: ${OLYMP_EXECUTOR_IMAGE:-olymp-executor:local}
+      dockerfile: deploy/executor/Containerfile.codex
+    image: ${OLYMP_CODEX_EXECUTOR_IMAGE:-olymp-executor-codex:local}
     environment:
-      EXECUTOR_CHANNEL: claude
+      EXECUTOR_CHANNEL: codex
       EXECUTOR_WORKROOT: /work
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set at run time by home-infra}
+      CODEX_SEED_DIR: /codex-seed
       EXECUTOR_SHARED_KEY: ${EXECUTOR_SHARED_KEY:?shared with the app, set by home-infra}
+    volumes:
+      - ${CODEX_SEED_DIR:?set the sbx proxy seed directory}:/codex-seed:ro
     read_only: true
     # /dev/shm Docker монтирует отдельно с правами 1777, read_only его не закрывает: без него
     # CLI негде оставить данные между запусками (ревью #2013, круг 4). Очереди POSIX и объекты SysV
@@ -81,7 +83,7 @@ services:
   executor-cursor:
     build:
       context: ..
-      dockerfile: deploy/executor/Containerfile
+      dockerfile: deploy/executor/Containerfile.cursor
     image: ${OLYMP_EXECUTOR_IMAGE:-olymp-executor:local}
     environment:
       EXECUTOR_CHANNEL: cursor
