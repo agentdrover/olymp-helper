@@ -12,7 +12,7 @@ import re
 from app.ingest.answers import display, key_json, normalize_answer
 from app.ingest.importer import FIGURE_WORDS
 from app.ingest.leaks import condition_leaks, norm
-from app.ingest.prompt import neutralize
+from app.ingest.prompt import OPTIONS_SCHEMA, neutralize
 from app.ingest.schema import InvalidStructure, validate_tasks
 from app.ingest.store import atomic, now, save_snapshot
 from app.ingest.topics import load_catalog
@@ -82,7 +82,7 @@ SCHEMA = {
                 "properties": {
                     "text": {"type": "string"},
                     "type": {"enum": ["single", "multiple", "match", "numeric"]},
-                    "options": {},
+                    "options": OPTIONS_SCHEMA,
                     "answer_key": {"type": "string"},
                     "explanation": {"type": "string"},
                 },

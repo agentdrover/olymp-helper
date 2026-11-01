@@ -41,8 +41,8 @@ class ExecutorModel:
         conn = connect(self.db_path)
         try:
             channels = {
-                "claude": ExecutorChannel(
-                    "claude", os.environ.get("EXECUTOR_CLAUDE_URL", "http://executor-claude:8099")
+                "codex": ExecutorChannel(
+                    "codex", os.environ.get("EXECUTOR_CODEX_URL", "http://executor-codex:8099")
                 ),
                 "cursor": ExecutorChannel(
                     "cursor", os.environ.get("EXECUTOR_CURSOR_URL", "http://executor-cursor:8099")

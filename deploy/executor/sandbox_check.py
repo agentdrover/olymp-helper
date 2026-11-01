@@ -338,6 +338,8 @@ def live_checks(channel):
     wanted = {"claude": os.environ.get("WANT_CLAUDE_VERSION", ""),
               "cursor-agent": os.environ.get("WANT_CURSOR_VERSION", "")}  # fmt: skip
     for binary, chan in (("claude", "claude"), ("cursor-agent", "cursor")):
+        if not wanted[binary]:
+            continue
         root = tempfile.mkdtemp(prefix="run-", dir="/work")
         os.chmod(root, 0o777)
         work_dir, home_dir = os.path.join(root, "work"), os.path.join(root, "home")
