@@ -13,6 +13,44 @@ from app.model.adapters import (
 from app.model.types import ChannelError
 
 
+@pytest.mark.parametrize("structured", [False, True])
+def test_trailing_empty_messages_preserve_last_nonempty_answer(structured):
+    schema = {"type": "object"} if structured else None
+    events = [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "earlier"}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"ok": true}'}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": ""}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": " \n\t "}},
+        {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 2}},
+    ]
+    result = parse_codex_jsonl("\n".join(map(json.dumps, events)), schema)
+    assert result.json == ({"ok": True} if structured else None)
+    assert result.text == (None if structured else '{"ok": true}')
+    assert result.usage == {"input_tokens": 3, "output_tokens": 2}
+
+
+@pytest.mark.parametrize("tail", ["", " \n\t ", None, 0, {}, []])
+@pytest.mark.parametrize("end", [None, "turn.failed", "error", "turn.completed"])
+def test_empty_or_invalid_codex_turn_stays_unavailable(tail, end):
+    events = []
+    if not isinstance(tail, str):
+        events.append({"type": "item.completed", "item": {
+            "type": "agent_message", "text": '{"ok": true}',
+        }})
+    events.append({"type": "item.completed", "item": {"type": "agent_message", "text": tail}})
+    if end is not None:
+        events.append({"type": end})
+    with pytest.raises(ChannelError):
+        parse_codex_jsonl("\n".join(map(json.dumps, events)), None)
+    # A valid message cannot turn a missing or failed completion into success.
+    if end != "turn.completed":
+        events[0:0] = [{"type": "item.completed", "item": {
+            "type": "agent_message", "text": '{"ok": true}',
+        }}]
+        with pytest.raises(ChannelError):
+            parse_codex_jsonl("\n".join(map(json.dumps, events)), None)
+
+
 def test_codex_uses_isolated_noninteractive_mode():
     argv = CodexAdapter().build("gpt-6.1-sol", "system", {"type": "object"}, [b"png"])
     assert argv[:2] == ["codex", "exec"]

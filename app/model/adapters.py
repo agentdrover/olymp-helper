@@ -326,7 +326,12 @@ def parse_codex_jsonl(stdout: str, schema: dict | None) -> Parsed:
             if not isinstance(item, dict):
                 raise ChannelError("bad_json")
             if item.get("type") == "agent_message":
-                text = item.get("text")
+                message = item.get("text")
+                if not isinstance(message, str):
+                    raise ChannelError("bad_json")
+                # Empty events must not erase the last usable answer.
+                if message.strip():
+                    text = message
             elif item.get("type") in ("command_execution", "file_change", "mcp_tool_call", "web_search"):
                 raise ChannelError("unexpected_tool")
         if kind == "turn.completed":
