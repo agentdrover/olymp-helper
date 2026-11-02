@@ -110,7 +110,9 @@ def test_ac2(tmp_path):
         assert r.status_code == 200, r.text
         assert row(tmp_path, ids[0])["key_source"] == "official"
         assert child_ids(c) == [ids[0]]
-        listing = c.get("/tasks", headers=CHILD)
+        listing = c.get(
+            "/tasks?status=new", headers=CHILD
+        )  # список - под фильтром, без него карта блоков
         assert listing.status_code == 200 and "Задание 1" in listing.text
         assert "Задание 2" not in listing.text and "Задание 3" not in listing.text
         # An edited task is a draft again; it has a key but stays hidden.

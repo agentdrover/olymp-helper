@@ -155,9 +155,13 @@ def _image_boxes(page) -> list[pymupdf.Rect]:
     return boxes
 
 
-def _stored(page, rect: pymupdf.Rect) -> list[float]:
+def stored_from_page(page, rect: pymupdf.Rect) -> list[float]:
+    """Область в координатах страницы -> рамка для хранилища (со смещением CropBox)."""
     origin = _crop_origin(page)
     return [rect.x0 + origin.x, rect.y0 + origin.y, rect.x1 + origin.x, rect.y1 + origin.y]
+
+
+_stored = stored_from_page
 
 
 def _nearest(boxes, anchor):

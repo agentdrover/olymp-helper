@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-CONTAINERFILE = Path(__file__).parent.parent / "deploy" / "executor" / "Containerfile"
+CONTAINERFILE = Path(__file__).parent.parent / "deploy" / "executor" / "Containerfile.cursor"
 FLOATING = {"latest", "next", "stable", "beta", "canary", "nightly", "main", "master", ""}
 
 
@@ -19,19 +19,21 @@ def declared(arg):
 
 def test_cli_versions_are_pinned_in_the_executor_image():
     src = text()
-    claude = declared("CLAUDE_CODE_VERSION")
     cursor = declared("CURSOR_AGENT_VERSION")
-    assert re.fullmatch(r"\d+\.\d+\.\d+", claude), claude
+    codex_src = (CONTAINERFILE.parent / "Containerfile.codex").read_text(encoding="utf-8")
+    codex = re.search(r"^ARG CODEX_VERSION=(\S+)$", codex_src, re.MULTILINE).group(1)
+    assert re.fullmatch(r"\d+\.\d+\.\d+", codex), codex
     assert re.fullmatch(r"\d{4}\.\d{2}\.\d{2}-[0-9a-f]{7,}", cursor), cursor
-    for version in (claude, cursor):
+    for version in (codex, cursor):
         assert version.lower() not in FLOATING
     # Установка идёт ровно по объявленной версии, плавающих тегов нет.
-    assert "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" in src
+    assert "@openai/codex@${CODEX_VERSION}" in codex_src
+    assert "@anthropic-ai/claude-code" not in src + codex_src
     assert "downloads.cursor.com/lab/${CURSOR_AGENT_VERSION}/" in src
     assert not re.search(r"@(latest|next|stable)\b", src)
     assert not re.search(r"claude-code(?!@)\b(?=\s*$)", src, re.MULTILINE)
     # Версия собранного образа сверяется с заявленной на сборке.
-    assert re.search(r"claude --version.*\$\{?CLAUDE_CODE_VERSION", src, re.DOTALL)
+    assert re.search(r"codex --version.*\$\{?CODEX_VERSION", codex_src, re.DOTALL)
     assert re.search(r"cursor-agent --version.*\$\{?CURSOR_AGENT_VERSION", src, re.DOTALL)
     # Базовый образ не плавающий.
     for ref in re.findall(r"^FROM (\S+)", src, re.MULTILINE):
@@ -74,7 +76,7 @@ def test_server_and_cli_run_as_different_uids():
 
 def test_one_executor_container_per_channel_with_only_its_token():
     for name, own, other in (
-        ("executor-claude", "CLAUDE_CODE_OAUTH_TOKEN", "CURSOR_API_KEY"),
+        ("executor-codex", "CODEX_SEED_DIR", "CURSOR_API_KEY"),
         ("executor-cursor", "CURSOR_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
     ):
         block = service_block(name)
@@ -82,7 +84,11 @@ def test_one_executor_container_per_channel_with_only_its_token():
         assert f"EXECUTOR_CHANNEL: {name.split('-')[1]}" in block
         assert "read_only: true" in block
         assert re.search(r"/work:[^\n]*noexec[^\n]*nosuid[^\n]*nodev[^\n]*size=", block)
-        assert "volumes:" not in block and "privileged" not in block
+        assert "privileged" not in block
+        if name == "executor-codex":
+            assert ":/codex-seed:ro" in block
+        else:
+            assert "volumes:" not in block
         assert "cap_drop:\n      - ALL" in block
         assert re.findall(r"cap_add:\n((?:      - \w+\n)+)", block)[0].split() == [
             "-",
@@ -90,15 +96,15 @@ def test_one_executor_container_per_channel_with_only_its_token():
             "-",
             "SETGID",
         ]
-    sh = read("deploy/executor/sandbox.sh")
-    assert 'for pair in "claude:CLAUDE_CODE_OAUTH_TOKEN" "cursor:CURSOR_API_KEY"' in sh
+    sh = read("deploy/executor/sandbox-cursor.sh")
+    assert 'for pair in "cursor:CURSOR_API_KEY"' in sh
     assert len(re.findall(r'-e "\$\{?\w*(?:token|TOKEN)\w*\}?=', sh)) == 1  # одна строка, по паре
     assert "CURSOR_API_KEY" not in sh.replace('"cursor:CURSOR_API_KEY"', "")
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in sh.replace('"claude:CLAUDE_CODE_OAUTH_TOKEN"', "")
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in sh
 
 
 def test_scratch_area_is_a_limited_tmpfs():
-    sh = read("deploy/executor/sandbox.sh")
+    sh = read("deploy/executor/sandbox-cursor.sh")
     assert re.search(r"--tmpfs /work:[^ ]*noexec[^ ]*nosuid[^ ]*nodev[^ ]*size=", sh)
     assert "--read-only" in sh
     spec = read("docs/spec/SPEC-1.0.md")

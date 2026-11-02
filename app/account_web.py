@@ -284,7 +284,7 @@ def _delete_conversation(request: Request, conn, session_id, confirm, expected):
     # больше или меньше, вопрос задаётся заново.
     if not confirm or expected != privacy.message_count(conn, session_id):
         return _conversation_confirm(request, conn, session_id)
-    privacy.delete_messages(conn, session_id)
+    privacy.delete_messages(conn, session_id, now_of(request))
     return RedirectResponse("/parent/conversations", status_code=303)
 
 

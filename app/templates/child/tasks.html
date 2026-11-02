@@ -5,23 +5,126 @@
   <div class="kicker">Сеченовская олимпиада · отборочный этап · биология 5–7</div>
   <h1>Задания</h1>
 </header>
-{% if tasks %}
-<div class="panel">
-  <table>
-    <thead><tr><th scope="col">№</th><th scope="col">Задание</th><th scope="col">Тема</th><th scope="col">Тип</th></tr></thead>
-    <tbody>
-    {% for t in tasks %}
-      <tr>
-        <td class="mono">{{ t.number }}</td>
-        <td><a href="/tasks/{{ t.id }}">Задание {{ t.number }}</a> <span class="hint">— {{ t.source }}</span></td>
-        <td>{{ topics.get(t.id) or "—" }}</td>
-        <td><span class="pill">{{ type_labels.get(t.type, t.type) }}</span></td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% else %}
-<p class="card">Пока нет проверенных заданий.</p>
+
+<form method="get" action="/tasks" class="panel search-form" role="search" aria-label="Поиск заданий">
+  <div class="search-row">
+    <div class="field">
+      <label for="f-q">Поиск: условие, номер или тема</label>
+      <input id="f-q" type="search" name="q" value="{{ params.q }}">
+    </div>
+    <button type="submit" class="btn">Найти</button>
+    {% if active %}<a href="/tasks">Сбросить</a>{% endif %}
+  </div>
+  <details class="filters"{% if params.theme or params.type or params.source or params.variant or params.status %} open{% endif %}>
+  <summary>Фильтры</summary>
+  <div class="fields filter-grid">
+    <div class="field">
+      <label for="f-theme">Блок или тема</label>
+      <select id="f-theme" name="theme">
+        <option value="">все</option>
+        {% for t in found.topics %}
+        <option value="{{ t.pos }}"{% if params.theme == t.pos %} selected{% endif %}>{% if t.parent_code %}— {% endif %}{{ t.title }}</option>
+        {% endfor %}
+        <option value="none"{% if params.theme == "none" %} selected{% endif %}>Без темы</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-type">Тип ответа</label>
+      <select id="f-type" name="type">
+        <option value="">любой</option>
+        {% for k, v in type_labels.items() %}
+        <option value="{{ k }}"{% if params.type == k %} selected{% endif %}>{{ v }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-source">Источник</label>
+      <select id="f-source" name="source">
+        <option value="">любой</option>
+        {% for y in found.years %}
+        <option value="{{ y }}"{% if params.source == y|string %} selected{% endif %}>сборник {{ y }}</option>
+        {% endfor %}
+        {% if found.has_generated %}
+        <option value="{{ generated }}"{% if params.source == generated %} selected{% endif %}>составлено помощником</option>
+        {% endif %}
+      </select>
+    </div>
+    {% if found.variants %}
+    <div class="field">
+      <label for="f-variant">Вариант</label>
+      <select id="f-variant" name="variant">
+        <option value="">любой</option>
+        {% for v in found.variants %}
+        <option value="{{ v }}"{% if params.variant == v %} selected{% endif %}>{{ v }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    <div class="field">
+      <label for="f-status">Статус</label>
+      <select id="f-status" name="status">
+        <option value="">любой</option>
+        {% for k, v in statuses.items() %}
+        <option value="{{ k }}"{% if params.status == k %} selected{% endif %}>{{ v }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  </details>
+</form>
+
+{% if active %}
+<section aria-labelledby="found-h">
+  <h2 id="found-h">{% if current %}{{ current.title }}{% else %}Найдено{% endif %}: {{ found.tasks|length }}</h2>
+  {% if current and current.next_id %}
+  <p><a class="btn" href="/tasks/{{ current.next_id }}">Решать по теме</a></p>
+  {% endif %}
+  {% if found.tasks %}
+  <div class="panel">
+    <table>
+      <thead><tr><th scope="col">№</th><th scope="col">Задание</th><th scope="col">Тема</th><th scope="col">Тип</th><th scope="col">Статус</th></tr></thead>
+      <tbody>
+      {% for t in found.tasks %}
+        <tr>
+          <td class="mono">{{ t.number }}</td>
+          <td><a href="/tasks/{{ t.id }}">Задание {{ t.number }}</a> <span class="hint">— {{ t.source }}</span><br><span class="hint">{{ t.snippet }}</span></td>
+          <td>{{ t.topic or "—" }}</td>
+          <td><span class="pill">{{ type_labels.get(t.type, t.type) }}</span></td>
+          <td><span class="pill status-{{ t.status }}"{% if t.status == "model" %} title="не проверено"{% endif %}>{{ t.status_label }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="card">По этому запросу заданий нет.</p>
+  {% endif %}
+</section>
 {% endif %}
+
+<section aria-labelledby="map-h">
+  <h2 id="map-h">Карта блоков</h2>
+  {% set filled = blocks|selectattr("total")|list %}
+  {% set empty = blocks|rejectattr("total")|list %}
+  <div class="block-grid">
+    {% for b in filled %}
+    <article class="card block-card" id="block-{{ b.code }}">
+      <h3><a href="/tasks?block={{ b.pos }}">{{ b.title }}</a></h3>
+      <p class="hint">разобрано {{ b.done }} из {{ b.total }}</p>
+      <p class="hint">с 1-й попытки: {% if b.first_share is none %}—{% else %}{{ b.first_share }}%{% endif %}</p>
+      {% if b.model %}<p class="hint">совпало с моделью: {{ b.model }} (не проверено)</p>{% endif %}
+      {% if b.hint3_model %}<p class="hint">решение модели по подсказке 3: {{ b.hint3_model }} (не проверено)</p>{% endif %}
+      <div class="bar" role="img" aria-label="верно {{ b.bar.ok }}%, с подсказкой {{ b.bar.hint }}%, ошибся {{ b.bar.wrong }}%, совпало с моделью {{ b.bar.model }}%">
+        <span class="bar-ok" style="width: {{ b.bar.ok }}%"></span><span class="bar-hint" style="width: {{ b.bar.hint }}%"></span><span class="bar-wrong" style="width: {{ b.bar.wrong }}%"></span><span class="bar-model" style="width: {{ b.bar.model }}%"></span>
+      </div>
+      {% if b.next_id %}<p><a href="/tasks/{{ b.next_id }}">Решать по теме</a></p>{% endif %}
+    </article>
+    {% endfor %}
+  </div>
+  {% if empty %}
+  <p class="hint empty-blocks">Пока нет заданий:
+    {% for b in empty %}<span class="chip" id="block-{{ b.code }}">{{ b.title }}</span>{% if not loop.last %}, {% endif %}{% endfor %}
+  </p>
+  {% endif %}
+</section>
 {% endblock %}

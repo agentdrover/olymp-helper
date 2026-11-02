@@ -60,7 +60,9 @@ class Scripted:
 
     def complete_on(self, channel, system, messages, schema=None, session_id=None):
         content = messages[-1]["content"]
-        self.judge_calls.append({"channel": channel, "content": content, "system": system})
+        self.judge_calls.append(
+            {"channel": channel, "content": content, "system": system, "schema": schema}
+        )
         if self.judge is None:
             payload = {"reveals": False, "reason": "нет признаков ответа"}
         else:

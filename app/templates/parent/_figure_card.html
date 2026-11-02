@@ -1,0 +1,104 @@
+{# Карточка «нужен рисунок» для ноутбука ≥1280×800: верхняя полоса и три колонки (#2121). #}
+<article class="card fc" data-task-id="{{ card.task_id }}" data-kind="{{ card.kind }}"
+         data-counter="{{ counter or '' }}" data-figure-page="{{ card.figure_page or '' }}"
+         data-tile-count="{{ card.tiles|length }}">
+  <header class="fc-bar">
+    <div class="fc-title">
+      <div class="fc-crumb"><span class="badge">{{ card.label }}</span> <span class="fc-counter">{{ counter or "" }}</span></div>
+      <h2 class="fc-h">Задание {{ card.number }} · {{ card.type }}{% if card.pages %} · стр. {{ card.pages[0] }}{% if card.pages|length > 1 %}–{{ card.pages[-1] }}{% endif %}{% endif %} · {{ card.topic_title or "тема не размечена" }}</h2>
+    </div>
+    <button data-action="exclude">Исключить</button>
+    <button data-action="edit">Поправить текст <kbd>E</kbd></button>
+    <button data-action="skip">Пропустить <kbd>→</kbd></button>
+    <button class="primary" data-action="figure" id="publish" disabled>Подтвердить и опубликовать <kbd>Enter</kbd></button>
+  </header>
+  <div class="fc-notes-row">
+    {% if card.hint %}<p class="hint">{{ card.hint }}</p>{% endif %}
+    {% if card.note %}<p class="err">Обратите внимание: {{ card.note }}.</p>{% endif %}
+    {% if card.warning %}<p class="err" role="alert">{{ card.warning }}</p>{% endif %}
+    {% if card.parent_note %}<p class="hint">Заметка для родителя (ребёнку не показывается): {{ card.parent_note }}</p>{% endif %}
+    <p class="err" id="error" role="alert"></p>
+  </div>
+  <div id="edit-panel" class="fields" hidden>
+    <div class="field"><label for="edit-text">Текст задания</label><textarea id="edit-text" rows="5">{{ card.text }}</textarea></div>
+    <div class="field"><label for="edit-topic">Тема</label><select id="edit-topic">
+      <option value="">не размечено</option>
+      {% for t in card.topics %}<option value="{{ t.code }}"{% if t.code == card.topic %} selected{% endif %}>{{ t.title }}</option>{% endfor %}
+    </select></div>
+    <label class="check-row"><input type="checkbox" id="manual"> самодостаточное условие (без рисунка)</label>
+    <div class="form-actions"><button class="primary" data-action="save-edit">Сохранить правку</button></div>
+  </div>
+
+  <div class="fc-cols">
+    <div class="fc-col fc-pages">
+      <h3>Страница {{ card.figure_page or card.page or "" }}</h3>
+      {% if card.page_url %}<div class="page-wrap"><img id="page-img" src="{{ card.page_url }}" alt="Исходная страница">
+        {% for o in card.overlays or [] %}<span class="region-frame" data-region="{{ o.number }}" style="left:{{ o.left }}%;top:{{ o.top }}%;width:{{ o.width }}%;height:{{ o.height }}%"><span class="region-badge">{{ o.number }}</span></span>{% endfor %}
+      </div>{% endif %}
+      <p class="hint">Зелёные рамки — то, что вырежется для ребёнка. Рамку рисуют мышью по странице: новая рамка заменяет область этой страницы, плитки пересчитываются только на ней.</p>
+    </div>
+
+    <div class="fc-col fc-child">
+      <section class="child-view" aria-label="Как увидит ребёнок">
+        <div class="child-view-head"><h3>Как увидит ребёнок</h3><span class="pill" id="mode-pill">{{ card.mode.label }}</span></div>
+        <p class="text">{{ card.text }}</p>
+        <div id="figure-area" data-figure-area>{% with a=card.area %}{% include "parent/_figure_area.html" %}{% endwith %}</div>
+        <p class="hint">Источник: {{ card.child.source }}</p>
+        <p class="hint" id="key-hint">{% if card.key_value is none %}Ключа нет — выберите сами. Без ключа задание не публикуется.{% elif card.key_source_label %}Кандидат: {{ card.key_source_label }} — проверьте его.{% elif card.key_is_candidate %}Ключ из загруженного файла — проверьте его.{% else %}Ключ задан — можно изменить.{% endif %}</p>
+        {% if card.key_refusal %}<p class="hint">{{ card.key_refusal }} Выберите ответ сами.</p>{% endif %}
+        {% if card.key_candidate_source_label %}<p class="hint">Ответ подтверждён родителем; предложен: {{ card.key_candidate_source_label }}.</p>{% endif %}
+        {% if card.key and card.key_unverified %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }}) <b>не проверен</b></p>{% endif %}
+        {% if card.options %}
+        <p class="hint">Варианты:
+          {% if card.options is mapping %}{% for o in card.options.right %}{{ o.label }} {{ o.text }}{% if not loop.last %} · {% endif %}{% endfor %}
+          {% else %}{% for o in card.options %}{{ o.label }}) {{ o.text }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+        </p>
+        {% endif %}
+        <p class="hint" id="mode-hint">{{ card.mode.hint }}</p>
+      </section>
+      {# Место под «почему так» (#2111): только у родителя, ребёнку шаблон ребёнка его не отдаёт. #}
+      <div id="why-slot" class="why-slot" data-why-slot hidden></div>
+    </div>
+
+    <div class="fc-col fc-check">
+      <h3>Проверка</h3>
+      <section class="fc-q">
+        <h4>На картинках нет ответа?</h4>
+        <p class="hint">Подписей, стрелок с названиями и букв-ответов быть не должно.</p>
+        {% if card.figure and card.figure.leak %}<p class="err" role="alert">В рамке напечатан текст ответа или вариантов: {{ card.figure.leak|join(", ") }}.</p>{% endif %}
+        <p class="choices">
+          <label><input type="radio" name="leak" value="none"> Ответа нет</label>
+          <label><input type="radio" name="leak" value="some"> Есть — правлю рамку</label>
+        </p>
+        <p id="leak-ack-row" class="hint"{% if not (card.figure and card.figure.leak) and not (card.tiles|selectattr("leak")|list) %} hidden{% endif %}><label><input type="checkbox" id="leak_ack"> этот текст допустим, так и надо</label></p>
+      </section>
+      <section class="fc-q">
+        <label for="alt"><h4>Подпись к картинке</h4></label>
+        <input id="alt" size="40" value="{{ card.figure.alt if card.figure else '' }}">
+        <p class="hint">Её слышит экранный диктор. Без названий и ответа.</p>
+      </section>
+      <details class="fc-notes">
+        {% set n_items = card.figure_items|length %}
+        <summary id="notes-summary" data-total="{{ n_items }}">Описать рисунки для подсказок · 0 из {{ n_items }}</summary>
+        <p class="hint">Помощник картинок не видит. Опишите каждое обозначение одной строкой — ребёнку эти строки не показываются.</p>
+        {% if card.figure_items %}
+          {% for it in card.figure_items %}
+          <label class="note-row">{{ it }} <input data-note="{{ it }}" size="30" value="{{ card.figure_notes.get(it, '') }}"></label>
+          {% endfor %}
+          <input type="hidden" id="note_rest" value="{{ card.figure_note_rest }}">
+        {% else %}
+          <textarea id="note_free" rows="3" cols="30">{{ card.figure.teacher_note if card.figure else '' }}</textarea>
+        {% endif %}
+        <p class="hint"><label><input type="checkbox" id="note_ack"{% if card.figure and card.figure.teacher_note_ack %} checked{% endif %}> Описание верное: подсказки могут на него опираться</label></p>
+        <p class="hint" id="note-status" role="status"></p>
+      </details>
+      <div class="fc-summary" id="summary" aria-live="polite">
+        <div data-sum="leak"></div>
+        <div data-sum="key"></div>
+        <div data-sum="alt"></div>
+        <div data-sum="hints" class="hint"></div>
+      </div>
+      <p class="hint">{% if card.topic_title %}После подтверждения ребёнок увидит задание в теме «{{ card.topic_title }}».{% else %}Тема не размечена: ребёнок увидит задание без названия темы.{% endif %}</p>
+    </div>
+  </div>
+</article>

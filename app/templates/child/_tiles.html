@@ -1,0 +1,31 @@
+{# Плитки рисунка: одно и то же разбиение у ребёнка и в предпросмотре родителя.
+   Редактор (привязка, порядок, ввод ответа) выводится только при editor — это страница родителя;
+   ребёнок получает плитки без ключа и без полей ввода ключа. #}
+<ol class="fc-tiles">
+  {% for t in tiles %}
+  <li class="fc-tile" data-tile-id="{{ t.id }}" data-label="{{ t.label or '' }}">
+    <span class="fc-num" data-tile-num>{{ t.label or t.n }}</span>
+    <a href="{{ t.url }}"{% if zoom %} data-zoom data-zoom-src="{{ t.url }}"{% else %} target="_blank" rel="noopener"{% endif %}><img src="{{ t.url }}" alt="{{ alt }} — рисунок {{ t.n }}" data-tile-img></a>
+    {% if editor %}
+    {% if t.raster_only %}<p class="tile-warning" role="alert">Рисунок {{ t.n }}: текст внутри картинки не проверяется автоматически — посмотрите на неё глазами.</p>{% endif %}
+    {% if t.leak %}<p class="err" role="alert" data-tile-leak>В рисунке {{ t.n }} напечатан текст ответа или вариантов: {{ t.leak|join(", ") }}.</p>{% endif %}
+    {% if not t.readable %}<p class="err" role="alert">В рисунке {{ t.n }} подписи мельче читаемого размера.</p>{% endif %}
+    <div class="fc-tile-tools">
+      {% if a.lefts %}<label class="hint">номер
+        <select data-tile-bind aria-label="К какому рисунку задания относится картинка {{ t.n }}">
+          <option value="">—</option>
+          {% for l in a.lefts %}<option value="{{ l }}"{% if t.label == l %} selected{% endif %}>{{ l }}</option>{% endfor %}
+        </select></label>{% endif %}
+      <button type="button" data-tile-move="-1" aria-label="Сдвинуть картинку {{ t.n }} раньше">←</button>
+      <button type="button" data-tile-move="1" aria-label="Сдвинуть картинку {{ t.n }} позже">→</button>
+    </div>
+    {% if a.bound and t.label %}
+    <label class="fc-tile-key">ответ
+      <select data-key-left="{{ t.label }}"><option value="">— выбери —</option>
+        {% for r in a.options.right %}<option value="{{ r.label }}"{% if a.key_value and a.key_value.get(t.label) == r.label %} selected{% endif %}>{{ r.label }}) {{ r.text }}</option>{% endfor %}
+      </select></label>
+    {% endif %}
+    {% endif %}
+  </li>
+  {% endfor %}
+</ol>

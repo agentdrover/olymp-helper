@@ -1,0 +1,12 @@
+{% extends "base_parent.html" %}
+{% block title %}Открыть переписку занятия №{{ session_id }}{% endblock %}
+{% block content %}
+<h1>Открыть переписку занятия №{{ session_id }}</h1>
+<form method="post" action="/parent/sessions/{{ session_id }}/chat" class="card">
+  <input type="hidden" name="csrf" value="{{ csrf_token(request) }}">
+  <input type="hidden" name="confirm" value="1">
+  <p>Запись появится в журнале ребёнка.</p>
+  <button class="primary" type="submit">Открыть переписку</button>
+  <a class="btn" href="/parent/summaries/{{ session_id }}">Не открывать</a>
+</form>
+{% endblock %}

@@ -12,6 +12,7 @@ from tests.bank_helpers import (
     StubModel,
     build_app,
     db,
+    post_figure_acked,
     reply,
     task_ids,
     upload,
@@ -181,7 +182,7 @@ def confirm(client, task_id, **body):
 
 def confirm_figure(client, task_id, **kw):
     body = {"alt": ALT, "teacher_note": "1 2 3 4 5", **ACK, **kw}
-    return client.post(f"/parent/tasks/{task_id}/figure", headers=PARENT, json=body)
+    return post_figure_acked(client, task_id, body)
 
 
 def child_surfaces(client, query_words):
@@ -715,17 +716,18 @@ def test_the_crop_guard_looks_at_every_region_and_at_parts_of_a_line():
 
 
 def test_units_of_the_answer_text_and_the_fitting_of_a_page_answer():
-    from app.ingest.answers import fit_page_answer, same_answer
+    from app.ingest.answers import same_answer
     from app.ingest.leaks import condition_leaks, crop_units
+    from app.ingest.page_answer import fit_page
 
     assert condition_leaks("Подсчитайте. 28", "28\n№ 2 … № 7") == ["28"]
     assert condition_leaks("Подсчитайте.", "28\n№ 2 … № 7") == []
     assert crop_units("ядро", [], None) == ["ядро"]
     assert crop_units(None, ["ядро"], None) == ["ядро"]
     assert not same_answer("numeric", None, "x")
-    assert fit_page_answer("А", "open", [{"label": "А", "text": "один"}]) is None
-    assert fit_page_answer("1 Стебель 2 Лист", "match", MATCH_6) is None  # not every left label
-    assert fit_page_answer("1 Стебель 2 Лист 3 Корень 4 Лист 5 Корень", "match", MATCH_6) == {
+    assert fit_page("А", "open", [{"label": "А", "text": "один"}]).value is None
+    assert fit_page("1 Стебель 2 Лист", "match", MATCH_6).value is None  # not every left label
+    assert fit_page("1 Стебель 2 Лист 3 Корень 4 Лист 5 Корень", "match", MATCH_6).value == {
         "1": "Б",
         "2": "В",
         "3": "А",
@@ -1020,20 +1022,20 @@ def test_a_match_figure_may_show_its_designations_but_not_its_pairs(tmp_path):
 
 
 def test_a_range_in_the_page_answer_is_expanded_to_every_label():
-    from app.ingest.answers import fit_page_answer
+    from app.ingest.page_answer import fit_page
 
     labels = [{"label": str(i), "text": f"утверждение {i}"} for i in range(1, 9)]
     every = ["2", "3", "4", "5", "6", "7"]
     for raw in ("№ 2 … № 7", "2-7", "2...7", "2 – 7", "2, 3, 4, 5, 6, 7", "2 … 7, 3"):
-        assert fit_page_answer(raw, "multiple", labels) == every, raw
-    assert fit_page_answer("1, 3 … 5", "multiple", labels) == ["1", "3", "4", "5"]
+        assert fit_page(raw, "multiple", labels).value == every, raw
+    assert fit_page("1, 3 … 5", "multiple", labels).value == ["1", "3", "4", "5"]
     # Ambiguous: an end is not a label, the range runs backwards, or its ends differ in kind.
     for raw in ("2 … 12", "7 … 2", "1, 7 … 2", "А … 3", "№ 2 … №"):
-        assert fit_page_answer(raw, "multiple", labels) is None, raw
-    assert fit_page_answer("2-7", "single", labels) is None
+        assert fit_page(raw, "multiple", labels).value is None, raw
+    assert fit_page("2-7", "single", labels).value is None
     letters = [{"label": c, "text": f"вариант {c}"} for c in "АБВГД"]
-    assert fit_page_answer("А-В", "multiple", letters) == ["А", "Б", "В"]
-    assert fit_page_answer("Б … Д", "multiple", letters) == ["Б", "В", "Г", "Д"]
+    assert fit_page("А-В", "multiple", letters).value == ["А", "Б", "В"]
+    assert fit_page("Б … Д", "multiple", letters).value == ["Б", "В", "Г", "Д"]
 
 
 def test_the_next_anchor_is_the_nearest_following_one_by_position(tmp_path):

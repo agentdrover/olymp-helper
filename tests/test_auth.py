@@ -27,6 +27,7 @@ PUBLIC = {
     ("GET", "/tasks"),
     ("GET", "/tasks/{task_id}"),
     ("GET", "/tasks/{task_id}/figure.png"),
+    ("GET", "/tasks/{task_id}/figure/{tile_id}.png"),  # плитка: те же условия, что у figure.png
     ("GET", "/api/tasks"),
     ("GET", "/api/tasks/{task_id}"),
     ("GET", "/api/search"),
@@ -43,6 +44,13 @@ PUBLIC = {
     # чат и голос (OH-T07): те же замки ребёнка - свой источник, JSON, уведомление прочитано
     ("POST", "/tasks/{task_id}/chat"),
     ("POST", "/tasks/{task_id}/voice"),
+    # итоги занятий (OH-T10): страницы и JSON ребёнка за уведомлением, POST - свой источник и JSON
+    ("GET", "/my"),
+    ("GET", "/how"),
+    ("GET", "/api/my"),
+    ("GET", "/api/my/sessions/{session_id}"),
+    ("POST", "/session/finish"),
+    ("POST", "/my/sessions/{session_id}/show-parent"),
 }
 FRAMEWORK = {"/static"}  # the API description is switched off: no /docs, /redoc, /openapi.json
 

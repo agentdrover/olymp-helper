@@ -7,9 +7,12 @@
     <a class="brand" href="/">{% include "_logo.html" %} Помощник</a>
     <a href="/today"{% if path == "/today" %} aria-current="page"{% endif %}>Сегодня</a>
     <a href="/tasks"{% if path.startswith("/tasks") %} aria-current="page"{% endif %}>Задания</a>
+    <a href="/my"{% if path == "/my" or path == "/how" %} aria-current="page"{% endif %}>Мои итоги</a>
+    <button type="button" class="navlink" data-finish>Закончить занятие</button>
     <div class="spacer"></div>
     <a class="minor" href="/parent/login">Вход для родителя</a>
   </nav>
   <main class="content">{% block content %}{% endblock %}</main>
 </div>
+<script src="/static/session.js" defer></script>
 {% endblock %}

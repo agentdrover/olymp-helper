@@ -32,7 +32,8 @@ def test_ac21(tmp_path):
         n = len(model.calls)
         second = post(c, tid, "hint", level=1)
         assert second.json()["panel"]["state"] == "thinking"
-        assert "обычно 5–15 с" in second.json()["panel"]["text"]
+        # время от старта шага, по часам сервера
+        assert second.json()["panel"]["text"] == "Думаю… 0 с"
         assert len(model.calls) == n, "второй запрос к модели не должен уйти"
         assert view(c, tid)["panel"]["state"] == "thinking"
         assert "disabled" in c.get(f"/tasks/{tid}/tutor").text  # кнопки заблокированы

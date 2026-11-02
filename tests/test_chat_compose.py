@@ -111,17 +111,15 @@ def test_ac10(tmp_path):
         # a second question while the model answers: not sent, the shared panel says «думаю…»
         second = say(c, tid, "второй")
         assert second.status_code == 200
-        assert second.json()["panel"] == {
-            "state": "thinking",
-            "text": "Думаю… обычно 5–15 с",
-            "busy": True,
-        }
+        panel = second.json()["panel"]
+        assert (panel["state"], panel["text"], panel["busy"]) == ("thinking", "Думаю… 0 с", True)
+        assert panel["elapsed_s"] == 0 and panel["step"]
         frag = c.post(
             f"/tasks/{tid}/chat",
             json={"message": "третий", "mode": "chat"},
             headers={**CHILD, "HX-Request": "true"},
         )
-        assert 'data-panel="thinking"' in frag.text and "обычно 5–15 с" in frag.text
+        assert 'data-panel="thinking"' in frag.text and "Думаю… 0 с" in frag.text
         assert "disabled" in frag.text  # the panel's buttons are blocked
         # the same Inflight lock covers hints: one model request per task
         assert c.post(f"/tasks/{tid}/hint", json={"level": 1}, headers=CHILD).status_code in (

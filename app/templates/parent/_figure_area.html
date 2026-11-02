@@ -1,0 +1,29 @@
+{# Картинки и ввод ответа в «Как увидит ребёнок». Тот же фрагмент отдаёт figure-tiles после правки рамки. #}
+<span hidden data-leak-digest="{{ a.digest }}" data-column-digest="{{ a.column_digest }}"></span>
+{% if a.tiles %}
+  {% with tiles=a.tiles, editor=True, alt=a.alt %}{% include "child/_tiles.html" %}{% endwith %}
+  {% if a.warning %}<p class="err tile-count-warning" role="alert">{{ a.warning }}</p>{% endif %}
+{% elif a.has_regions %}
+  <figure class="figure"><a href="{{ a.common_url }}"><img src="{{ a.common_url }}" alt="{{ a.alt }}" data-figure-img></a></figure>
+  {% if a.raster_warning %}<p class="err" role="alert" id="raster-warning">{{ a.raster_warning }}</p>{% endif %}
+{% else %}
+  <figure class="figure" hidden><img alt="" data-figure-img hidden></figure>
+{% endif %}
+<div class="key-fields" data-type="{{ a.type }}" data-candidate="{{ 1 if a.key_is_candidate else 0 }}" data-lefts="{{ a.lefts_csv }}" data-bound="{{ 1 if (a.tiles and a.bound) else 0 }}">
+{% if a.type == "match" and a.options is mapping %}
+  {% if not (a.tiles and a.bound) %}
+  {% for l in a.options.left %}
+  <label>рисунок {{ l.label }}
+    <select data-key-left="{{ l.label }}"><option value="">— выбери —</option>
+      {% for r in a.options.right %}<option value="{{ r.label }}"{% if a.key_value and a.key_value.get(l.label) == r.label %} selected{% endif %}>{{ r.label }}) {{ r.text }}</option>{% endfor %}
+    </select></label>
+  {% endfor %}
+  {% endif %}
+{% elif a.type == "single" and a.options %}
+  <label>Вариант <select id="key_text"><option value="">— выбери —</option>
+    {% for o in a.options %}<option value="{{ o.label }}"{% if a.key_display == o.label %} selected{% endif %}>{{ o.label }}) {{ o.text }}</option>{% endfor %}
+  </select></label>
+{% else %}
+  <label>Ответ <input id="key_text" size="12" value="{{ a.key_display or '' }}"></label>
+{% endif %}
+</div>

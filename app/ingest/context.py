@@ -22,16 +22,28 @@ class ExecutorModel:
     def complete(self, system, messages, schema=None, session_id=None) -> ModelResult:
         return self._run(lambda svc: svc.complete(system, messages, schema, session_id))
 
-    def complete_on(self, channel, system, messages, schema=None, session_id=None) -> ModelResult:
+    def complete_on(
+        self, channel, system, messages, schema=None, session_id=None, images=None
+    ) -> ModelResult:
         """Один названный канал без запасного (независимый судья текста, OH-T06)."""
-        return self._run(lambda svc: svc.complete_on(channel, system, messages, schema, session_id))
+        return self._run(
+            lambda svc: svc.complete_on(channel, system, messages, schema, session_id, images)
+        )
 
-    def _run(self, call) -> ModelResult:
+    def family(self, channel) -> str | None:
+        """Семейство закреплённой модели канала; auto и неизвестная модель - None."""
+        return self._run(lambda svc: svc.family(channel))
+
+    def fits(self, system, messages, schema=None, channel=None) -> bool:
+        """Помещается ли запрос в лимит исполнителя с фактической моделью канала."""
+        return self._run(lambda svc: svc.fits(system, messages, schema, channel))
+
+    def _run(self, call):
         conn = connect(self.db_path)
         try:
             channels = {
-                "claude": ExecutorChannel(
-                    "claude", os.environ.get("EXECUTOR_CLAUDE_URL", "http://executor-claude:8099")
+                "codex": ExecutorChannel(
+                    "codex", os.environ.get("EXECUTOR_CODEX_URL", "http://executor-codex:8099")
                 ),
                 "cursor": ExecutorChannel(
                     "cursor", os.environ.get("EXECUTOR_CURSOR_URL", "http://executor-cursor:8099")

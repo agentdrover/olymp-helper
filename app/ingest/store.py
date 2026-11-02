@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.db import connect
+from app.tutor.seq import bump
 
 JSON_COLUMNS = {"options", "answer_key", "model_answer", "figure"}
 
@@ -41,9 +42,15 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def get_task(conn: sqlite3.Connection, task_id: int):
+def get_task(conn: sqlite3.Connection, task_id: int, *, with_import: bool = False):
     cur = conn.cursor()
     cur.row_factory = sqlite3.Row
+    if with_import:
+        return cur.execute(
+            "SELECT t.*, m.run_id AS import_run_id FROM task_item t "
+            "LEFT JOIN material m ON m.id=t.material_id WHERE t.id=?",
+            (task_id,),
+        ).fetchone()
     return cur.execute("SELECT * FROM task_item WHERE id = ?", (task_id,)).fetchone()
 
 
@@ -65,7 +72,9 @@ def update_task(conn: sqlite3.Connection, task_id: int, **cols) -> None:
             value = json.dumps(value, ensure_ascii=False)
         values.append(value)
     sets = ", ".join(f"{name} = ?" for name in cols)
-    conn.execute(f"UPDATE task_item SET {sets} WHERE id = ?", (*values, task_id))
+    with atomic(conn):
+        conn.execute(f"UPDATE task_item SET {sets} WHERE id = ?", (*values, task_id))
+        bump(conn)  # правка родителя (ключ, ревизия, подтверждение, рисунок) меняет экран ребёнка
 
 
 def save_snapshot(conn: sqlite3.Connection, task_id: int) -> None:

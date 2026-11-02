@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.ingest import autopublish
@@ -34,6 +35,7 @@ OPTS = [
 
 def mk(number, text="Что изучает цитология?", **kw):
     kw.setdefault("options", OPTS)
+    kw.setdefault("topic", "b10")
     return make_task(number, text, **kw)
 
 
@@ -55,16 +57,19 @@ def start(tmp_path, tasks, answers, keys=None, model=None, key_files=()):
     return c, model, task_ids(tmp_path)
 
 
-def test_keyed_tasks_publish_themselves_and_figures_go_to_the_parent(tmp_path):
+@pytest.mark.parametrize("source", ["page", "file"])
+def test_keyed_tasks_publish_themselves_and_figures_go_to_the_parent(tmp_path, source):
     tasks = [
         mk(1, "Вопрос номер 1"),
         mk(2, "Рассмотрите рисунок", figure=True),
         mk(3, "Вопрос номер 3"),
     ]
     answers = {"1": "Б", "2": "Б", "3": "В"}
-    c, model, (agree, figure, differ) = start(
-        tmp_path, tasks, answers, keys={"1": "Б", "2": "Б", "3": "Б"}
-    )
+    keys = {"1": "Б", "2": "Б", "3": "Б"} if source == "file" else None
+    if source == "page":
+        for task in tasks:
+            task["answer_text"] = "Б"
+    c, model, (agree, figure, differ) = start(tmp_path, tasks, answers, keys=keys)
     with c:
         won = row(tmp_path, agree)
         assert won["import_status"] == "checked" and won["auto_published"] == 1
@@ -85,6 +90,27 @@ def test_keyed_tasks_publish_themselves_and_figures_go_to_the_parent(tmp_path):
         assert cards[differ]["kind"] == "discrepancy"
         assert "расходится с ключом" in cards[differ]["hint"]
         assert row(tmp_path, differ)["auto_hold"] == autopublish.HOLD_DISAGREE
+
+        # Even a fully parent-prepared figure with a cached agreeing answer is held.
+        conn = open_db(tmp_path / "olymp.db")
+        try:
+            prepared = json.loads(row(tmp_path, figure)["figure"])
+            prepared.update(confirmed=True, no_answer_ack=True)
+            conn.execute(
+                "UPDATE task_item SET import_status='draft', unsupported_reason=NULL, "
+                "figure=?, answer_key=?, key_source='official', model_answer=? WHERE id=?",
+                (
+                    json.dumps(prepared),
+                    json.dumps({"type": "single", "value": "Б"}),
+                    json.dumps({"value": "Б", "answer": "Б"}),
+                    figure,
+                ),
+            )
+            autopublish.publish_pending(c.app.state.ctx, conn, force=True)
+            assert row(tmp_path, figure)["auto_published"] == 0
+            assert figure not in child_ids(c)
+        finally:
+            conn.close()
 
 
 class LimitModel(StubModel):
@@ -333,17 +359,7 @@ def test_a_task_the_parent_keyed_while_the_model_thinks_is_not_published(tmp_pat
 
 def test_a_second_conflicting_official_key_added_meanwhile_stops_publication(tmp_path):
     def mutate(c, ids):
-        sql(
-            tmp_path,
-            "INSERT INTO material(file, sha256, kind, import_status, variant, year, stage, "
-            "olympiad) SELECT 'k2.pdf', 'h2', kind, import_status, variant, year, stage, "
-            "olympiad FROM material WHERE kind = 'key'",
-        )
-        sql(
-            tmp_path,
-            "INSERT INTO key_entry(material_id, number, answer) "
-            "SELECT id, '1', 'В' FROM material WHERE sha256 = 'h2'",
-        )
+        upload(c, key_pdf({"1": "В"}), kind="key", name="second-key.pdf")
 
     # the model agrees with the NEWER file: only the ambiguity check can stop the task
     c, (tid,) = blocked_pass(tmp_path, [mk(1)], {"1": "В"}, {"1": "Б"}, mutate)

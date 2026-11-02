@@ -8,8 +8,8 @@ from datetime import datetime
 
 from app.chat import store as chat_store
 from app.ingest.publish import assist_mode, child_view, has_key
-from app.tutor import state
-from app.tutor.panel import Inflight, live_state, panel
+from app.tutor import state, steps
+from app.tutor.panel import BUSY, Inflight, live_state, panel
 
 
 def _solution(run) -> dict | None:
@@ -30,9 +30,17 @@ def _solution(run) -> dict | None:
     }
 
 
+def snapshot_live(conn, inflight: Inflight, task_id: int, now: datetime) -> str:
+    """Идёт ли шаг. Читать ПЕРВЫМ, до прогона и итога шага: закончившийся между чтениями шаг
+    тогда виден как «думаю» (опрос продолжится), а не как «пусто» при устаревшем прогоне."""
+    steps.expire(conn, inflight, task_id, now)  # зависший шаг не держит панель вечно
+    return live_state(conn, inflight, task_id)
+
+
 def build_view(
-    conn, task, material, run, now: datetime, *, inflight: Inflight, panel_state=None, notice=None
-) -> dict:
+    conn, task, material, run, now: datetime, *, inflight: Inflight, panel_state=None, notice=None,
+    live=None, version=0,
+) -> dict:  # fmt: skip
     keyed = has_key(task)
     assist = assist_mode(task)
     terminal = run is not None and state.is_terminal(run)
@@ -50,10 +58,24 @@ def build_view(
     analysis = None
     if run and not terminal and run["analysis_json"]:
         analysis = json.loads(run["analysis_json"])["html"]
-    live = live_state(conn, inflight, task["id"])
+    if live is None:
+        live = snapshot_live(conn, inflight, task["id"], now)
     shown = panel_state if panel_state and panel_state != "idle" else live
-    if assist == "key_only" and shown == "idle":
-        shown = "idle"
+    # шаг мог закончиться после снимка «идёт»: его номер всё равно отдаём, чтобы опрос забрал итог
+    running = None
+    if shown in BUSY:
+        running = steps.get(conn, inflight.step_of(task["id"])) or steps.latest(conn, task["id"])
+    if running is None and shown not in BUSY and not notice:
+        last_step = steps.latest(conn, task["id"])
+        if shown == "idle" and last_step and last_step["status"] == "failed":
+            shown = "step_failed"  # шаг не закончился (сбой, срок, перезапуск): не «думаю» вечно
+    extra = {}
+    if running is not None:
+        extra = {
+            "step": running["id"],
+            "started_at": running["started_at"],
+            "elapsed_s": steps.elapsed(running, now),
+        }
     correction = None
     if not terminal and attempts == 0:
         stale = conn.execute(
@@ -97,7 +119,10 @@ def build_view(
             "needs_confirm": nxt == 3,
         },
         "can_show_answer": assist == "key_only" and not terminal and attempts >= state.BASE_CHECKS,
-        "panel": panel(shown),
+        "panel": {
+            **panel(shown, **extra),
+            "version": f"{version:010d}",
+        },  # фиксированная ширина: версия не выглядит числом в тексте
         "notice": notice,
         "task": child_view(task, material),
     }

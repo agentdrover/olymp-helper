@@ -6,6 +6,7 @@ from app.ingest.answers import display, normalize_answer
 from app.ingest.keys import candidate
 from app.ingest.prompt import ANSWER_SCHEMA, build_task_request
 from app.ingest.store import figure_of, get_task, save_snapshot
+from app.tutor.seq import bump
 
 
 def compute_model_answer(ctx, conn, task_id: int) -> bool:
@@ -21,11 +22,15 @@ def compute_model_answer_why(
 ) -> tuple[bool, str | None]:
     """(записан ли ответ, причина отказа). keyed=True - автопубликация (K5b): ответ нужен и
     заданию с ключом, чтобы сравнить его с ключом до того, как задание увидит ребёнок."""
-    task = get_task(conn, task_id)
+    task = get_task(conn, task_id, with_import=True)
     if task is None or figure_of(task) is not None or task["type"] == "open":
         return False, "figure_or_open"
-    if not keyed and (task["answer_key"] is not None or candidate(conn, task) is not None):
-        return False, "has_key"  # ключ (в том числе загруженный) есть: ответ модели не нужен
+    cand = candidate(conn, task)
+    if not keyed and (
+        task["answer_key"] is not None or (cand is not None and not cand["unverified"])
+    ):
+        return False, "has_key"
+    # непроверенный кандидат ключом не считается: ответ модели остаётся единственным эталоном
     system, messages = build_task_request(task)
     result = ctx.model.complete(system, messages, ANSWER_SCHEMA)
     payload = getattr(result, "json", None)
@@ -45,16 +50,25 @@ def compute_model_answer_why(
     }
     # Запись ответа и снимок ревизии - одна транзакция: между ними не может появиться новая
     # ревизия. Пишем только в пустое поле и только если ревизия не изменилась за время запроса;
-    # заполненный ответ не заменяется (смена эталона - новая ревизия).
+    # заполненный ответ не заменяется (смена эталона - новая ревизия). run_id связывает ответ
+    # с исходным импортом: повторный разбор может переиспользовать id и номер ревизии.
     conn.execute("BEGIN IMMEDIATE")
     try:
         cur = conn.execute(
             "UPDATE task_item SET model_answer = ? WHERE id = ? AND revision = ? "
-            "AND model_answer IS NULL",
-            (json.dumps(record, ensure_ascii=False), task_id, task["revision"]),
+            "AND model_answer IS NULL AND material_id IS ? "
+            "AND (SELECT run_id FROM material WHERE id=task_item.material_id) IS ?",
+            (
+                json.dumps(record, ensure_ascii=False),
+                task_id,
+                task["revision"],
+                task["material_id"],
+                task["import_run_id"],
+            ),
         )
         if cur.rowcount == 1:
             save_snapshot(conn, task_id)
+            bump(conn)
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:

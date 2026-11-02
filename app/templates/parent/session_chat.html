@@ -1,0 +1,17 @@
+{% extends "base_parent.html" %}
+{% block title %}Переписка занятия №{{ session_id }}{% endblock %}
+{% block content %}
+<h1>Переписка занятия №{{ session_id }}</h1>
+{% if shown %}<p class="hint">Ребёнок сам показал эту переписку.</p>{% endif %}
+<p class="hint">Просмотр записан в журнал ребёнка.</p>
+{% for m in messages %}
+<div class="card msg">
+  <div class="kicker">{{ m.at[:16].replace("T", " ") }}{% if m.number %} · задание {{ m.number }}{% endif %}{% if m.kind == "voice" %} · голосом{% endif %}</div>
+  <p><strong>Ребёнок:</strong> {{ m.question }}</p>
+  {% if m.reply_html %}<div><strong>Помощник:</strong> {{ m.reply_html|safe }}</div>{% endif %}
+</div>
+{% else %}
+<p class="card">В этом занятии нет сообщений: переписки не было или она удалена.</p>
+{% endfor %}
+<p><a class="btn" href="/parent/summaries/{{ session_id }}">← К итогу занятия</a></p>
+{% endblock %}
