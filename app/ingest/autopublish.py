@@ -82,7 +82,8 @@ def _child_leak(task, key) -> bool:
             if _ANSWER_MARK.search(sentence)
         ]
         return (
-            any(
+            prefilter_reason(task["text"], task["type"], options_of(task), key) is not None
+            or any(
                 prefilter_reason(sentence, task["type"], options_of(task), key) is not None
                 for sentence in marked
             )

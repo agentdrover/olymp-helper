@@ -300,7 +300,15 @@ def test_card_without_regions_still_has_a_preview_image_slot(tmp_path):
 
 
 @pytest.mark.skipif(NODE is None, reason="node не установлен")
-@pytest.mark.parametrize("scenario", ["publish_moves_to_next_card", "frame_fills_empty_preview"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "publish_moves_to_next_card",
+        "frame_fills_empty_preview",
+        "published_section_owns_keyboard",
+        "autopublish_refreshes_pending_feed",
+    ],
+)
 def test_feed_scenarios(scenario):
     harness = Path(__file__).parent / "js" / "feed_chain_harness.js"
     r = subprocess.run(

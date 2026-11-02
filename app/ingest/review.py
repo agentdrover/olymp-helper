@@ -534,9 +534,12 @@ def task_detail(ctx, conn, task_id: int) -> dict:
 def auto_published(conn) -> list[dict]:
     """Задания, опубликованные без родителя: родитель видит их здесь (и выборка K5c)."""
     rows = conn.execute(
-        "SELECT * FROM task_item WHERE auto_published = 1 AND import_status = 'checked' "
-        "AND excluded = 0 ORDER BY id"
+        "SELECT t.*, m.original_name AS source_name FROM task_item t "
+        "LEFT JOIN material m ON m.id=t.material_id "
+        "WHERE t.auto_published = 1 AND t.import_status = 'checked' "
+        "AND t.excluded = 0 ORDER BY t.id"
     ).fetchall()
+    catalog = load_catalog(conn)
     return [
         {
             "task_id": r["id"],
@@ -545,6 +548,9 @@ def auto_published(conn) -> list[dict]:
             "key": display(key_value(r["answer_key"])),
             "key_source": r["key_source"],
             "note": AUTO_NOTE,
+            "options": options_of(r),
+            "topic_title": catalog.get(r["topic"], {}).get("title"),
+            "source_name": r["source_name"],
         }
         for r in rows
     ]

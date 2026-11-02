@@ -523,7 +523,14 @@ def review_page(request: Request, conn: Db):
         first = review.card_for(ctx_of(request), conn, first["task_id"]) or first
     counter = f"1 из {feed['total']}" if first else None
     return TEMPLATES.TemplateResponse(
-        request, "parent/review.html", {"card": first, "counter": counter, "total": feed["total"]}
+        request,
+        "parent/review.html",
+        {
+            "card": first,
+            "counter": counter,
+            "total": feed["total"],
+            "published": review.auto_published(conn),
+        },
     )
 
 
@@ -535,6 +542,13 @@ def review_queue(request: Request, conn: Db):
 @parent.get("/parent/review/auto")
 def review_auto(conn: Db):
     return {"tasks": review.auto_published(conn)}
+
+
+@parent.get("/parent/review/auto/list", response_class=HTMLResponse)
+def review_auto_list(request: Request, conn: Db):
+    return TEMPLATES.TemplateResponse(
+        request, "parent/_auto_published.html", {"published": review.auto_published(conn)}
+    )
 
 
 class AutoRunBody(BaseModel):
@@ -562,7 +576,14 @@ def review_card(task_id: int, request: Request, conn: Db, fragment: int = 0):
     counter = f"{order.index(task_id) + 1} из {len(order)}" if task_id in order else None
     template = "parent/card.html" if fragment else "parent/review.html"
     return TEMPLATES.TemplateResponse(
-        request, template, {"card": card, "counter": counter, "total": len(order)}
+        request,
+        template,
+        {
+            "card": card,
+            "counter": counter,
+            "total": len(order),
+            "published": review.auto_published(conn) if not fragment else [],
+        },
     )
 
 

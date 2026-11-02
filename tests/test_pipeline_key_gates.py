@@ -118,7 +118,7 @@ def test_existing_key_files_are_rechecked_before_manual_publication(tmp_path, mi
         assert model.calls_of("task_answer") == []
 
 
-@pytest.mark.parametrize("marker", ["Правильный ответ:", "Ответ:", "Верный вариант —"])
+@pytest.mark.parametrize("marker", ["Правильный ответ:", "Ответ:", "Верный вариант —", ""])
 def test_textual_answer_in_condition_blocks_publication(tmp_path, marker):
     task = mk(1, f"Какая структура синтезирует белок? {marker} рибосома.")
     client, model, (tid,) = start(tmp_path, [task], {"1": "Б"}, keys={"1": "Б"})

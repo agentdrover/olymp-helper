@@ -12,6 +12,11 @@
     const s = await r.json();
     out.textContent = s.text || "";
     if (s.state === "running") timer = setTimeout(poll, 1500);
+    else if (document.getElementById("auto-published")) {
+      const list = await fetch("/parent/review/auto/list");
+      if (list.ok) document.getElementById("auto-published").outerHTML = await list.text();
+      document.dispatchEvent(new Event("autopublish:done"));
+    }
   }
 
   buttons.forEach((b) => b.addEventListener("click", async () => {
