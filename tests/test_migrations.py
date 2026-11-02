@@ -169,7 +169,7 @@ def test_numeric_type_migration_keeps_the_data(tmp_path):
     names = [r[1] for r in conn.execute("PRAGMA table_info(task_item)")]
     old[names.index("topic")] = None  # 0009: a topic outside the catalog is cleared
     assert [tuple(r) for r in conn.execute("SELECT * FROM task_item").fetchall()] == [
-        (*old, None, None, None, None)  # every other old column as it was; the four new ones empty
+        (*old, None, None, None, None, 0, None)  # old columns kept; later fields empty
     ]
     try:  # the unique index of (material, section, number) was recreated
         conn.execute(
@@ -251,7 +251,7 @@ def test_codex_migration_preserves_settings_and_history(tmp_path, monkeypatch):
     from app import db
 
     files = db._migration_files()
-    monkeypatch.setattr(db, '_migration_files', lambda: files[:-1])
+    monkeypatch.setattr(db, '_migration_files', lambda: [f for f in files if f[0] <= 15])
     conn = connect(tmp_path / 'olymp.db')
     migrate(conn)
     assert conn.execute('PRAGMA user_version').fetchone() == (15,)
@@ -261,7 +261,7 @@ def test_codex_migration_preserves_settings_and_history(tmp_path, monkeypatch):
     conn.execute("UPDATE settings SET claude_model='sonnet', cursor_model='auto', daily_run_limit=43, parent_pin_hash='hash', child_notice_seen_at='2026-01-01'")
     conn.execute("INSERT INTO model_run(day,started_at,channel,model,status) VALUES ('2026-10-29','2026-10-29T00:00:00Z','claude','sonnet','ok')")
     before = conn.execute('SELECT * FROM model_run').fetchall()
-    monkeypatch.setattr(db, '_migration_files', lambda: files)
+    monkeypatch.setattr(db, '_migration_files', lambda: [f for f in files if f[0] <= 16])
     migrate(conn)
     assert conn.execute('PRAGMA user_version').fetchone() == (16,)
     assert conn.execute('SELECT value FROM page_answer WHERE task_item_id=1').fetchone() == ('A',)
@@ -279,7 +279,7 @@ def test_codex_migration_keeps_explicit_cursor_primary(tmp_path, monkeypatch):
     from app import db
 
     files = db._migration_files()
-    monkeypatch.setattr(db, "_migration_files", lambda: files[:-1])
+    monkeypatch.setattr(db, "_migration_files", lambda: [f for f in files if f[0] <= 15])
     conn = connect(tmp_path / "olymp.db")
     migrate(conn)
     conn.execute("UPDATE settings SET primary_channel='cursor', cursor_model='gemini-3.1-pro'")

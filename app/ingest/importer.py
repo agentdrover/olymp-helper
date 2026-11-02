@@ -482,6 +482,14 @@ def _finish(
         raise
 
 
+def _auto_publish(ctx, conn, material_id: int | None) -> None:
+    """Автопубликация (K5b) идёт после status=done и не влияет на итог импорта."""
+    try:
+        ctx.autorun.run_inline(ctx, conn, material_id)
+    except Exception:
+        log.exception("auto publish after import %s failed", material_id)
+
+
 def fail_material(conn, material_id: int, run_id: str, message: str) -> None:
     """Пометить failed только свой запуск: чужой (новый) run_id не трогается."""
     conn.execute(
@@ -550,7 +558,8 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                     changed = figs.changed_materials(before, figs.candidate_snapshot(conn))
                     figs.recheck_materials_figures(ctx, conn, changed)
 
-                _finish(conn, material_id, run_id, len(pages), write_key, recheck)
+                if _finish(conn, material_id, run_id, len(pages), write_key, recheck):
+                    _auto_publish(ctx, conn, None)  # у заданий любого сборника мог появиться ключ
             else:
                 skipped: list[str] = []
                 tasks = split_tasks(
@@ -565,7 +574,7 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 note = skipped_note(skipped)
                 if not tasks and not note:
                     raise ImportFailure("Модель не нашла в файле ни одного задания.")
-                _finish(
+                finished = _finish(
                     conn,
                     material_id,
                     run_id,
@@ -582,6 +591,8 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                     ),
                     note=note,
                 )
+                if finished:
+                    _auto_publish(ctx, conn, material_id)
         except ImportAborted:
             log.info("import %s aborted", material_id)
         except ImportFailure as exc:

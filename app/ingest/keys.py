@@ -1,14 +1,17 @@
 """Загруженный ключ ответов: разбор и привязка к заданию (SPEC-1.0 1.2)."""
 
 import json
+import logging
 import re
 import sqlite3
 
 from app.ingest.answers import display, normalize_answer
+from app.ingest.extract import extract_pages
 from app.ingest.page_answer import fit_page, refusal_text, stored_candidate
 
 _LINE = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})?)\s*[.)\-–—:]\s*(.+?)\s*$")
 _LEADING_ZEROS = re.compile(r"^0+(?=\d)")
+log = logging.getLogger("app.ingest")
 
 
 def normalize_number(number: str) -> str:
@@ -16,14 +19,24 @@ def normalize_number(number: str) -> str:
 
 
 def parse_key_text(pages: list[tuple[int, str]]) -> dict[str, str]:
-    """{номер: ответ} из строк вида «12. Б»; первое вхождение номера выигрывает."""
-    out: dict[str, str] = {}
+    """{номер: исходные ответы через перевод строки}; повторный номер не теряет ответ."""
+    out: dict[str, list[str]] = {}
     for _, text in pages:
         for line in text.splitlines():
             m = _LINE.match(line)
             if m:
-                out.setdefault(normalize_number(m.group(1)), m.group(2))
-    return out
+                out.setdefault(normalize_number(m.group(1)), []).append(m.group(2))
+    return {number: "\n".join(answers) for number, answers in out.items()}
+
+
+def _file_values(raw: str, task_type: str) -> list:
+    """Различные нормализованные ответы; None сохраняет факт неразобранной строки."""
+    found: list = []
+    for line in raw.splitlines():
+        value = normalize_answer(line, task_type)
+        if value not in found:
+            found.append(value)
+    return found or [None]
 
 
 def page_candidate(task) -> dict | None:
@@ -82,12 +95,12 @@ def candidate(conn: sqlite3.Connection, task) -> dict | None:
     return _uploaded_candidate(conn, task) or page_candidate(task) or model_candidate(conn, task)
 
 
-def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
-    """Ответ из загруженного ключа ТОГО ЖЕ сборника, варианта и номера; иначе None."""
+def _uploaded_rows(conn: sqlite3.Connection, task) -> list:
+    """Строки загруженных ключей ТОГО ЖЕ сборника, варианта и номера, новые первыми."""
     number = normalize_number(str(task["source_number"] or ""))
     if not number:
-        return None
-    rows = conn.execute(
+        return []
+    return conn.execute(
         "SELECT k.material_id, k.answer FROM key_entry k "
         "JOIN material km ON km.id = k.material_id "
         "JOIN material tm ON tm.id = ? "
@@ -99,9 +112,13 @@ def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
         "ORDER BY km.id DESC",
         (task["material_id"], number, task["variant"], task["stage"]),
     ).fetchall()
-    for material_id, raw in rows:
-        value = normalize_answer(raw, task["type"])
-        if value is not None:
+
+
+def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
+    """Ответ из загруженного ключа ТОГО ЖЕ сборника, варианта и номера; иначе None."""
+    for material_id, raw in _uploaded_rows(conn, task):
+        values = _file_values(raw, task["type"])
+        if len(values) == 1 and (value := values[0]) is not None:
             return {
                 "answer": display(value),
                 "value": value,
@@ -112,3 +129,44 @@ def _uploaded_candidate(conn: sqlite3.Connection, task) -> dict | None:
                 "unverified": False,
             }
     return None
+
+
+class KeySourceUnavailable(Exception):
+    """Исходный файл ключа не удалось перепроверить; его однозначность неизвестна."""
+
+
+def _source_answers(ctx, conn, material_id: int, cache: dict) -> dict[str, str]:
+    """Файл неизменяем после загрузки; читать и разбирать его один раз за обход черновиков.
+    Старые записи key_entry могли потерять повторные номера, поэтому одного индекса мало."""
+    if material_id not in cache:
+        material = conn.execute("SELECT file FROM material WHERE id=?", (material_id,)).fetchone()
+        try:
+            cache[material_id] = parse_key_text(
+                extract_pages(ctx.material_path(material[0]).read_bytes())
+            )
+        except Exception:
+            log.exception("official key source %s could not be rechecked", material_id)
+            cache[material_id] = None
+    if cache[material_id] is None:
+        raise KeySourceUnavailable(material_id)
+    return cache[material_id]
+
+
+def official_values(ctx, conn: sqlite3.Connection, task, cache: dict) -> list:
+    """Все различные официальные ответы на задание: из каждого файла ключа и со страницы.
+    Больше одного - ключ неоднозначен, None - строка ключа не разобрана. Непроверенный
+    кандидат со страницы не является официальным ответом."""
+    found: list = []
+    for material_id, raw in _uploaded_rows(conn, task):
+        original = _source_answers(ctx, conn, material_id, cache)
+        number = normalize_number(str(task["source_number"] or ""))
+        if number not in original:
+            raise KeySourceUnavailable(material_id)
+        for text in (raw, original[number]):
+            for value in _file_values(text, task["type"]):
+                if value not in found:
+                    found.append(value)
+    page = page_candidate(task)
+    if page is not None and not page["unverified"] and page["value"] not in found:
+        found.append(page["value"])
+    return found

@@ -115,6 +115,23 @@ scenarios.frame_fills_empty_preview = async function () {
 
 const enter = (p) => p.docHandlers.keydown[0]({ key: "Enter", code: "Enter", target: { closest: () => null }, preventDefault() {} });
 
+scenarios.published_section_owns_keyboard = async function () {
+  const p = build();
+  let prevented = false;
+  const target = { closest: (selector) => selector === "#auto-published" ? {} : null };
+  p.docHandlers.keydown[0]({ key: "Enter", code: "Enter", target,
+    preventDefault() { prevented = true; } });
+  await tick();
+  if (p.calls.length || prevented) fail("Enter в списке опубликованного затронул ленту проверки");
+};
+
+scenarios.autopublish_refreshes_pending_feed = async function () {
+  const p = build();
+  p.replies["/parent/review/queue"] = { cards: [], total: 0 };
+  await p.docHandlers["autopublish:done"][0]();
+  if (!String(p.feed.html).includes("Всё проверено")) fail("в ленте осталась опубликованная карточка");
+};
+
 scenarios.ready_state_gates_button_and_enter = async function () {
   const p = build(null, { leak: null });
   p.fields.key_text.value = "";
