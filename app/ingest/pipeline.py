@@ -20,6 +20,7 @@ from app.model.types import CHANNELS
 from app.tutor.guard import plain, prefilter_reason
 from app.tutor.prompts import JUDGE_SCHEMA, ModelOutputError, build_judge_request, parse_verdict
 
+LIVE_CHANNELS = ("codex", "cursor")  # у них есть исполнитель; claude остаётся только в истории
 ISSUE_KINDS = ("second_correct", "ambiguous", "factual_error", "level", "answer_leak")
 LIMIT_REASON = "дневной лимит вопросов к помощнику исчерпан, остальные задания ждут вас"
 CRITIC_SCHEMA = {
@@ -97,21 +98,62 @@ class Critique:
         return "; ".join(i["text"] for i in self.issues)
 
 
+def _family(model, channel) -> str | None:
+    """Семейство модели канала; нет метода, сбой, auto и неизвестная модель - None."""
+    ask = getattr(model, "family", None)
+    if ask is None or channel is None:
+        return None
+    try:
+        family = ask(channel)
+    except Exception:  # noqa: BLE001 - семейство неизвестно, а не «то же самое»
+        return None
+    return family if isinstance(family, str) and family else None
+
+
 class PackRun:
-    """Вызовы модели одной пачки: канал автора, канал критика (другой), остановка по лимиту."""
+    """Вызовы модели одной пачки: канал автора, канал критика, остановка по лимиту.
+
+    Критик - другое СЕМЕЙСТВО модели, а не просто другой канал: канал берётся, только если
+    семейство обоих известно и различается. Иначе критика нет (no_critic), и каждое задание
+    пачки уходит родителю с этой причиной, а не публикуется с пометкой «двумя моделями»."""
 
     def __init__(self, model, author_channel):
         self.model = model
         self.author = author_channel if author_channel in CHANNELS else None
-        self.other = next((c for c in CHANNELS if c != self.author), None) if self.author else None
+        self.other = None
+        self.no_critic = ""
         self.halted = False
+        self._pick_critic()
+
+    def _pick_critic(self) -> None:
+        if self.author is None:
+            self.no_critic = "канал автора неизвестен: критика другого семейства выбрать нельзя"
+            return
+        mine = _family(self.model, self.author)
+        if mine is None:
+            self.no_critic = (
+                f"семейство модели автора ({self.author}) неизвестно: "
+                "критика другого семейства выбрать нельзя"
+            )
+            return
+        for channel in LIVE_CHANNELS:
+            theirs = _family(self.model, channel)
+            if channel != self.author and theirs is not None and theirs != mine:
+                self.other = channel
+                return
+        self.no_critic = (
+            f"нет канала критика другого семейства, чем у автора ({mine}): "
+            "задайте модели второго канала в настройках"
+        )
 
     def call(self, channel, system, messages, schema, who: str):
         """Ответ канала (его JSON) или Stop. Размер меряется до вызова; запасного канала нет."""
         if self.halted:
             raise Limit(LIMIT_REASON)
         ask = getattr(self.model, "complete_on", None)
-        if ask is None or channel is None:
+        if channel is None:
+            raise Stop(self.no_critic or f"{who} недоступен")
+        if ask is None:
             raise Stop(f"{who} недоступен")
         if request_size(system, messages, schema) > MAX_REQUEST_BYTES:
             raise Stop(f"{who}: запрос слишком велик")
@@ -230,9 +272,9 @@ def _answer_words(task) -> str:
 
 def _no_leak(run, task) -> None:
     """Дешёвый фильтр и судья (T06) на том, что увидит ребёнок: условие и варианты."""
-    reason = prefilter_reason(
-        plain(task["text"]), task["type"], task["options"], task["value"], task["text"]
-    )
+    # Условие пустое: слова верного варианта в самом условии и есть утечка. Если передать
+    # условием само условие, правило option_text ("слов нет в условии") не сработает никогда.
+    reason = prefilter_reason(plain(task["text"]), task["type"], task["options"], task["value"], "")
     if reason:
         raise Stop(f"в условии очевидный признак ответа ({reason})")
     shown = task["text"] + "\n" + "\n".join(_option_lines(task["options"]))

@@ -30,6 +30,9 @@ LABELS = {
 }
 
 
+AUTO_NOTE = "опубликовано автоматически"
+
+
 class Refusal(Exception):
     """Действие отклонено; message читает родитель."""
 
@@ -304,7 +307,7 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
         missing = uncovered_lefts(task, key_value(task["answer_key"]))
         if missing:
             raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
-    update_task(conn, task_id, import_status="checked", auto_checked=0)
+    update_task(conn, task_id, import_status="checked", auto_checked=0, auto_hold=None)
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
     task = get_task(conn, task_id)
@@ -409,6 +412,8 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         kind, hint = "confirm", "Проверьте, что условие распознано верно."
     if kind is None:
         return None
+    if task["auto_hold"] and status == "draft":
+        hint = f"{hint} {task['auto_hold']}".strip()
     # Две разные страницы: текст проверяется по page_from..page_to, рисунок - на своей.
     first, last = task["page_from"], task["page_to"] or task["page_from"]
     pages = list(range(first, last + 1)) if first else []
@@ -464,6 +469,9 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "model_agrees": agrees,
         "figure": figure,
         "revision": task["revision"],
+        "auto_published": bool(task["auto_published"]),
+        "auto_note": AUTO_NOTE if task["auto_published"] else None,
+        "auto_hold": task["auto_hold"],
     }
     if kind == "needs_figure" and figure is not None:
         from app.ingest.figure_card import card_extras  # figure_service импортирует review
@@ -512,12 +520,40 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         else json.loads(task["model_answer"])["answer"],
         "figure": figure_of(task),
         "model_discrepancies": discrepancies(conn, task_id),
+        "auto_published": bool(task["auto_published"]),
+        "auto_note": AUTO_NOTE if task["auto_published"] else None,
+        "auto_hold": task["auto_hold"],
         "publication": publication(task),
         "card": card,
     }
 
 
 # --------------------------------------------------------------------------- лента
+
+
+def auto_published(conn) -> list[dict]:
+    """Задания, опубликованные без родителя: родитель видит их здесь (и выборка K5c)."""
+    rows = conn.execute(
+        "SELECT t.*, m.original_name AS source_name FROM task_item t "
+        "LEFT JOIN material m ON m.id=t.material_id "
+        "WHERE t.auto_published = 1 AND t.import_status = 'checked' "
+        "AND t.excluded = 0 ORDER BY t.id"
+    ).fetchall()
+    catalog = load_catalog(conn)
+    return [
+        {
+            "task_id": r["id"],
+            "number": r["source_number"],
+            "text": r["text"],
+            "key": display(key_value(r["answer_key"])),
+            "key_source": r["key_source"],
+            "note": AUTO_NOTE,
+            "options": options_of(r),
+            "topic_title": catalog.get(r["topic"], {}).get("title"),
+            "source_name": r["source_name"],
+        }
+        for r in rows
+    ]
 
 
 def queue(ctx, conn) -> list[dict]:

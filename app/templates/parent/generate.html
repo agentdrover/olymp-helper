@@ -16,7 +16,7 @@
     </select></div>
   <div class="field"><label for="count">Сколько вопросов (1–{{ max_count }})</label>
     <input id="count" name="count" type="number" min="1" max="{{ max_count }}" value="5" required></div>
-  <p class="hint" id="external-notice">Условия до 5 подтверждённых заданий выбранной темы отправляются внешней модели (Claude или Cursor) как образцы стиля. Запрос занимает до минуты.</p>
+  <p class="hint" id="external-notice">Условия до 5 подтверждённых заданий выбранной темы отправляются внешней модели (OpenAI или Cursor) как образцы стиля. Запрос занимает до минуты.</p>
   <div class="form-actions"><button class="primary">Составить пачку</button></div>
 </form>
 {% if recent %}

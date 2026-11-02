@@ -42,9 +42,15 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def get_task(conn: sqlite3.Connection, task_id: int):
+def get_task(conn: sqlite3.Connection, task_id: int, *, with_import: bool = False):
     cur = conn.cursor()
     cur.row_factory = sqlite3.Row
+    if with_import:
+        return cur.execute(
+            "SELECT t.*, m.run_id AS import_run_id FROM task_item t "
+            "LEFT JOIN material m ON m.id=t.material_id WHERE t.id=?",
+            (task_id,),
+        ).fetchone()
     return cur.execute("SELECT * FROM task_item WHERE id = ?", (task_id,)).fetchone()
 
 
@@ -102,7 +108,13 @@ def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
     """Правка, создающая новую ревизию: «проверено» снимается, model_answer сбрасывается."""
     task = get_task(conn, task_id)
     status = "draft" if task["import_status"] == "checked" else task["import_status"]
-    fields = {"revision": task["revision"] + 1, "import_status": status, "model_answer": None}
+    fields = {
+        "revision": task["revision"] + 1,
+        "import_status": status,
+        "model_answer": None,
+        "auto_published": 0,
+        "auto_hold": None,
+    }
     if status == "draft":  # правка родителя: «проверено двумя моделями» больше не про это задание
         fields["auto_checked"] = 0
     fields.update(cols)

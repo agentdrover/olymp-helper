@@ -1,16 +1,27 @@
 """Запуск CLI в отдельном пустом каталоге; ошибки без деталей (SPEC-1.0 1.4)."""
 
 import base64
+import hashlib
+import json
 import logging
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
+import tomllib
 from types import SimpleNamespace
 
-from app.model.adapters import ADAPTERS, TOKEN_VARS, build_env, image_names
+from app.model.adapters import (
+    ADAPTERS,
+    TOKEN_VARS,
+    build_env,
+    codex_error_kind,
+    codex_schema,
+    image_names,
+)
 from app.model.redaction import redact, redact_json
 from app.model.types import ChannelError, ModelResult
 
@@ -19,6 +30,8 @@ log = logging.getLogger("app.model")
 
 
 SAFE_PATH = "/usr/local/bin:/usr/bin:/bin"
+# Public sbx v0.48 proxy sentinel; a different value must be reviewed, never copied blindly.
+SBX_CODEX_BEARER_SHA256 = "decb3e23c9f255f54d966f90ea81e8ff5bf9df75bc92da7c7d0cb3f47c25657b"
 CLEAN_SCRIPT = (
     'find "$0" -mindepth 1 -maxdepth 1 -exec chmod -R u+rwX {} + 2>/dev/null; '
     'find "$0" -mindepth 1 -maxdepth 1 -exec rm -rf {} +'
@@ -176,7 +189,9 @@ def run_cli(
             cli = adapter.build(model, system, schema, images)
             stdin = adapter.stdin(system, messages, schema, images)
             cli_env = build_env(channel, env, home)
-            if images and channel == "cursor":
+            if channel == "codex":
+                _prepare_codex(spawn, launcher, helper_env, home, work, env, schema)
+            if images and channel in ("cursor", "codex"):
                 _put_images(spawn, launcher, helper_env, work, images)
             if launcher:
                 # Сервер не может зайти в каталог пользователя CLI (0700): в него переходит
@@ -191,7 +206,8 @@ def run_cli(
             else:
                 proc = spawn(cli, input=stdin, env=cli_env, cwd=work, timeout=timeout)
             if proc.returncode != 0:
-                raise ChannelError("exit_code")
+                kind = codex_error_kind(proc.stdout, proc.stderr) if channel == "codex" else "exit_code"
+                raise ChannelError(kind)
             parsed = adapter.parse(proc.stdout, schema)
         except subprocess.TimeoutExpired:
             return _fail(channel, model, "timeout", elapsed())
@@ -206,6 +222,69 @@ def run_cli(
         )
     finally:
         _cleanup(spawn, launcher, helper_env, root, work, home, sweeper, on_fault)
+
+
+def _read_seed(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as file:
+            st = os.fstat(file.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > 65536:
+                raise ValueError("bad seed")
+            return file.read().decode("utf-8")
+    except (OSError, UnicodeError, ValueError):
+        raise ChannelError("codex_auth_unavailable") from None
+
+
+def _write_cli_file(spawn, launcher, helper_env, path, content):
+    if not launcher:
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(content)
+        os.chmod(path, 0o600)
+        return
+    result = as_cli(
+        launcher, ["sh", "-c", 'umask 077; cat > "$0"', path], helper_env,
+        spawn=spawn, input=content, timeout=30,
+    )  # fmt: skip
+    if result.returncode:
+        raise ChannelError("workdir")
+
+
+def _prepare_codex(spawn, launcher, helper_env, home, work, env, schema):
+    """Install only a verified sbx proxy placeholder and a minimal provider config per run."""
+    seed = env.get("CODEX_SEED_DIR")
+    if not seed:
+        raise ChannelError("codex_auth_unavailable")
+    try:
+        auth = json.loads(_read_seed(os.path.join(seed, "auth.json")))
+        config = tomllib.loads(_read_seed(os.path.join(seed, "config.toml")))
+        provider = config["model_providers"]["sandboxd"]
+        token = auth["OPENAI_API_KEY"]
+        bearer = provider["experimental_bearer_token"]
+        if (set(auth) != {"OPENAI_API_KEY"} or token != "proxy-managed"
+                or not isinstance(bearer, str)
+                or hashlib.sha256(bearer.encode()).hexdigest() != SBX_CODEX_BEARER_SHA256
+                or provider["base_url"] != "https://chatgpt.com/backend-api/codex"
+                or provider.get("requires_openai_auth") is not False):
+            raise ValueError("not an sbx placeholder")
+    except (ValueError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        raise ChannelError("codex_auth_unavailable") from None
+    config_text = (
+        'model_provider = "sandboxd"\n[model_providers.sandboxd]\n'
+        'name = "sandboxd"\nbase_url = "https://chatgpt.com/backend-api/codex"\n'
+        f'experimental_bearer_token = {json.dumps(bearer)}\nrequires_openai_auth = false\n'
+    )
+    codex_home = os.path.join(home, ".codex")
+    if launcher:
+        result = as_cli(launcher, ["mkdir", "-m", "0700", codex_home], helper_env, spawn=spawn)
+        if result.returncode:
+            raise ChannelError("workdir")
+    else:
+        os.mkdir(codex_home, 0o700)
+    _write_cli_file(spawn, launcher, helper_env, os.path.join(codex_home, "auth.json"), json.dumps(auth))
+    _write_cli_file(spawn, launcher, helper_env, os.path.join(codex_home, "config.toml"), config_text)
+    if schema is not None:
+        _write_cli_file(spawn, launcher, helper_env, os.path.join(work, "schema.json"), json.dumps(codex_schema(schema)))
 
 
 def _put_images(spawn, launcher, helper_env, work, images):

@@ -523,13 +523,49 @@ def review_page(request: Request, conn: Db):
         first = review.card_for(ctx_of(request), conn, first["task_id"]) or first
     counter = f"1 из {feed['total']}" if first else None
     return TEMPLATES.TemplateResponse(
-        request, "parent/review.html", {"card": first, "counter": counter, "total": feed["total"]}
+        request,
+        "parent/review.html",
+        {
+            "card": first,
+            "counter": counter,
+            "total": feed["total"],
+            "published": review.auto_published(conn),
+        },
     )
 
 
 @parent.get("/parent/review/queue")
 def review_queue(request: Request, conn: Db):
     return review.open_feed(ctx_of(request), conn)
+
+
+@parent.get("/parent/review/auto")
+def review_auto(conn: Db):
+    return {"tasks": review.auto_published(conn)}
+
+
+@parent.get("/parent/review/auto/list", response_class=HTMLResponse)
+def review_auto_list(request: Request, conn: Db):
+    return TEMPLATES.TemplateResponse(
+        request, "parent/_auto_published.html", {"published": review.auto_published(conn)}
+    )
+
+
+class AutoRunBody(BaseModel):
+    material_id: int | None = None
+
+
+@parent.post("/parent/review/auto/run")
+def review_auto_run(request: Request, body: AutoRunBody | None = None):
+    """Проверить и опубликовать черновики с официальным ключом (фоном: запрос не ждёт)."""
+    ctx = ctx_of(request)
+    started = ctx.autorun.start(ctx, (body or AutoRunBody()).material_id)
+    return {"started": started, **ctx.autorun.snapshot()}
+
+
+@parent.get("/parent/review/auto/status")
+def review_auto_status(request: Request):
+    return ctx_of(request).autorun.snapshot()
 
 
 @parent.get("/parent/review/{task_id}", response_class=HTMLResponse)
@@ -540,7 +576,14 @@ def review_card(task_id: int, request: Request, conn: Db, fragment: int = 0):
     counter = f"{order.index(task_id) + 1} из {len(order)}" if task_id in order else None
     template = "parent/card.html" if fragment else "parent/review.html"
     return TEMPLATES.TemplateResponse(
-        request, template, {"card": card, "counter": counter, "total": len(order)}
+        request,
+        template,
+        {
+            "card": card,
+            "counter": counter,
+            "total": len(order),
+            "published": review.auto_published(conn) if not fragment else [],
+        },
     )
 
 

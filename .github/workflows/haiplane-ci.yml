@@ -77,7 +77,9 @@ jobs:
       # from the inside. No secrets, no real CLI calls. BEFORE the reporter below.
       - name: executor-sandbox
         id: executor-sandbox
-        run: bash deploy/executor/sandbox.sh
+        run: |
+          bash deploy/executor/sandbox-cursor.sh
+          bash deploy/executor/sandbox-codex.sh
 
       # OH-T04 (#2014): the application image is built, started on a temporary volume and
       # checked (healthz over HTTPS, data survives recreation, speech recognition of a WAV

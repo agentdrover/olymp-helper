@@ -50,6 +50,16 @@
 
   async function advance(data) { await show(data.next ? data.next.task_id : null, data.counter); }
 
+  document.addEventListener("autopublish:done", async () => {
+    try {
+      const response = await fetch("/parent/review/queue");
+      if (!response.ok) throw new Error("Не удалось обновить ленту. Обновите страницу.");
+      const data = await response.json();
+      await show(data.cards.length ? data.cards[0].task_id : null,
+                 data.cards.length ? `1 из ${data.total}` : "");
+    } catch (error) { fail(error); }
+  });
+
   function fail(e) {
     const el = document.getElementById("error");
     if (el) el.textContent = e.message;
@@ -415,6 +425,7 @@
   });
 
   document.addEventListener("keydown", (e) => {
+    if (e.target && e.target.closest && e.target.closest("#auto-published")) return;
     // Enter на переключателе или флажке своего действия не имеет: он подтверждает карточку.
     const choice = e.target && e.target.closest && e.target.closest("input[type=radio], input[type=checkbox]");
     const t = choice && e.key === "Enter" ? null : e.target;

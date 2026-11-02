@@ -4,8 +4,11 @@ with a reason."""
 
 from fastapi.testclient import TestClient
 
+from app.db import connect, migrate
 from app.ingest import pipeline
-from app.model.types import ModelResult
+from app.ingest.packs import check_item
+from app.model.service import ModelService
+from app.model.types import CHANNELS, ModelResult
 from tests.bank_helpers import CHILD, PARENT, build_app, db, make_task, text_pdf, upload
 from tests.test_generated_packs import BANK, DRAFT_ONLY, NEW, TOPIC, PackModel, good, request_pack
 
@@ -33,19 +36,29 @@ def agree(solution, **extra):
 AGREE_ALL = by_fragment({Q1: agree("Г"), Q2: agree("А"), Q3: agree("В")})
 
 
+# Codex is the primary channel (OpenAI); the spare is pinned to a model of another family.
+FAMILIES = {"codex": "openai", "cursor": "anthropic", "claude": "anthropic"}
+
+
 class PipeModel(PackModel):
     """PackModel + the second channel: critic, editor and judge are answered by handlers."""
 
-    def __init__(self, bank, pack, critic=AGREE_ALL, editor=None, judge=None):
+    author_channel = "codex"
+
+    def __init__(self, bank, pack, critic=AGREE_ALL, editor=None, judge=None, families=FAMILIES):
         super().__init__(bank, pack)
+        self.families = families
         self.critic = critic
         self.editor = editor
         self.judge = judge or (lambda content: NOBODY)
         self.log = []  # (schema title, channel, request text)
 
+    def family(self, channel):
+        return self.families.get(channel)
+
     def complete(self, system, messages, schema=None, session_id=None):
         if (schema or {}).get("title") == "question_pack":
-            self.log.append(("question_pack", "claude", messages[-1]["content"]))
+            self.log.append(("question_pack", self.author_channel, messages[-1]["content"]))
         return super().complete(system, messages, schema, session_id)
 
     def complete_on(self, channel, system, messages, schema=None, session_id=None):
@@ -106,7 +119,7 @@ def test_a_question_that_passes_every_gate_is_published_with_the_mark(tmp_path):
         assert {r["key_source"] for r in made} == {"generated"}
         assert {r["auto_checked"] for r in made} == {1}
         # the author is channel A, critic and judge are the OTHER channel, never the same one
-        assert model.channels_of("question_pack") == ["claude"]
+        assert model.channels_of("question_pack") == ["codex"]
         assert model.channels_of("question_critic") == ["cursor", "cursor"]
         assert model.channels_of("tutor_judge") == ["cursor", "cursor"]
         assert model.channels_of("question_edit") == []  # nothing to fix, nothing to edit
@@ -208,10 +221,8 @@ def test_a_disagreement_or_a_failed_gate_goes_to_the_parent(tmp_path):
 
 def test_a_topic_outside_the_catalog_is_not_published(tmp_path):
     model = PipeModel([], None)
-    from app.ingest.packs import check_item
-
     task = check_item(NEW[0], "single")
-    run = pipeline.PackRun(model, "claude")
+    run = pipeline.PackRun(model, "codex")
     verdict = pipeline.vet_item(run, task, "single", "b99.nowhere", {TOPIC: {"title": "t"}}, set())
     assert not verdict.published and "каталог" in verdict.reason
     assert model.log == []  # a code gate: no model is asked
@@ -270,7 +281,7 @@ def test_an_editor_that_fixes_the_question_gets_it_published_in_its_final_form(t
         request_pack(c, 1)
         (task,) = rows(tmp_path)
         assert task["import_status"] == "checked" and task["text"] == fixed["text"]
-        assert model.channels_of("question_edit") == ["claude"]  # channel A edits
+        assert model.channels_of("question_edit") == ["codex"]  # channel A edits
         judged = [x for x in model.log if x[0] == "tutor_judge"]
         assert fixed["text"] in judged[0][2]  # the judge saw the FINAL text
 
@@ -293,12 +304,10 @@ def test_an_unfixable_question_goes_to_the_parent(tmp_path):
 
 
 def test_the_prefilter_stops_a_leak_before_the_judge_is_asked():
-    from app.ingest.packs import check_item
-
     task = check_item(good("Какой органоид содержит хлорофилл? Верный вариант Г.", "Г"), "single")
     model = PipeModel([], None, critic=agree("Г"))
     verdict = pipeline.vet_item(
-        pipeline.PackRun(model, "claude"), task, "single", TOPIC, {TOPIC: {"title": "t"}}, set()
+        pipeline.PackRun(model, "codex"), task, "single", TOPIC, {TOPIC: {"title": "t"}}, set()
     )
     assert not verdict.published and "признак ответа" in verdict.reason
     assert model.channels_of("tutor_judge") == []
@@ -432,3 +441,127 @@ def test_the_limit_stops_the_pack_at_the_second_pass_too(tmp_path):
         assert [r["import_status"] for r in made] == ["draft", "draft"]
         assert all("лимит" in reason_of(r) for r in made)
         assert len(model.channels_of("question_critic")) == 2  # the second question was not asked
+
+
+CATALOG = {TOPIC: {"title": "t"}}
+
+
+def vet(model, text="Какой органоид содержит хлорофилл и участвует в фотосинтезе?", key="Г", **kw):
+    task = check_item(good(text, key, **kw), "single")
+    run = pipeline.PackRun(model, model.author_channel)
+    return pipeline.vet_item(run, task, "single", TOPIC, CATALOG, set())
+
+
+def asked_nobody(model):
+    return model.channels_of("question_critic") == [] and model.channels_of("tutor_judge") == []
+
+
+def test_a_critic_of_the_same_or_an_unknown_family_does_not_publish():
+    same = {"codex": "openai", "cursor": "openai", "claude": "anthropic"}
+    unknown = {"codex": "openai", "cursor": None, "claude": None}
+    for families, why in ((same, "нет канала критика другого семейства"), (unknown, "нет канала")):
+        model = PipeModel([], None, critic=agree("Г"), families=families)
+        verdict = vet(model)
+        assert not verdict.published, families
+        assert why in verdict.reason and "openai" in verdict.reason
+        assert asked_nobody(model)  # no critic channel: nobody is asked, nothing is published
+
+
+def test_an_author_of_an_unknown_family_does_not_publish():
+    for families in ({}, {"codex": None, "cursor": "anthropic"}):
+        model = PipeModel([], None, critic=agree("Г"), families=families)
+        verdict = vet(model)
+        assert not verdict.published and "семейство модели автора" in verdict.reason
+        assert asked_nobody(model)
+    model = PipeModel([], None, critic=agree("Г"))
+    model.author_channel = None
+    assert "канал автора неизвестен" in vet(model).reason
+
+
+def test_a_model_without_family_support_never_publishes():
+    model = PipeModel([], None, critic=agree("Г"))
+    model.family = None  # an old or foreign model object: the family cannot be asked
+    assert not vet(model).published and asked_nobody(model)
+
+    def broken(channel):
+        raise RuntimeError("settings unreadable")
+
+    model.family = broken  # a failed lookup is "unknown", never "different"
+    assert not vet(model).published and asked_nobody(model)
+
+
+def test_the_default_settings_publish_nothing_until_the_second_channel_is_pinned(tmp_path):
+    conn = connect(tmp_path / "o.db")
+    migrate(conn)
+    service = ModelService(conn, {})
+
+    def families():
+        return {channel: service.family(channel) for channel in CHANNELS}
+
+    # defaults: codex is pinned (openai), cursor is `auto` and has no known family
+    assert families()["codex"] == "openai" and families()["cursor"] is None
+    model = PipeModel([], None, critic=agree("Г"), families=families())
+    verdict = vet(model)
+    assert not verdict.published and "нет канала критика" in verdict.reason
+    assert asked_nobody(model)
+
+    conn.execute("UPDATE settings SET cursor_model = 'gpt-5.2'")  # the same family as the author
+    assert not vet(PipeModel([], None, critic=agree("Г"), families=families())).published
+
+    conn.execute("UPDATE settings SET cursor_model = 'claude-sonnet-4-5'")  # another family
+    model = PipeModel([], None, critic=agree("Г"), families=families())
+    assert vet(model).published
+    assert model.channels_of("question_critic") == ["cursor"]
+    assert model.channels_of("tutor_judge") == ["cursor"]
+
+
+def test_a_pack_with_an_unknown_critic_family_waits_for_the_parent(tmp_path):
+    unknown = {"codex": "openai", "cursor": None, "claude": None}
+    c, model = make_pipeline(tmp_path, {"questions": NEW[:2]}, families=unknown)
+    with c:
+        assert request_pack(c, 2).status_code == 303
+        made = rows(tmp_path)
+        assert {r["import_status"] for r in made} == {"draft"}
+        assert {r["auto_checked"] for r in made} == {0}
+        assert all("нет канала критика" in reason_of(r) for r in made)
+        assert asked_nobody(model)
+        listed = c.get("/api/tasks", headers=CHILD).json()["tasks"]
+        assert not {t["id"] for t in listed} & {r["id"] for r in made}
+        feed = {x["task_id"] for x in c.get("/parent/review/queue", headers=PARENT).json()["cards"]}
+        assert {r["id"] for r in made} <= feed
+        pack = db(tmp_path).execute("SELECT * FROM question_pack").fetchone()
+        assert pack["published_count"] == 0
+
+
+CHLOROPLAST = [
+    {"label": "А", "text": "ядро"},
+    {"label": "Б", "text": "рибосома"},
+    {"label": "В", "text": "хлоропласт"},
+    {"label": "Г", "text": "вакуоль"},
+]
+LEAKY_STEM = "Какой органоид растительной клетки содержит хлоропласт и ведёт фотосинтез?"
+
+
+def test_the_prefilter_sees_the_text_of_the_correct_option_in_the_stem():
+    model = PipeModel([], None, critic=agree("В"))  # the judge says reveals=false
+    verdict = vet(model, LEAKY_STEM, "В", options=CHLOROPLAST)
+    assert not verdict.published and "option_text" in verdict.reason
+    assert model.channels_of("tutor_judge") == []  # the cheap filter stops it first
+    # the same question without the leak goes through, so the rule is not just a blanket stop
+    clean = vet(
+        model, "Какой органоид растительной клетки ведёт фотосинтез?", "В", options=CHLOROPLAST
+    )
+    assert clean.published
+
+
+def test_a_leaky_stem_is_kept_from_the_child_and_goes_to_the_parent(tmp_path):
+    leaky = good(LEAKY_STEM, "В", options=CHLOROPLAST)
+    c, model = make_pipeline(
+        tmp_path, {"questions": [leaky]}, critic=agree("В"), judge=lambda content: NOBODY
+    )
+    with c:
+        request_pack(c, 1)
+        (task,) = rows(tmp_path)
+        assert task["import_status"] == "draft" and task["auto_checked"] == 0
+        assert "option_text" in reason_of(task)
+        assert model.channels_of("tutor_judge") == []
