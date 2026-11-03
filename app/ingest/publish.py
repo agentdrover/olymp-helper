@@ -9,6 +9,8 @@ from app.ingest.store import figure_of, options_of
 from app.ingest.tiles import stored_view
 
 PUBLISHED_STATUS = "checked"
+# Решение владельца 27.10: без родителя публикуется только то, что прошло двух моделей и код.
+AUTO_CHECKED_MARK = "составлено помощником, проверено двумя моделями"
 
 
 def has_key(task) -> bool:
@@ -193,7 +195,11 @@ def source_caption(material, page) -> str:
 
 def _source_label(task, material) -> str:
     if material is None:  # сгенерированное задание: сборника и страницы нет
-        return "составлено помощником, проверено родителем"
+        return (
+            AUTO_CHECKED_MARK
+            if task["auto_checked"]
+            else "составлено помощником, проверено родителем"
+        )
     return source_caption(material, task["page_from"])
 
 

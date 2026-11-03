@@ -2,7 +2,7 @@
 {% block title %}Новая пачка вопросов{% endblock %}
 {% block content %}
 <h1>Новая пачка вопросов</h1>
-<p class="hint">Модель составит вопросы по теме. Они попадут в ленту проверки черновиками: ребёнок увидит вопрос только после вашего подтверждения.</p>
+<p class="hint">Модель составит вопросы по теме. Прошедшие проверку двух моделей и ворота кода публикуются с пометкой; остальные попадут в вашу ленту проверки с причиной.</p>
 {% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
 <form id="generate" class="card fields" method="post" action="/parent/generate">
   <input type="hidden" name="csrf" value="{{ csrf_token(request) }}">

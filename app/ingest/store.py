@@ -115,6 +115,8 @@ def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
         "auto_published": 0,
         "auto_hold": None,
     }
+    if status == "draft":  # правка родителя: «проверено двумя моделями» больше не про это задание
+        fields["auto_checked"] = 0
     fields.update(cols)
     update_task(conn, task_id, **fields)
     save_snapshot(conn, task_id)

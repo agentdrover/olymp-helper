@@ -8,6 +8,7 @@
 {% elif pack.status == "running" %}
 <p>Модель ещё составляет вопросы. Обновите страницу через минуту.</p>
 {% else %}
+{% if pack.published_count %}<p id="published">Опубликовано без вашей проверки (прошло двух моделей и проверки кода): <b>{{ pack.published_count }}</b>.</p>{% endif %}
 <p id="accepted">Принято в ленту проверки: <b>{{ pack.accepted_count }}</b>.</p>
 {% if pack.accepted_count %}<p><a href="/parent/review">Открыть ленту проверки</a></p>{% endif %}
 {% if rejected %}

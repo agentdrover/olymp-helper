@@ -55,6 +55,8 @@ INVALID = good("Вопрос с ключом на несуществующий �
 class PackModel:
     """Imports tasks for the bank setup; answers the pack request with `pack` (None = refusal)."""
 
+    author_channel = "claude"
+
     def __init__(self, bank=(), pack=None):
         self.stub = StubModel(split=reply(*bank))
         self.pack = pack
@@ -68,8 +70,8 @@ class PackModel:
         if self.during:
             self.during()
         if self.pack is None:
-            return ModelResult.failure("claude", "stub", "executor_unreachable")
-        return ModelResult(None, self.pack, "claude", "stub", 1, None)
+            return ModelResult.failure(self.author_channel, "stub", "executor_unreachable")
+        return ModelResult(None, self.pack, self.author_channel, "stub", 1, None)
 
 
 def make_bank(tmp_path, pack, texts=BANK, draft=DRAFT_ONLY, topic=TOPIC):
@@ -339,9 +341,9 @@ def test_the_migration_upgrades_a_v9_database_keeping_the_data(tmp_path):
 
     assert migrate(conn) == SCHEMA_VERSION >= 10  # later migrations (0011_auth, ...) stack on top
     after = conn.execute("SELECT * FROM task_item").fetchall()
-    assert [tuple(r) for r in after] == [
-        (*before[0], None, None, 0, None)
-    ]  # old columns kept; pack_id, key_candidate_source and publication fields empty
+    assert (
+        [tuple(r) for r in after] == [(*before[0], None, None, 0, None, 0)]
+    )  # old columns kept; pack_id, key_candidate_source, auto_hold empty, auto_published and auto_checked off
     assert conn.execute("SELECT COUNT(*) FROM task_revision").fetchone()[0] == 1
     conn.execute(
         "INSERT INTO question_pack(created_at, topic, task_type, requested_count) VALUES ('t', 'b10', 'single', 3)"

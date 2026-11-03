@@ -1,13 +1,14 @@
-"""Пачка похожих вопросов по просьбе родителя (G2): запрос к модели, проверка, запись в ленту.
+"""Пачка похожих вопросов по просьбе родителя (G2): автор, критик, редактор и ворота.
 
 Ответ модели - недоверенные данные: каждое задание проходит те же проверки структуры, что и
-импорт (validate_tasks, check_options), плюс проверку ключа и повторов. Принятые задания
-попадают в обычную ленту проверки черновиками; ребёнок их не видит, пока родитель не подтвердит.
+импорт (validate_tasks, check_options), плюс проверку ключа и повторов. Прошедшие весь конвейер
+публикуются с пометкой; остальные ждут родителя в ленте проверки с причиной.
 """
 
 import json
 import logging
 import re
+from dataclasses import dataclass
 
 from app.ingest.answers import display, key_json, normalize_answer
 from app.ingest.importer import FIGURE_WORDS
@@ -90,6 +91,15 @@ SCHEMA = {
         }
     },
 }
+
+
+@dataclass
+class Verdict:
+    """Исход задания в конвейере: опубликовано без родителя или ждёт его с причиной."""
+
+    published: bool
+    task: dict
+    reason: str | None = None
 
 
 class PackRefused(Exception):
@@ -299,6 +309,7 @@ def sort_out(payload, kind: str, count: int, existing_texts: list[str]):
             rejected.append({"number": number, "text": shown, "reason": str(exc)})
             continue
         known.append((tokens, f"повторяет вопрос {number} этой же пачки"))
+        task["number"] = number
         accepted.append(task)
     return accepted, rejected
 
@@ -321,42 +332,74 @@ def _finish_failed(conn, pack_id: int, message: str, channel=None) -> None:
     )
 
 
-def _write(conn, pack_id: int, topic: str, payload, kind: str, count: int, channel) -> None:
-    """Проверка повторов и запись - одна транзакция: задание, появившееся за время запроса
-    к модели (другая пачка), видно проверке."""
+def _bank_texts(conn) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT text FROM task_item WHERE excluded = 0")]
+
+
+def _insert(conn, pack_id: int, number: int, topic: str, task: dict, verdict) -> None:
+    published = verdict.published
+    note = None if published else f"{GENERATED_NOTE} Не опубликовано без вас: {verdict.reason}."
+    cur = conn.execute(
+        "INSERT INTO task_item (material_id, source_number, type, text, options, topic, "
+        "import_status, answer_key, key_source, review_note, parent_note, pack_id, auto_checked) "
+        "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?, ?, ?)",
+        (
+            f"Г{pack_id}.{number}",
+            task["type"],
+            task["text"],
+            None if task["options"] is None else json.dumps(task["options"], ensure_ascii=False),
+            topic,
+            "checked" if published else "draft",
+            key_json(task["value"], task["type"]),
+            note,
+            task["explanation"] or None,
+            pack_id,
+            int(published),
+        ),
+    )
+    save_snapshot(conn, cur.lastrowid)
+
+
+def _write(conn, pack_id: int, topic: str, vetted: list, rejected: list, channel) -> None:
+    """Проверка повторов и запись - одна транзакция: задание, появившееся за время запросов
+    к модели (другая пачка), видно проверке. vetted - [(задание, вердикт конвейера)]."""
     with atomic(conn):
-        existing = [r[0] for r in conn.execute("SELECT text FROM task_item WHERE excluded = 0")]
-        accepted, rejected = sort_out(payload, kind, count, existing)
-        for number, task in enumerate(accepted, 1):
-            cur = conn.execute(
-                "INSERT INTO task_item (material_id, source_number, type, text, options, topic, "
-                "import_status, answer_key, key_source, review_note, parent_note, pack_id) "
-                "VALUES (NULL, ?, ?, ?, ?, ?, 'draft', ?, 'generated', ?, ?, ?)",
-                (
-                    f"Г{pack_id}.{number}",
-                    task["type"],
-                    task["text"],
-                    None
-                    if task["options"] is None
-                    else json.dumps(task["options"], ensure_ascii=False),
-                    topic,
-                    key_json(task["value"], task["type"]),
-                    GENERATED_NOTE,
-                    task["explanation"] or None,
-                    pack_id,
-                ),
-            )
-            save_snapshot(conn, cur.lastrowid)
+        known = [(_tokens(t), "уже есть в банке заданий") for t in _bank_texts(conn)]
+        saved = published = 0
+        for number, (task, verdict) in enumerate(vetted, 1):
+            tokens = _tokens(task["text"])
+            where = find_repeat(tokens, known)
+            if where and verdict.published:  # за время запросов появилось такое же: к родителю
+                verdict = Verdict(False, task, "повтор: " + where)
+            known.append((tokens, f"повторяет вопрос {task['number']} этой же пачки"))
+            _insert(conn, pack_id, number, topic, task, verdict)
+            published += verdict.published
+            saved += not verdict.published
         conn.execute(
             "UPDATE question_pack SET status = 'done', error = NULL, accepted_count = ?, "
-            "rejected = ?, channel = ? WHERE id = ?",
-            (len(accepted), json.dumps(rejected, ensure_ascii=False), channel, pack_id),
+            "published_count = ?, rejected = ?, channel = ? WHERE id = ?",
+            (saved, published, json.dumps(rejected, ensure_ascii=False), channel, pack_id),
         )
 
 
+def _vet_all(ctx, conn, topic: str, kind: str, accepted: list, channel) -> list:
+    """Конвейер по каждому принятому заданию: [(задание после правки, вердикт)]."""
+    from app.ingest import pipeline
+
+    catalog = load_catalog(conn)
+    run = pipeline.PackRun(ctx.model, channel)
+    known = {norm(t) for t in _bank_texts(conn)}
+    out = []
+    for task in accepted:
+        verdict = pipeline.vet_item(run, task, kind, topic, catalog, known)
+        verdict.task["number"] = task["number"]  # номер в ответе модели переживает правку
+        out.append((verdict.task, verdict))
+    return out
+
+
 def generate_pack(ctx, conn, topic: str, kind: str, count: int) -> int:
-    """Одна пачка: один запрос к модели. Просьба не принята - PackRefused (пачки нет); отказ
-    или сбой модели - пачка failed без заданий. Возвращает id пачки."""
+    """Одна пачка: запрос к автору, затем конвейер каждого задания. Просьба не принята -
+    PackRefused (пачки нет); отказ или сбой автора - пачка failed без заданий. Возвращает id."""
     catalog = load_catalog(conn)
     if topic not in catalog:
         raise PackRefused("Такой темы нет в каталоге.")
@@ -384,7 +427,9 @@ def generate_pack(ctx, conn, topic: str, kind: str, count: int) -> int:
             _finish_failed(conn, pack_id, _failure_message(result), channel)
             return pack_id
         try:
-            _write(conn, pack_id, topic, result.json, kind, count, channel)
+            accepted, rejected = sort_out(result.json, kind, count, _bank_texts(conn))
+            vetted = _vet_all(ctx, conn, topic, kind, accepted, channel)
+            _write(conn, pack_id, topic, vetted, rejected, channel)
         except InvalidStructure as exc:
             _finish_failed(
                 conn, pack_id, f"Модель вернула неверную структуру: {exc}. Повторите.", channel
