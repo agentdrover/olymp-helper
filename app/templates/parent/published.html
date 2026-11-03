@@ -1,0 +1,27 @@
+{% extends "base_parent.html" %}
+{% block title %}Опубликованные задания{% endblock %}
+{% block content %}
+<header>
+  <div class="kicker">Лента проверки</div>
+  <h1>Опубликованные задания · {{ tasks|length }}</h1>
+</header>
+<p class="hint">Это задания, которые сейчас видит ребёнок. «Снять задание» убирает его у ребёнка; его решения остаются в итогах с пометкой «задание снято».</p>
+<p><a href="/parent/review">← Лента проверки</a></p>
+<div class="panel"><table id="published-tasks">
+  <thead><tr><th scope="col">№</th><th scope="col">Задание</th><th scope="col">Кто проверил</th><th scope="col"><span class="visually-hidden">Действия</span></th></tr></thead>
+  <tbody>
+  {% for t in tasks %}
+  <tr data-published-task="{{ t.task_id }}">
+    <td class="mono">{{ t.number }}</td>
+    <td>{{ t.text }}<br><span class="hint">{{ t.source }}</span></td>
+    <td>{{ "без вас: конвейер или автопубликация" if t.without_parent else "вы" }}</td>
+    <td><button data-withdraw="{{ t.task_id }}">Снять задание</button></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4">Опубликованных заданий нет.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+<p class="err" id="error" role="alert"></p>
+<script src="/static/withdraw.js" defer></script>
+{% endblock %}

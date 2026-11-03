@@ -492,11 +492,26 @@ def _current_terminal(conn: sqlite3.Connection, task_id: int | None) -> bool:
     return row[0] in TERMINAL and (row[1], row[2]) == (row[3], row[4])
 
 
+def withdrawn_ids(conn: sqlite3.Connection) -> set[int]:
+    """Задания, снятые родителем с публикации: их решения остаются в итогах (K5c)."""
+    return {r[0] for r in conn.execute("SELECT id FROM task_item WHERE withdrawn_at IS NOT NULL")}
+
+
+def mark_withdrawn(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
+    """Пометка «задание снято» на записях итога и «к чему вернуться» (по task_id)."""
+    gone = withdrawn_ids(conn)
+    for item in items:
+        item["withdrawn"] = item.get("task_id") in gone
+    return items
+
+
 def present(conn: sqlite3.Connection, found: dict, *, child: bool) -> dict:
     """Итог для показа. Ключ могли исправить после попытки (SPEC 1.1) - пометка. Ребёнку, пока
     текущий прогон задания не закрыт (повтор), верные ответы старых попыток не показываются
     (SPEC 1.3, правило 3): остаётся формулировка «решено в прошлый раз»."""
     out = json.loads(json.dumps(found))
+    mark_withdrawn(conn, out["tasks"])
+    mark_withdrawn(conn, out["revisit"])
     for task in out["tasks"]:
         task["key_note"] = None
         current = None
@@ -510,7 +525,8 @@ def present(conn: sqlite3.Connection, found: dict, *, child: bool) -> dict:
             for a in task["attempts"]
         ):
             task["key_note"] = KEY_CORRECTED_NOTE
-        if child and not _current_terminal(conn, task["task_id"]):
+        # Снятое задание повторить нельзя: скрывать от ребёнка его же решения незачем.
+        if child and not task["withdrawn"] and not _current_terminal(conn, task["task_id"]):
             # Хранимому полю не верим: выбранный ответ скрыт у каждой попытки.
             for a in task["attempts"]:
                 a["answer"] = None

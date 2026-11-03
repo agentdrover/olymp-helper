@@ -376,6 +376,9 @@
     "confirm-no-key": () => post("confirm", {}),
     skip: () => post("skip"),
     exclude: () => post("exclude"),
+    "sample-ok": () => post("sample", { found_error: false }),
+    "sample-error": () => post("sample", { found_error: true }),
+    withdraw: () => post("withdraw"),
     retry: async () => { await post("retry-model"); return { next: { task_id: Number(taskId()) }, counter: card().dataset.counter }; },
     resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: (b.dataset.choice === "key" ? b.dataset.answer : val("answer")) || null }),
     figure: publishFigure,
@@ -424,6 +427,25 @@
     }
   });
 
+  // «Снять задание» в списке опубликованных автоматически: список перерисовывается целиком,
+  // поэтому обработчик стоит на документе.
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest && e.target.closest("button[data-withdraw]");
+    if (!b) return;
+    b.disabled = true;
+    try {
+      const data = await post("withdraw", {}, b.dataset.withdraw);
+      const list = await fetch("/parent/review/auto/list");
+      const section = document.getElementById("auto-published");
+      if (list.ok && section) section.outerHTML = await list.text();
+      const open = card();
+      if (open && open.dataset.taskId === b.dataset.withdraw) await advance(data);
+    } catch (err) {
+      b.disabled = false;
+      fail(err);
+    }
+  });
+
   document.addEventListener("keydown", (e) => {
     if (e.target && e.target.closest && e.target.closest("#auto-published")) return;
     // Enter на переключателе или флажке своего действия не имеет: он подтверждает карточку.
@@ -440,7 +462,7 @@
         if (!fig.disabled) fig.click();
         return;
       }
-      const b = feed.querySelector('button[data-action="confirm"], button[data-action="resolve"][data-choice="key"]');
+      const b = feed.querySelector('button[data-action="confirm"], button[data-action="sample-ok"], button[data-action="resolve"][data-choice="key"]');
       if (b) { e.preventDefault(); b.click(); }
     } else if (e.key === "ArrowRight") {
       const b = feed.querySelector('button[data-action="skip"]');

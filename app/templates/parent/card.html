@@ -37,11 +37,16 @@
       {% if card.kind == "discrepancy" and card.model_explanation %}<p class="hint">{{ card.model_explanation }}</p>{% endif %}
       {% if card.auto_note %}<p class="hint">{{ card.auto_note|capitalize }}.</p>{% endif %}
       <p class="hint">{{ card.hint }}</p>
+      {% if card.reason %}<p class="err" data-gate="{{ card.gate }}">Причина: {{ card.reason }}.</p>{% endif %}
       {% if card.note %}<p class="err">Обратите внимание: {{ card.note }}.</p>{% endif %}
       {% if card.warning %}<p class="err" role="alert">{{ card.warning }}</p>{% endif %}
       {% if card.parent_note %}<p class="hint">Заметка для родителя (ребёнку не показывается): {{ card.parent_note }}</p>{% endif %}
 
-      {% if card.kind in ("confirm", "child_dispute") %}
+      {% if card.kind == "sample" %}
+        <button class="primary" data-action="sample-ok">Всё верно — проверено</button>
+        <button data-action="sample-error">Нашёл ошибку</button>
+        <button data-action="withdraw">Снять задание</button>
+      {% elif card.kind in ("confirm", "child_dispute") %}
         <button class="primary" data-action="confirm"{% if card.button_answer %} data-answer="{{ card.button_answer }}"{% endif %}>{{ card.button or "Ключ прав — оставить" }}</button>
       {% elif card.kind == "no_key" %}
         <p><label>Ответ <input id="answer" size="8"></label></p>

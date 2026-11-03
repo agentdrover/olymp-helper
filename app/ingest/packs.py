@@ -14,6 +14,7 @@ from app.ingest.answers import display, key_json, normalize_answer
 from app.ingest.importer import FIGURE_WORDS
 from app.ingest.leaks import condition_leaks, norm
 from app.ingest.prompt import OPTIONS_SCHEMA, neutralize
+from app.ingest.sampling import new_sample_state
 from app.ingest.schema import InvalidStructure, validate_tasks
 from app.ingest.store import atomic, now, save_snapshot
 from app.ingest.topics import load_catalog
@@ -100,6 +101,7 @@ class Verdict:
     published: bool
     task: dict
     reason: str | None = None
+    gate: str | None = None  # ворота конвейера (sampling.GATES), на которых задание остановлено
 
 
 class PackRefused(Exception):
@@ -130,7 +132,8 @@ def example_tasks(conn, catalog: dict, code: str, kind: str) -> list[dict]:
     bank_type = KINDS[kind][0]
     rows = conn.execute(
         f"SELECT text, options FROM task_item WHERE import_status = 'checked' AND excluded = 0 "
-        f"AND topic IN ({marks}) ORDER BY (type = ?) DESC, id DESC LIMIT ?",
+        f"AND withdrawn_at IS NULL AND topic IN ({marks}) "
+        f"ORDER BY (type = ?) DESC, id DESC LIMIT ?",
         (*codes, bank_type, MAX_EXAMPLES),
     ).fetchall()
     return [{"text": r[0], "options": json.loads(r[1]) if r[1] else None} for r in rows]
@@ -341,8 +344,9 @@ def _insert(conn, pack_id: int, number: int, topic: str, task: dict, verdict) ->
     note = None if published else f"{GENERATED_NOTE} Не опубликовано без вас: {verdict.reason}."
     cur = conn.execute(
         "INSERT INTO task_item (material_id, source_number, type, text, options, topic, "
-        "import_status, answer_key, key_source, review_note, parent_note, pack_id, auto_checked) "
-        "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?, ?, ?)",
+        "import_status, answer_key, key_source, review_note, parent_note, pack_id, auto_checked, "
+        "pipeline_outcome, pipeline_gate, pipeline_reason, sample_state) "
+        "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             f"Г{pack_id}.{number}",
             task["type"],
@@ -355,6 +359,10 @@ def _insert(conn, pack_id: int, number: int, topic: str, task: dict, verdict) ->
             task["explanation"] or None,
             pack_id,
             int(published),
+            "passed" if published else "failed",
+            None if published else verdict.gate or "other",
+            None if published else verdict.reason,
+            new_sample_state(conn) if published else None,
         ),
     )
     save_snapshot(conn, cur.lastrowid)
@@ -370,7 +378,7 @@ def _write(conn, pack_id: int, topic: str, vetted: list, rejected: list, channel
             tokens = _tokens(task["text"])
             where = find_repeat(tokens, known)
             if where and verdict.published:  # за время запросов появилось такое же: к родителю
-                verdict = Verdict(False, task, "повтор: " + where)
+                verdict = Verdict(False, task, "повтор: " + where, "duplicate")
             known.append((tokens, f"повторяет вопрос {task['number']} этой же пачки"))
             _insert(conn, pack_id, number, topic, task, verdict)
             published += verdict.published

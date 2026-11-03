@@ -1,0 +1,14 @@
+<section id="pipeline-journal" aria-labelledby="pipeline-journal-title">
+  <h2 id="pipeline-journal-title">Журнал конвейера</h2>
+  <p class="hint">Составленные помощником задания: прошедшие конвейер публикуются без вас, не прошедшие ждут в ленте. Из прошедших в ленте — выборка: каждое {{ journal.sample.every }}-е.</p>
+  <ul class="facts">
+    <li>Прошло конвейер: <b data-journal="passed">{{ journal.passed }}</b></li>
+    <li>Отклонено: <b data-journal="rejected">{{ journal.rejected }}</b>{% if journal.reasons %}
+      <ul>
+        {% for r in journal.reasons %}<li data-gate="{{ r.gate }}">{{ r.label }}: {{ r.count }}</li>{% endfor %}
+      </ul>
+    {% endif %}</li>
+    <li>Выборка: проверено {{ journal.sample.reviewed }}, ждёт проверки {{ journal.sample.pending }}, ошибок найдено {{ journal.sample.errors }}{% if journal.sample.error_rate is not none %} · доля ошибок <b data-journal="error-rate">{{ (journal.sample.error_rate * 100)|round|int }}%</b>{% else %} · доли ошибок пока нет{% endif %}</li>
+    <li>Без ошибок подряд: {{ journal.sample.clean_streak }}{% if journal.sample.every == 5 %} (после 20 подряд выборка станет реже — каждое 10-е){% endif %}</li>
+  </ul>
+</section>
