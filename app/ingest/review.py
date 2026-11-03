@@ -557,7 +557,7 @@ def auto_published(conn) -> list[dict]:
     rows = conn.execute(
         "SELECT t.*, m.original_name AS source_name FROM task_item t "
         "LEFT JOIN material m ON m.id=t.material_id "
-        "WHERE t.auto_published = 1 AND t.import_status = 'checked' "
+        "WHERE (t.auto_published = 1 OR t.auto_checked = 1) AND t.import_status = 'checked' "
         "AND t.excluded = 0 AND t.withdrawn_at IS NULL ORDER BY t.id"
     ).fetchall()
     catalog = load_catalog(conn)
@@ -568,6 +568,7 @@ def auto_published(conn) -> list[dict]:
             "text": r["text"],
             "key": display(key_value(r["answer_key"])),
             "key_source": r["key_source"],
+            "key_label": "Ключ автора" if r["key_source"] == "generated" else "Официальный ключ",
             "note": AUTO_NOTE,
             "options": options_of(r),
             "topic_title": catalog.get(r["topic"], {}).get("title"),

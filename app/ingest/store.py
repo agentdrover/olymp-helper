@@ -105,13 +105,16 @@ def save_snapshot(conn: sqlite3.Connection, task_id: int) -> None:
 
 
 def mark_sample(conn: sqlite3.Connection, task_id: int, state: str) -> bool:
-    """Исход проверки родителем задания из выборки: 'ok' или 'error'. Меняет только 'pending';
-    номер проверки задаёт порядок (серия без ошибок считается по нему). True - исход записан."""
+    """Исход проверки родителем задания из выборки: 'ok' (только из 'pending') или 'error' (из
+    'pending' и из принятого 'ok': ошибку находят и позже). Номер проверки задаёт порядок, по
+    нему считается серия без ошибок. True - исход записан."""
+    before = ("pending",) if state == "ok" else ("pending", "ok")
+    marks = ",".join("?" * len(before))
     cur = conn.execute(
         "UPDATE task_item SET sample_state = ?, sample_review_no = "
         "(SELECT COALESCE(MAX(sample_review_no), 0) + 1 FROM task_item) "
-        "WHERE id = ? AND sample_state = 'pending'",
-        (state, task_id),
+        f"WHERE id = ? AND sample_state IN ({marks})",
+        (state, task_id, *before),
     )
     return cur.rowcount > 0
 

@@ -302,3 +302,26 @@ def test_the_migration_marks_tasks_that_already_went_through_the_pipeline(tmp_pa
         assert got[3] == (None, None, None, None, None)
     finally:
         conn.close()
+
+
+def test_an_error_found_in_an_accepted_sample_resets_the_streak(tmp_path):
+    c = boot(tmp_path)
+    with c:
+        ids = land(tmp_path, [True] * 10)
+        first, second = ids[4], ids[9]
+        judge(c, first)
+        judge(c, second)
+        assert journal(c)["sample"]["clean_streak"] == 2
+        # published without the parent, whether sampled or not, the parent can withdraw them
+        listed = c.get("/parent/review/auto/list", headers=PARENT).text
+        for tid in ids:
+            assert f'data-withdraw="{tid}"' in listed
+        # the error in an already accepted sample is found later: it counts as an error
+        assert c.post(f"/parent/tasks/{first}/withdraw", headers=PARENT).status_code == 200
+        sample = journal(c)["sample"]
+        assert (sample["reviewed"], sample["errors"], sample["clean_streak"]) == (2, 1, 0)
+        assert (
+            f'data-withdraw="{first}"' not in c.get("/parent/review/auto/list", headers=PARENT).text
+        )
+        # a second withdrawal is refused and does not count twice
+        assert c.post(f"/parent/tasks/{first}/withdraw", headers=PARENT).status_code == 409
