@@ -434,12 +434,12 @@
     if (!b) return;
     b.disabled = true;
     try {
-      await post("withdraw", {}, b.dataset.withdraw);
+      const data = await post("withdraw", {}, b.dataset.withdraw);
       const list = await fetch("/parent/review/auto/list");
       const section = document.getElementById("auto-published");
       if (list.ok && section) section.outerHTML = await list.text();
       const open = card();
-      if (open && open.dataset.taskId === b.dataset.withdraw) await show(null);
+      if (open && open.dataset.taskId === b.dataset.withdraw) await advance(data);
     } catch (err) {
       b.disabled = false;
       fail(err);

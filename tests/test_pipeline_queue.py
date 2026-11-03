@@ -325,3 +325,17 @@ def test_an_error_found_in_an_accepted_sample_resets_the_streak(tmp_path):
         )
         # a second withdrawal is refused and does not count twice
         assert c.post(f"/parent/tasks/{first}/withdraw", headers=PARENT).status_code == 409
+
+
+def test_the_parent_can_withdraw_any_published_task_from_one_page(tmp_path):
+    c, _clock, _model = boot_summary(tmp_path)
+    with c:
+        mine = seed(tmp_path, key="Б", number="3")  # confirmed by the parent, no pipeline
+        made = land(tmp_path, [True, ("leak", "в условии очевидный признак ответа (х)")])
+        page = c.get("/parent/published", headers=PARENT).text
+        assert f'data-withdraw="{mine}"' in page and f'data-withdraw="{made[0]}"' in page
+        assert f'data-withdraw="{made[1]}"' not in page  # a failed question is not published
+        assert "/static/withdraw.js" in page
+        assert c.get("/parent/published", headers=CHILD).status_code in (302, 303, 401, 403)
+        assert c.post(f"/parent/tasks/{mine}/withdraw", headers=PARENT).status_code == 200
+        assert f'data-withdraw="{mine}"' not in c.get("/parent/published", headers=PARENT).text

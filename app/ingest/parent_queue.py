@@ -3,7 +3,7 @@
 import sqlite3
 
 from app.ingest import sampling
-from app.ingest.publish import is_published
+from app.ingest.publish import child_view, is_published
 from app.ingest.review import SAMPLE_ERROR_NOTE, Refusal
 from app.ingest.store import atomic, get_task, mark_sample, new_revision, now, update_task
 
@@ -37,6 +37,27 @@ def withdraw(conn: sqlite3.Connection, task_id: int) -> None:
             raise Refusal("Снять можно только опубликованное задание.", 409)
         update_task(conn, task_id, withdrawn_at=now())
         mark_sample(conn, task_id, "error")
+
+
+def published(conn: sqlite3.Connection) -> list[dict]:
+    """Все задания, которые сейчас видит ребёнок: у каждого можно нажать «Снять задание»."""
+    out = []
+    for task in conn.execute("SELECT * FROM task_item ORDER BY id").fetchall():
+        if not is_published(task):
+            continue
+        material = conn.execute(
+            "SELECT year, original_name FROM material WHERE id = ?", (task["material_id"],)
+        ).fetchone()
+        out.append(
+            {
+                "task_id": task["id"],
+                "number": task["source_number"],
+                "text": " ".join(task["text"].split())[:200],
+                "source": child_view(task, material)["source"],
+                "without_parent": bool(task["auto_published"] or task["auto_checked"]),
+            }
+        )
+    return out
 
 
 def _count(conn: sqlite3.Connection, where: str, *args) -> int:

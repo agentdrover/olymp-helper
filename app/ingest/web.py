@@ -573,6 +573,13 @@ def review_auto_status(request: Request):
     return ctx_of(request).autorun.snapshot()
 
 
+@parent.get("/parent/published", response_class=HTMLResponse)
+def published_page(request: Request, conn: Db):
+    return TEMPLATES.TemplateResponse(
+        request, "parent/published.html", {"tasks": parent_queue.published(conn)}
+    )
+
+
 @parent.get("/parent/review/journal")
 def review_journal(conn: Db):
     return parent_queue.journal(conn)
