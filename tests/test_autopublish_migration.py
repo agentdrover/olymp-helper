@@ -25,7 +25,13 @@ def test_existing_main_database_upgrades_without_losing_data(tmp_path, monkeypat
         monkeypatch.setattr(db, "_migration_files", lambda: files)  # later migrations stack on top
         latest = db.migrate(conn)
         assert latest == db.SCHEMA_VERSION >= 17
-        assert conn.execute("SELECT * FROM task_item").fetchone() == (*before, 0, None, 0)
+        assert conn.execute("SELECT * FROM task_item").fetchone() == (
+            *before,
+            0,
+            None,
+            0,
+            *[None] * 6,
+        )
         assert conn.execute("SELECT * FROM settings").fetchall() == settings
         assert conn.execute("SELECT number,answer FROM key_entry").fetchall() == [("1", "Б")]
         assert db.migrate(conn) == latest

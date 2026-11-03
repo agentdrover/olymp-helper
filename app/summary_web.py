@@ -38,7 +38,7 @@ def _my_data(conn, now, selected_id: int | None) -> dict:
         ],
         "selected_id": selected_id if selected else None,
         "selected": selected,
-        "revisit": summary.overall_revisit(sessions),
+        "revisit": summary.mark_withdrawn(conn, summary.overall_revisit(sessions)),
         "journal": summary.journal(conn),
         "shown_ids": sorted(
             j["session_id"] for j in summary.journal(conn) if j["type"] == "shown_to_parent"

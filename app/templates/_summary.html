@@ -20,7 +20,7 @@
     <tbody>
     {% for t in s.tasks %}
     <tr>
-      <td>{% if t.task_id %}<a href="/tasks/{{ t.task_id }}">№ {{ t.number }}</a>{% else %}—{% endif %}{% if t.topic %}<br><span class="hint">{{ t.topic }}</span>{% endif %}{% if t.repeat %}<br><span class="pill">повтор</span>{% endif %}</td>
+      <td>{% if t.task_id and not t.withdrawn %}<a href="/tasks/{{ t.task_id }}">№ {{ t.number }}</a>{% elif t.task_id %}№ {{ t.number }}{% else %}—{% endif %}{% if t.withdrawn %}<br><span class="pill">задание снято</span>{% endif %}{% if t.topic %}<br><span class="hint">{{ t.topic }}</span>{% endif %}{% if t.repeat %}<br><span class="pill">повтор</span>{% endif %}</td>
       <td>
         {% for a in t.attempts %}
         <div>{{ a.n }}-я попытка: {% if a.answer is not none %}{{ a.answer }} — {% endif %}{{ a.result }}{% if a.confidence %} ({{ conf[a.confidence] }}){% endif %}{% if a.note %} <span class="pill">{{ a.note }}</span>{% endif %}</div>

@@ -16,6 +16,7 @@
     {% endif %}
     <p>Официальный ключ: <b>{{ task.key }}</b></p>
     {% if task.topic_title %}<p class="hint">Тема: {{ task.topic_title }}</p>{% endif %}
+    <p><button data-withdraw="{{ task.task_id }}">Снять задание</button></p>
   </details>
   {% else %}
   <p class="hint">Пока нет заданий, опубликованных автоматически.</p>

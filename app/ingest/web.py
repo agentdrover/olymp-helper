@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from app.ingest import packs, page_normalizer, review
+from app.ingest import packs, page_normalizer, parent_queue, review
 from app.ingest.figure_card import area_context, mode_for
 from app.ingest.figure_service import confirm_figure, preview_png, preview_tile_png
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
@@ -474,6 +474,10 @@ class KeyBody(BaseModel):
     keep_candidate: bool = False  # лента: ответ карточки без правки не делает ключ родительским
 
 
+class SampleBody(BaseModel):
+    found_error: bool = False
+
+
 class ResolveBody(BaseModel):
     choice: str
     answer: str | None = None
@@ -530,6 +534,7 @@ def review_page(request: Request, conn: Db):
             "counter": counter,
             "total": feed["total"],
             "published": review.auto_published(conn),
+            "journal": parent_queue.journal(conn),
         },
     )
 
@@ -568,6 +573,11 @@ def review_auto_status(request: Request):
     return ctx_of(request).autorun.snapshot()
 
 
+@parent.get("/parent/review/journal")
+def review_journal(conn: Db):
+    return parent_queue.journal(conn)
+
+
 @parent.get("/parent/review/{task_id}", response_class=HTMLResponse)
 def review_card(task_id: int, request: Request, conn: Db, fragment: int = 0):
     ctx = ctx_of(request)
@@ -583,6 +593,7 @@ def review_card(task_id: int, request: Request, conn: Db, fragment: int = 0):
             "counter": counter,
             "total": len(order),
             "published": review.auto_published(conn) if not fragment else [],
+            "journal": parent_queue.journal(conn),
         },
     )
 
@@ -703,6 +714,20 @@ def task_resolve(task_id: int, body: ResolveBody, request: Request, conn: Db):
 @_action
 def task_exclude(task_id: int, request: Request, conn: Db):
     review.exclude_task(conn, task_id)
+    return _advance(request, conn, task_id)
+
+
+@parent.post("/parent/tasks/{task_id}/sample")
+@_action
+def task_sample(task_id: int, body: SampleBody, request: Request, conn: Db):
+    parent_queue.review_sample(conn, task_id, found_error=body.found_error)
+    return _advance(request, conn, task_id)
+
+
+@parent.post("/parent/tasks/{task_id}/withdraw")
+@_action
+def task_withdraw(task_id: int, request: Request, conn: Db):
+    parent_queue.withdraw(conn, task_id)
     return _advance(request, conn, task_id)
 
 

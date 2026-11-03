@@ -104,6 +104,18 @@ def save_snapshot(conn: sqlite3.Connection, task_id: int) -> None:
     )
 
 
+def mark_sample(conn: sqlite3.Connection, task_id: int, state: str) -> bool:
+    """Исход проверки родителем задания из выборки: 'ok' или 'error'. Меняет только 'pending';
+    номер проверки задаёт порядок (серия без ошибок считается по нему). True - исход записан."""
+    cur = conn.execute(
+        "UPDATE task_item SET sample_state = ?, sample_review_no = "
+        "(SELECT COALESCE(MAX(sample_review_no), 0) + 1 FROM task_item) "
+        "WHERE id = ? AND sample_state = 'pending'",
+        (state, task_id),
+    )
+    return cur.rowcount > 0
+
+
 def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
     """Правка, создающая новую ревизию: «проверено» снимается, model_answer сбрасывается."""
     task = get_task(conn, task_id)
@@ -119,5 +131,6 @@ def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
         fields["auto_checked"] = 0
     fields.update(cols)
     update_task(conn, task_id, **fields)
+    mark_sample(conn, task_id, "error")  # родитель правит задание из выборки: нашёл ошибку (K5c)
     save_snapshot(conn, task_id)
     return task["revision"] + 1

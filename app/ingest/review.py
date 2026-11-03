@@ -11,6 +11,7 @@ from app.ingest.store import (
     atomic,
     figure_of,
     get_task,
+    mark_sample,
     new_revision,
     options_of,
     save_snapshot,
@@ -27,7 +28,14 @@ LABELS = {
     "child_dispute": "от ребёнка",
     "model_missing": "ответ модели не получен — повторить",
     "confirm": "проверить",
+    "sample": "выборка прошедших",
 }
+FAILED_LABEL = "не прошло конвейер"
+SAMPLE_HINT = (
+    "Задание прошло конвейер и опубликовано без вас: это выборка. Проверьте условие и ответ. "
+    "Нашли ошибку - отметьте её: задание вернётся к вам черновиком, выборка станет чаще."
+)
+SAMPLE_ERROR_NOTE = "Родитель нашёл ошибку в выборке: проверьте и поправьте задание"
 
 
 AUTO_NOTE = "опубликовано автоматически"
@@ -244,7 +252,9 @@ def edit_task(
 
 def exclude_task(conn, task_id: int) -> None:
     _task(conn, task_id)
-    update_task(conn, task_id, excluded=1)
+    with atomic(conn):
+        update_task(conn, task_id, excluded=1)
+        mark_sample(conn, task_id, "error")  # исключено из выборки: ошибка найдена
 
 
 # ----------------------------------------------------------------------- споры
@@ -368,7 +378,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     """Карточка ленты или None, если по заданию родителю нечего делать.
 
     Только чтение: ответ модели считается лишь после подтверждения условия (POST)."""
-    if task["excluded"]:
+    if task["excluded"] or task["withdrawn_at"]:
         return None
     figure = figure_of(task)
     status = task["import_status"]
@@ -380,6 +390,8 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     kind, hint = None, ""
     if status == "checked" and _open_dispute(conn, task):
         kind, hint = "child_dispute", "Ребёнок считает ключ спорным. Проверьте ответ."
+    elif status == "checked" and task["sample_state"] == "pending":
+        kind, hint = "sample", SAMPLE_HINT
     elif status == "unsupported":
         if task["type"] == "open":
             kind = "open_exclude"
@@ -412,6 +424,12 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         kind, hint = "confirm", "Проверьте, что условие распознано верно."
     if kind is None:
         return None
+    # Составленное задание, которое конвейер не пропустил: обычная карточка проверки с причиной.
+    failed = kind == "confirm" and task["pipeline_outcome"] == "failed"
+    if failed:
+        hint = (
+            f"Конвейер не пропустил задание: {task['pipeline_reason']}. Проверьте условие и ответ."
+        )
     if task["auto_hold"] and status == "draft":
         hint = f"{hint} {task['auto_hold']}".strip()
     # Две разные страницы: текст проверяется по page_from..page_to, рисунок - на своей.
@@ -434,9 +452,12 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     card = {
         "task_id": task["id"],
         "kind": kind,
-        "label": LABELS[kind],
+        "label": FAILED_LABEL if failed else LABELS[kind],
         "hint": hint,
-        "note": task["review_note"],
+        "note": None if failed else task["review_note"],
+        "pipeline_failed": failed,
+        "reason": task["pipeline_reason"] if failed else None,
+        "gate": task["pipeline_gate"] if failed else None,
         "parent_note": task["parent_note"],
         "warning": leak_notice(task),
         "button": button,
@@ -537,7 +558,7 @@ def auto_published(conn) -> list[dict]:
         "SELECT t.*, m.original_name AS source_name FROM task_item t "
         "LEFT JOIN material m ON m.id=t.material_id "
         "WHERE t.auto_published = 1 AND t.import_status = 'checked' "
-        "AND t.excluded = 0 ORDER BY t.id"
+        "AND t.excluded = 0 AND t.withdrawn_at IS NULL ORDER BY t.id"
     ).fetchall()
     catalog = load_catalog(conn)
     return [

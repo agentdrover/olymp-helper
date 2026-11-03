@@ -33,9 +33,11 @@ def leak_notice(task) -> str | None:
 
 
 def is_published(task) -> bool:
-    """checked, не исключено, в условии нет текста ответа; рисунок - только с подтверждённым ключом и подтверждённым рисунком;
+    """checked, не исключено, не снято родителем, в условии нет текста ответа; рисунок - только с подтверждённым ключом и подтверждённым рисунком;
     без рисунка нужен ключ или model_answer."""
-    if task["import_status"] != PUBLISHED_STATUS or task["excluded"] or leak_of(task):
+    if task["import_status"] != PUBLISHED_STATUS or task["excluded"] or task["withdrawn_at"]:
+        return False
+    if leak_of(task):
         return False
     figure = figure_of(task)
     if figure is not None:

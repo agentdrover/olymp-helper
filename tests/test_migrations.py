@@ -169,7 +169,7 @@ def test_numeric_type_migration_keeps_the_data(tmp_path):
     names = [r[1] for r in conn.execute("PRAGMA table_info(task_item)")]
     old[names.index("topic")] = None  # 0009: a topic outside the catalog is cleared
     assert [tuple(r) for r in conn.execute("SELECT * FROM task_item").fetchall()] == [
-        (*old, None, None, None, None, 0, None, 0)  # old columns kept; later fields empty or off
+        (*old, None, None, None, None, 0, None, 0, *[None] * 6)  # old columns kept; later fields empty or off
     ]
     try:  # the unique index of (material, section, number) was recreated
         conn.execute(
