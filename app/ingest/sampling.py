@@ -1,18 +1,12 @@
-"""Выборка прошедших конвейер для родителя (OH-K5c, решение владельца 27.10).
+"""One durable sample counter for publication pipelines and parent outcomes."""
 
-Из заданий, опубликованных без родителя, родителю показывается каждое 5-е. Пока родитель
-проверил подряд 20 заданий выборки и не нашёл ни одной ошибки, - каждое 10-е; найденная ошибка
-возвращает выборку к каждому 5-му. Решение «в выборке» принимается при записи задания и хранится
-в `sample_state`: позже оно не пересчитывается, поэтому смена шага не двигает уже отобранные.
-"""
+import hashlib
+import json
 
-import sqlite3
+from app.ingest.store import atomic
 
-EVERY = 5
-EVERY_CLEAN = 10
-CLEAN_AFTER = 20
+HOLD_TEXT_SAMPLE = "Задание прошло конвейер и ждёт вашей проверки перед публикацией."
 
-# Ворота конвейера и их подписи для журнала. Ворота называет pipeline.Stop.
 GATES = {
     "topic": "тема не из каталога",
     "no_critic": "нет критика другого семейства",
@@ -29,23 +23,67 @@ GATES = {
 }
 
 
-def clean_streak(conn: sqlite3.Connection) -> int:
-    """Сколько заданий выборки родитель проверил подряд без найденной ошибки."""
-    return conn.execute(
-        "SELECT COUNT(*) FROM task_item WHERE sample_state = 'ok' AND sample_review_no > "
-        "COALESCE((SELECT MAX(sample_review_no) FROM task_item WHERE sample_state = 'error'), 0)"
-    ).fetchone()[0]
+def text_digest(task) -> str:
+    fields = ("type", "text", "options", "answer_key", "key_source", "key_version")
+    return hashlib.sha256(json.dumps([task[field] for field in fields]).encode()).hexdigest()
 
 
-def every(conn: sqlite3.Connection) -> int:
-    return EVERY_CLEAN if clean_streak(conn) >= CLEAN_AFTER else EVERY
+def state(conn) -> dict:
+    row = conn.execute(
+        "SELECT passed,clean_streak FROM pipeline_sampling_state WHERE id=1"
+    ).fetchone()
+    return {"passed": row[0], "clean_streak": row[1], "interval": 10 if row[1] >= 20 else 5}
 
 
-def new_sample_state(conn: sqlite3.Connection) -> str | None:
-    """'pending', если очередное прошедшее задание идёт в выборку, иначе None. Считаются
-    прошедшие после последнего отобранного: так шаг 5 -> 10 и обратно не теряет и не дублирует."""
-    waited = conn.execute(
-        "SELECT COUNT(*) FROM task_item WHERE pipeline_outcome = 'passed' AND id > "
-        "COALESCE((SELECT MAX(id) FROM task_item WHERE sample_state IS NOT NULL), 0)"
-    ).fetchone()[0]
-    return "pending" if waited + 1 >= every(conn) else None
+def reserve(conn, task_id: int, revision: int, digest: str) -> bool:
+    """Called inside the publication transaction; a repeated revision never advances it."""
+    with atomic(conn):
+        old = conn.execute(
+            "SELECT chosen,input_digest FROM pipeline_sample WHERE task_item_id=? AND revision=?",
+            (task_id, revision),
+        ).fetchone()
+        if old:
+            if old[1] != digest:
+                raise ValueError("Revision content changed after sampling")
+            return bool(old[0])
+        current = state(conn)
+        ordinal = current["passed"] + 1
+        chosen = ordinal % current["interval"] == 0
+        conn.execute("UPDATE pipeline_sampling_state SET passed=? WHERE id=1", (ordinal,))
+        conn.execute(
+            "INSERT INTO pipeline_sample(task_item_id,revision,input_digest,ordinal,chosen) "
+            "VALUES(?,?,?,?,?)",
+            (task_id, revision, digest, ordinal, int(chosen)),
+        )
+        return chosen
+
+
+def matches_pending(conn, task_id: int, revision: int, digest: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM pipeline_sample WHERE task_item_id=? AND revision=? "
+            "AND input_digest=? AND chosen=1 AND outcome IS NULL",
+            (task_id, revision, digest),
+        ).fetchone()
+        is not None
+    )
+
+
+def parent_outcome(conn, task_id: int, revision: int, outcome: str) -> None:
+    """Only an explicit confirmation/edit/exclusion resolves a sample; opening it does not."""
+    with atomic(conn):
+        eligible = (
+            "outcome IS NULL" if outcome == "clean" else "(outcome IS NULL OR outcome='clean')"
+        )
+        updated = conn.execute(
+            "UPDATE pipeline_sample SET outcome=? WHERE task_item_id=? AND revision=? "
+            f"AND chosen=1 AND {eligible}",
+            (outcome, task_id, revision),
+        ).rowcount
+        if updated:
+            if outcome == "clean":
+                conn.execute(
+                    "UPDATE pipeline_sampling_state SET clean_streak=clean_streak+1 WHERE id=1"
+                )
+            else:
+                conn.execute("UPDATE pipeline_sampling_state SET clean_streak=0 WHERE id=1")

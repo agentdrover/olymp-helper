@@ -3,9 +3,9 @@
 import sqlite3
 
 from app.ingest import sampling
-from app.ingest.publish import child_view, is_published
+from app.ingest.publish import child_view, is_published, leak_notice
 from app.ingest.review import SAMPLE_ERROR_NOTE, Refusal
-from app.ingest.store import atomic, get_task, mark_sample, new_revision, now, update_task
+from app.ingest.store import atomic, get_task, new_revision, now, update_task
 
 
 def _task(conn: sqlite3.Connection, task_id: int):
@@ -15,17 +15,29 @@ def _task(conn: sqlite3.Connection, task_id: int):
     return task
 
 
-def review_sample(conn: sqlite3.Connection, task_id: int, *, found_error: bool) -> None:
-    """Родитель проверил задание из выборки. Ошибка найдена - задание уходит в черновики (как
-    любая правка родителя: новая ревизия, ребёнок его больше не видит) и выборка учащается."""
+def review_sample(
+    conn: sqlite3.Connection, task_id: int, *, revision: int, digest: str, found_error: bool
+) -> None:
+    """Подтвердить показанную ревизию или вернуть её на правку."""
     with atomic(conn):
         task = _task(conn, task_id)
-        if task["sample_state"] != "pending" or not is_published(task):
-            raise Refusal("Задания нет в выборке или оно уже проверено.", 409)
+        if (
+            task["import_status"] != "draft"
+            or task["auto_hold"] != sampling.HOLD_TEXT_SAMPLE
+            or task["excluded"]
+            or task["withdrawn_at"]
+            or task["revision"] != revision
+            or sampling.text_digest(task) != digest
+            or not sampling.matches_pending(conn, task_id, revision, digest)
+        ):
+            raise Refusal("Выборка изменилась: обновите карточку перед подтверждением.", 409)
         if found_error:
-            new_revision(conn, task_id, review_note=SAMPLE_ERROR_NOTE)  # пометит ошибку выборки
-        else:
-            mark_sample(conn, task_id, "ok")
+            new_revision(conn, task_id, review_note=SAMPLE_ERROR_NOTE)
+            return
+        if warning := leak_notice(task):
+            raise Refusal(warning)
+        sampling.parent_outcome(conn, task_id, revision, "clean")
+        update_task(conn, task_id, import_status="checked", auto_hold=None)
 
 
 def withdraw(conn: sqlite3.Connection, task_id: int) -> None:
@@ -36,7 +48,7 @@ def withdraw(conn: sqlite3.Connection, task_id: int) -> None:
         if not is_published(task):
             raise Refusal("Снять можно только опубликованное задание.", 409)
         update_task(conn, task_id, withdrawn_at=now())
-        mark_sample(conn, task_id, "error")
+        sampling.parent_outcome(conn, task_id, task["revision"], "excluded")
 
 
 def published(conn: sqlite3.Connection) -> list[dict]:
@@ -73,22 +85,23 @@ def journal(conn: sqlite3.Connection) -> dict:
             "WHERE pipeline_outcome = 'failed' GROUP BY 1 ORDER BY 2 DESC, 1"
         ).fetchall()
     ]
-    errors = _count(conn, "sample_state = 'error'")
-    reviewed = _count(conn, "sample_state IN ('ok', 'error')")
+    sample = sampling.state(conn)
+    pending, reviewed, errors = conn.execute(
+        "SELECT COUNT(*) FILTER (WHERE s.outcome IS NULL AND s.revision = t.revision "
+        "AND t.import_status = 'draft' AND t.excluded = 0 AND t.withdrawn_at IS NULL), "
+        "COUNT(s.outcome), COUNT(*) FILTER (WHERE s.outcome IN ('edited', 'excluded')) "
+        "FROM pipeline_sample s JOIN task_item t ON t.id = s.task_item_id WHERE s.chosen = 1"
+    ).fetchone()
     return {
         "passed": _count(conn, "pipeline_outcome = 'passed'"),
         "rejected": sum(r["count"] for r in reasons),
         "reasons": reasons,
         "sample": {
-            "every": sampling.every(conn),
-            "pending": _count(
-                conn,
-                "sample_state = 'pending' AND import_status = 'checked' AND excluded = 0 "
-                "AND withdrawn_at IS NULL",
-            ),
+            "every": sample["interval"],
+            "pending": pending,
             "reviewed": reviewed,
             "errors": errors,
             "error_rate": errors / reviewed if reviewed else None,
-            "clean_streak": sampling.clean_streak(conn),
+            "clean_streak": sample["clean_streak"],
         },
     }

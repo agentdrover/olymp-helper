@@ -104,24 +104,12 @@ def save_snapshot(conn: sqlite3.Connection, task_id: int) -> None:
     )
 
 
-def mark_sample(conn: sqlite3.Connection, task_id: int, state: str) -> bool:
-    """Исход проверки родителем задания из выборки: 'ok' (только из 'pending') или 'error' (из
-    'pending' и из принятого 'ok': ошибку находят и позже). Номер проверки задаёт порядок, по
-    нему считается серия без ошибок. True - исход записан."""
-    before = ("pending",) if state == "ok" else ("pending", "ok")
-    marks = ",".join("?" * len(before))
-    cur = conn.execute(
-        "UPDATE task_item SET sample_state = ?, sample_review_no = "
-        "(SELECT COALESCE(MAX(sample_review_no), 0) + 1 FROM task_item) "
-        f"WHERE id = ? AND sample_state IN ({marks})",
-        (state, task_id, *before),
-    )
-    return cur.rowcount > 0
-
-
 def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
     """Правка, создающая новую ревизию: «проверено» снимается, model_answer сбрасывается."""
     task = get_task(conn, task_id)
+    from app.ingest import figure_proof, sampling
+
+    sampling.parent_outcome(conn, task_id, task["revision"], "edited")
     status = "draft" if task["import_status"] == "checked" else task["import_status"]
     fields = {
         "revision": task["revision"] + 1,
@@ -133,7 +121,11 @@ def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
     if status == "draft":  # правка родителя: «проверено двумя моделями» больше не про это задание
         fields["auto_checked"] = 0
     fields.update(cols)
+    figure = fields.get("figure", figure_of(task))
+    if isinstance(figure, str):
+        figure = json.loads(figure)
+    if figure and figure.get("auto_verification"):
+        fields["figure"] = figure_proof.invalidate(figure)
     update_task(conn, task_id, **fields)
-    mark_sample(conn, task_id, "error")  # родитель правит задание из выборки: нашёл ошибку (K5c)
     save_snapshot(conn, task_id)
     return task["revision"] + 1

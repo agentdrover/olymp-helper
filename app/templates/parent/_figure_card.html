@@ -1,7 +1,8 @@
 {# Карточка «нужен рисунок» для ноутбука ≥1280×800: верхняя полоса и три колонки (#2121). #}
 <article class="card fc" data-task-id="{{ card.task_id }}" data-kind="{{ card.kind }}"
          data-counter="{{ counter or '' }}" data-figure-page="{{ card.figure_page or '' }}"
-         data-tile-count="{{ card.tiles|length }}">
+         data-tile-count="{{ card.tiles|length }}" data-revision="{{ card.revision }}"
+         data-proof-digest="{{ card.figure_proof_digest or '' }}">
   <header class="fc-bar">
     <div class="fc-title">
       <div class="fc-crumb"><span class="badge">{{ card.label }}</span> <span class="fc-counter">{{ counter or "" }}</span></div>
@@ -10,6 +11,9 @@
     <button data-action="exclude">Исключить</button>
     <button data-action="edit">Поправить текст <kbd>E</kbd></button>
     <button data-action="skip">Пропустить <kbd>→</kbd></button>
+    {% if card.figure_auto_verified %}
+    <button class="primary" data-action="accept-figure-sample">Проверил — принять без изменений</button>
+    {% endif %}
     <button class="primary" data-action="figure" id="publish" disabled>Подтвердить и опубликовать <kbd>Enter</kbd></button>
   </header>
   <div class="fc-notes-row">
@@ -44,7 +48,7 @@
         <p class="text">{{ card.text }}</p>
         <div id="figure-area" data-figure-area>{% with a=card.area %}{% include "parent/_figure_area.html" %}{% endwith %}</div>
         <p class="hint">Источник: {{ card.child.source }}</p>
-        <p class="hint" id="key-hint">{% if card.key_value is none %}Ключа нет — выберите сами. Без ключа задание не публикуется.{% elif card.key_source_label %}Кандидат: {{ card.key_source_label }} — проверьте его.{% elif card.key_is_candidate %}Ключ из загруженного файла — проверьте его.{% else %}Ключ задан — можно изменить.{% endif %}</p>
+        <p class="hint" id="key-hint">{% if card.key_value is none and card.proposed_figure_answer %}Обе модели предлагают ответ {{ card.proposed_figure_answer }}. Проверьте его: ключа сборника нет, без вашего подтверждения задание не публикуется.{% elif card.key_value is none %}Ключа нет — выберите сами. Без ключа задание не публикуется.{% elif card.key_source_label %}Кандидат: {{ card.key_source_label }} — проверьте его.{% elif card.key_is_candidate %}Ключ из загруженного файла — проверьте его.{% else %}Ключ задан — можно изменить.{% endif %}</p>
         {% if card.key_refusal %}<p class="hint">{{ card.key_refusal }} Выберите ответ сами.</p>{% endif %}
         {% if card.key_candidate_source_label %}<p class="hint">Ответ подтверждён родителем; предложен: {{ card.key_candidate_source_label }}.</p>{% endif %}
         {% if card.key and card.key_unverified %}<p>Ключ: <b>{{ card.key }}</b> ({{ card.key_source }}) <b>не проверен</b></p>{% endif %}
@@ -57,14 +61,23 @@
         <p class="hint" id="mode-hint">{{ card.mode.hint }}</p>
       </section>
       {# Место под «почему так» (#2111): только у родителя, ребёнку шаблон ребёнка его не отдаёт. #}
-      <div id="why-slot" class="why-slot" data-why-slot hidden></div>
+      <div id="why-slot" class="why-slot" data-why-slot{% if not card.figure_assessment %} hidden{% endif %}>
+        {% if card.figure_assessment %}
+        <h4>{{ 'Две независимые проверки' if card.figure_assessment.author and card.figure_assessment.critic else 'Результаты проверки рисунка' }}</h4>
+        {% if card.figure_assessment.agrees is defined %}<p>Ответы {{ 'совпали' if card.figure_assessment.agrees else 'разошлись' }}.</p>{% endif %}
+        {% for key in ['author', 'critic'] %}{% set result = card.figure_assessment.get(key) %}
+        {% if result %}<p><b>{{ 'Первая модель' if key == 'author' else 'Вторая модель' }}: {{ result.solution }}</b><br>{{ result.reasoning }}</p>{% endif %}
+        {% endfor %}
+        {% endif %}
+      </div>
     </div>
 
     <div class="fc-col fc-check">
       <h3>Проверка</h3>
+      {% if card.figure_auto_verified %}<p class="hint">Рисунок и описания прошли проверку двух моделей. Сверьте их и примите без изменений. Для правки откройте поля ниже.</p><details><summary>Исправить рисунок или описание</summary>{% endif %}
       <section class="fc-q">
         <h4>На картинках нет ответа?</h4>
-        <p class="hint">Подписей, стрелок с названиями и букв-ответов быть не должно.</p>
+        <p class="hint">Обычные обозначения и данные допустимы. Напечатанный ключ, выделение верного варианта и фрагмент решения раскрывают ответ.</p>
         {% if card.figure and card.figure.leak %}<p class="err" role="alert">В рамке напечатан текст ответа или вариантов: {{ card.figure.leak|join(", ") }}.</p>{% endif %}
         <p class="choices">
           <label><input type="radio" name="leak" value="none"> Ответа нет</label>
@@ -79,8 +92,8 @@
       </section>
       <details class="fc-notes">
         {% set n_items = card.figure_items|length %}
-        <summary id="notes-summary" data-total="{{ n_items }}">Описать рисунки для подсказок · 0 из {{ n_items }}</summary>
-        <p class="hint">Помощник картинок не видит. Опишите каждое обозначение одной строкой — ребёнку эти строки не показываются.</p>
+        <summary id="notes-summary" data-total="{{ n_items }}">{% if n_items %}Описать рисунки для подсказок · 0 из {{ n_items }}{% else %}Общее описание рисунка для подсказок{% endif %}</summary>
+        <p class="hint">Две модели могут подготовить и перепроверить описания по вырезке. Если есть сомнение, проверьте каждое обозначение. Ребёнку эти строки не показываются.</p>
         {% if card.figure_items %}
           {% for it in card.figure_items %}
           <label class="note-row">{{ it }} <input data-note="{{ it }}" size="30" value="{{ card.figure_notes.get(it, '') }}"></label>
@@ -98,6 +111,7 @@
         <div data-sum="alt"></div>
         <div data-sum="hints" class="hint"></div>
       </div>
+      {% if card.figure_auto_verified %}</details>{% endif %}
       <p class="hint">{% if card.topic_title %}После подтверждения ребёнок увидит задание в теме «{{ card.topic_title }}».{% else %}Тема не размечена: ребёнок увидит задание без названия темы.{% endif %}</p>
     </div>
   </div>

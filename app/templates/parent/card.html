@@ -2,6 +2,7 @@
 {% include "parent/_figure_card.html" %}
 {% elif card %}
 <article class="card" data-task-id="{{ card.task_id }}" data-kind="{{ card.kind }}"
+         data-revision="{{ card.revision }}" data-sample-digest="{{ card.sample_digest or '' }}"
          data-counter="{{ counter or '' }}" data-figure-page="{{ card.figure_page or '' }}">
   <p><span class="badge">{{ card.label }}</span></p>
   <div class="split">
@@ -45,7 +46,6 @@
       {% if card.kind == "sample" %}
         <button class="primary" data-action="sample-ok">Всё верно — проверено</button>
         <button data-action="sample-error">Нашёл ошибку</button>
-        <button data-action="withdraw">Снять задание</button>
       {% elif card.kind in ("confirm", "child_dispute") %}
         <button class="primary" data-action="confirm"{% if card.button_answer %} data-answer="{{ card.button_answer }}"{% endif %}>{{ card.button or "Ключ прав — оставить" }}</button>
       {% elif card.kind == "no_key" %}

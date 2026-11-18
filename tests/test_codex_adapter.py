@@ -114,11 +114,38 @@ def test_all_product_schemas_can_be_prepared():
     from app.chat.prompts import CHAT_SCHEMA
     from app.ingest.packs import SCHEMA as PACK_SCHEMA
     from app.ingest.page_normalizer import SCHEMA as PAGE_ANSWER_SCHEMA
+    from app.ingest.pipeline import CRITIC_SCHEMA, EDIT_SCHEMA
     from app.ingest.prompt import ANSWER_SCHEMA, TASKS_SCHEMA
     from app.tutor.prompts import JUDGE_SCHEMA, OUTPUT_SCHEMA
 
-    for schema in (CHAT_SCHEMA, PACK_SCHEMA, PAGE_ANSWER_SCHEMA, ANSWER_SCHEMA, TASKS_SCHEMA, JUDGE_SCHEMA, OUTPUT_SCHEMA):
+    for schema in (CHAT_SCHEMA, PACK_SCHEMA, CRITIC_SCHEMA, EDIT_SCHEMA, PAGE_ANSWER_SCHEMA, ANSWER_SCHEMA, TASKS_SCHEMA, JUDGE_SCHEMA, OUTPUT_SCHEMA):
         assert codex_schema(schema)['additionalProperties'] is False
+
+
+@pytest.mark.parametrize("kind", ["single", "multiple", "match", "numeric", "unfixable"])
+def test_editor_schema_is_supported_by_codex_transport(kind):
+    from app.ingest.pipeline import EDIT_SCHEMA
+
+    strict = codex_schema(EDIT_SCHEMA)
+    assert strict["additionalProperties"] is False
+    assert set(strict["required"]) == {"unfixable", "reason", "question"}
+    if kind == "unfixable":
+        reply = {"unfixable": True, "reason": "нельзя исправить", "question": None}
+        expected = {"unfixable": True, "reason": "нельзя исправить"}
+    else:
+        options = {
+            "single": [{"label": "А", "text": "растения"}],
+            "multiple": [{"label": "А", "text": "растения"}],
+            "match": {"left": [{"label": "1", "text": "ботаника"}],
+                      "right": [{"label": "А", "text": "растения"}]},
+            "numeric": None,
+        }[kind]
+        question = {"text": "Синтетический вопрос", "type": kind, "answer_key": "1"}
+        expected_question = {**question, **({"options": options} if options is not None else {})}
+        reply = {"unfixable": False, "reason": None,
+                 "question": {**question, "options": options, "explanation": None}}
+        expected = {"unfixable": False, "question": expected_question}
+    assert restore_optional_fields(reply, EDIT_SCHEMA) == expected
 
 
 def test_runner_uses_fresh_minimal_proxy_home_and_cleans_it(tmp_path, monkeypatch):

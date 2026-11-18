@@ -131,12 +131,14 @@ def build_request(
 ) -> tuple[str, list[dict]]:
     """(system, messages). mode - hint1, hint2, mistake, solution или explain_<имя>."""
     options = json.loads(task["options"]) if task["options"] else None
-    figure = json.loads(task["figure"]) if task["figure"] else None
+    from app.ingest.figure_proof import trusted_note
+
+    note = trusted_note(task)
     parts = [f"Условие: {neutralize(task['text'])}"]
     if options:
         parts.append("Варианты:\n" + neutralize(_options_text(options)))
-    if use_note and figure and figure.get("teacher_note"):
-        parts.append("Пояснение к рисунку: " + neutralize(figure["teacher_note"]))
+    if use_note and note:
+        parts.append("Пояснение к рисунку: " + neutralize(note))
     child = []
     for i, att in enumerate(attempts, 1):
         mark = {"sure": "уверен", "doubt": "сомневаюсь"}.get(att.get("confidence"), "не отмечено")
@@ -229,13 +231,15 @@ def build_judge_request(
     task, text: str, answer_text: str, purpose: str = "reveal", shown=(), attempts=()
 ):
     options = json.loads(task["options"]) if task["options"] else None
-    figure = json.loads(task["figure"]) if task["figure"] else None
+    from app.ingest.figure_proof import trusted_note
+
+    note = trusted_note(task)
     parts = [f"Условие: {neutralize(task['text'])}"]
     if options:
         parts.append("Варианты:\n" + neutralize(_options_text(options)))
     parts.append("Верный ответ: " + neutralize(answer_text))
-    if figure and figure.get("teacher_note"):
-        parts.append("Скрытое пояснение к рисунку: " + neutralize(figure["teacher_note"]))
+    if note:
+        parts.append("Скрытое пояснение к рисунку: " + neutralize(note))
     content = (
         f"Режим: judge\n{JUDGE_QUESTION[purpose]}\n"
         "Ниже блоки данных.\n<task_data>\n" + "\n".join(parts) + "\n</task_data>\n"

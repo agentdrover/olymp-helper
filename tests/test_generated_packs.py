@@ -342,7 +342,7 @@ def test_the_migration_upgrades_a_v9_database_keeping_the_data(tmp_path):
     assert migrate(conn) == SCHEMA_VERSION >= 10  # later migrations (0011_auth, ...) stack on top
     after = conn.execute("SELECT * FROM task_item").fetchall()
     assert (
-        [tuple(r) for r in after] == [(*before[0], None, None, 0, None, 0, *[None] * 6)]
+        [tuple(r) for r in after] == [(*before[0], None, None, 0, None, 0, *[None] * 4)]
     )  # old columns kept; pack_id, key_candidate_source, auto_hold, K5c fields empty, auto_published and auto_checked off
     assert conn.execute("SELECT COUNT(*) FROM task_revision").fetchone()[0] == 1
     conn.execute(

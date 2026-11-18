@@ -30,7 +30,7 @@ def test_existing_main_database_upgrades_without_losing_data(tmp_path, monkeypat
             0,
             None,
             0,
-            *[None] * 6,
+            *[None] * 4,
         )
         assert conn.execute("SELECT * FROM settings").fetchall() == settings
         assert conn.execute("SELECT number,answer FROM key_entry").fetchall() == [("1", "Б")]

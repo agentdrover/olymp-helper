@@ -286,6 +286,7 @@ def confirm_figure(
     figure = figure_of(task)
     if figure is None or task["excluded"]:
         raise Refusal("У этого задания нет рисунка для подтверждения.")
+    figure.pop("auto_verification", None)  # This request records a parent's own crop approval.
     material = conn.execute(
         "SELECT file FROM material WHERE id = ?", (task["material_id"],)
     ).fetchone()
@@ -550,17 +551,35 @@ def recheck_figure(
     if own:
         shared = _Shared(ctx, conn, task["material_id"])
     try:
+        from app.ingest import figure_proof
+        from app.ingest.answers import key_value
+
+        machine_verified = figure_proof.verified(task)
         regions = figures.regions_of(figure)
         found = []
         if regions and shared.gone:
             found = list(figure.get("leak") or [])  # вырезку не перечитать: прежнее найденное
         elif regions:
-            found = shared.leaks(task, regions)
+            from app.ingest.figure_proof import crop_leaks, verified
+
+            if verified(task):
+                units = leak_units(conn, task)
+                found = crop_leaks(shared.lines(task, regions), units)
+            else:
+                found = shared.leaks(task, regions)
             for tile in tiles.stored_tiles(figure) or []:  # плитки проверяются каждая отдельно
                 part = shared.leaks(task, [{"page": tile["page"], "rect": tile["rect"]}])
+                if verified(task):
+                    part = crop_leaks(
+                        shared.lines(task, [{"page": tile["page"], "rect": tile["rect"]}]), units
+                    )
                 found += [x for x in part if x not in found]
-        alt_bad = figures.alt_problem(
-            figure.get("alt", ""), options_of(task), shared.labels[task_id]
+        alt_bad = (
+            figure_proof.alt_problem(task, figure.get("alt", ""), key_value(task["answer_key"]))
+            if machine_verified
+            else figures.alt_problem(
+                figure.get("alt", ""), options_of(task), shared.labels[task_id]
+            )
         )
     finally:
         if own:
@@ -602,6 +621,9 @@ def recheck_materials_figures(ctx, conn, material_ids) -> None:
     """Проверить подтверждённые рисунки всех заданий материалов: у каждого задания защита от
     утечки включает ответы остальных заданий материала. Решение родителя об ответе в вырезке
     остаётся, если найденное не изменилось."""
+    from app.ingest.figure_pipeline import revalidate_official
+
+    revalidate_official(ctx, conn)
     for material_id in sorted(material_ids):
         shared = _Shared(ctx, conn, material_id)
         try:

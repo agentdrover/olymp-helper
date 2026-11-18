@@ -2,6 +2,7 @@
 
 import json
 
+from app.ingest import sampling
 from app.ingest.answers import display, key_json, key_value, normalize_answer
 from app.ingest.keys import candidate, page_refusal
 from app.ingest.model_answer import compute_model_answer, model_value
@@ -11,7 +12,6 @@ from app.ingest.store import (
     atomic,
     figure_of,
     get_task,
-    mark_sample,
     new_revision,
     options_of,
     save_snapshot,
@@ -32,8 +32,7 @@ LABELS = {
 }
 FAILED_LABEL = "не прошло конвейер"
 SAMPLE_HINT = (
-    "Задание прошло конвейер и опубликовано без вас: это выборка. Проверьте условие и ответ. "
-    "Нашли ошибку - отметьте её: задание вернётся к вам черновиком, выборка станет чаще."
+    sampling.HOLD_TEXT_SAMPLE + " Проверьте условие и ответ."
 )
 SAMPLE_ERROR_NOTE = "Родитель нашёл ошибку в выборке: проверьте и поправьте задание"
 
@@ -147,7 +146,11 @@ def set_key(
             "key_version": task["key_version"] + 1,
             "key_candidate_source": candidate_source,
         }
-        if task["import_status"] == "checked":
+        if (
+            task["import_status"] == "checked"
+            or task["auto_hold"] == sampling.HOLD_TEXT_SAMPLE
+            or (figure_of(task) or {}).get("auto_verification")
+        ):
             new_revision(conn, task_id, **cols)
         else:
             update_task(conn, task_id, **cols)
@@ -251,10 +254,10 @@ def edit_task(
 
 
 def exclude_task(conn, task_id: int) -> None:
-    _task(conn, task_id)
     with atomic(conn):
+        task = _task(conn, task_id)
+        sampling.parent_outcome(conn, task_id, task["revision"], "excluded")
         update_task(conn, task_id, excluded=1)
-        mark_sample(conn, task_id, "error")  # исключено из выборки: ошибка найдена
 
 
 # ----------------------------------------------------------------------- споры
@@ -283,6 +286,8 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     task = _task(conn, task_id)
     if task["excluded"]:
         raise Refusal("Задание исключено.")
+    if task["auto_hold"] == sampling.HOLD_TEXT_SAMPLE:
+        raise Refusal("Подтвердите показанную выборку кнопкой принятия без изменений.", 409)
     if task["import_status"] == "unsupported":
         raise Refusal(
             task["unsupported_reason"]
@@ -294,7 +299,9 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     figure = figure_of(task)
     if figure is not None and not figure.get("confirmed"):
         raise Refusal("Сначала подтвердите рисунок.")
-    if figure is not None and not figure.get("no_answer_ack"):
+    from app.ingest.figure_proof import verified
+
+    if figure is not None and not figure.get("no_answer_ack") and not verified(task):
         raise Refusal("Отметьте: в рисунке и в описании нет ответа (шаг 1 карточки рисунка).")
     has_answer = answer is not None and str(answer).strip() != ""
     if has_answer:
@@ -313,10 +320,13 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     task = _task(conn, task_id)
     if task["import_status"] == "unsupported":  # новый ключ вернул рисунок на проверку
         raise Refusal(task["unsupported_reason"])
+    if figure_of(task) is not None and not figure_of(task).get("confirmed"):
+        raise Refusal("После правки ключа подтвердите рисунок заново.")
     if figure_of(task) is not None:
         missing = uncovered_lefts(task, key_value(task["answer_key"]))
         if missing:
             raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
+    sampling.parent_outcome(conn, task_id, task["revision"], "clean" if verified(task) else "edited")
     update_task(conn, task_id, import_status="checked", auto_checked=0, auto_hold=None)
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
@@ -381,6 +391,10 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     if task["excluded"] or task["withdrawn_at"]:
         return None
     figure = figure_of(task)
+    from app.ingest.figure_pipeline import HOLD_SAMPLE, assessment
+    from app.ingest.figure_proof import verified
+
+    image_report = assessment(conn, task) if figure else None
     status = task["import_status"]
     key, source, _ = key_info(conn, task)
     unverified = source in SOURCE_LABELS
@@ -390,7 +404,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     kind, hint = None, ""
     if status == "checked" and _open_dispute(conn, task):
         kind, hint = "child_dispute", "Ребёнок считает ключ спорным. Проверьте ответ."
-    elif status == "checked" and task["sample_state"] == "pending":
+    elif status == "draft" and task["auto_hold"] == sampling.HOLD_TEXT_SAMPLE:
         kind, hint = "sample", SAMPLE_HINT
     elif status == "unsupported":
         if task["type"] == "open":
@@ -402,6 +416,8 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
                 "Нужен рисунок: подтвердите найденный или поправьте рамку и alt, либо впишите "
                 "самодостаточное условие."
             )
+    elif figure and task["auto_hold"] == HOLD_SAMPLE:
+        kind, hint = "needs_figure", HOLD_SAMPLE
     elif (
         status == "checked" and figure is None and trusted is None and task["model_answer"] is None
     ):
@@ -431,7 +447,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         hint = (
             f"Конвейер не пропустил задание: {task['pipeline_reason']}. Проверьте условие и ответ."
         )
-    if task["auto_hold"] and status == "draft":
+    if task["auto_hold"] and status in ("draft", "unsupported") and task["auto_hold"] not in hint:
         hint = f"{hint} {task['auto_hold']}".strip()
     # Две разные страницы: текст проверяется по page_from..page_to, рисунок - на своей.
     first, last = task["page_from"], task["page_to"] or task["page_from"]
@@ -450,10 +466,15 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
             if key is not None
             else "Верно — подтвердить и дальше"
         )
+    label = LABELS[kind]
+    if failed:
+        label = FAILED_LABEL
+    elif task["auto_hold"] == HOLD_SAMPLE:
+        label = "выборочная проверка"
     card = {
         "task_id": task["id"],
         "kind": kind,
-        "label": FAILED_LABEL if failed else LABELS[kind],
+        "label": label,
         "hint": hint,
         "note": None if recorded_failure else task["review_note"],
         "pipeline_failed": failed,
@@ -491,9 +512,16 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "model_agrees": agrees,
         "figure": figure,
         "revision": task["revision"],
+        "sample_digest": sampling.text_digest(task) if kind == "sample" else None,
         "auto_published": bool(task["auto_published"]),
         "auto_note": AUTO_NOTE if task["auto_published"] else None,
         "auto_hold": task["auto_hold"],
+        "figure_assessment": image_report,
+        "figure_auto_verified": verified(task),
+        "figure_proof_digest": (figure or {}).get("auto_verification", {}).get("digest"),
+        "proposed_figure_answer": display(image_report["author"]["value"])
+        if image_report and image_report.get("agrees")
+        else None,
     }
     if kind == "needs_figure" and figure is not None:
         from app.ingest.figure_card import card_extras  # figure_service импортирует review
@@ -554,7 +582,7 @@ def task_detail(ctx, conn, task_id: int) -> dict:
 
 
 def auto_published(conn) -> list[dict]:
-    """Задания, опубликованные без родителя: родитель видит их здесь (и выборка K5c)."""
+    """Задания, опубликованные без родителя: родитель видит их здесь."""
     rows = conn.execute(
         "SELECT t.*, m.original_name AS source_name FROM task_item t "
         "LEFT JOIN material m ON m.id=t.material_id "

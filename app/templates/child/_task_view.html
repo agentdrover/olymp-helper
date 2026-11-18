@@ -4,7 +4,7 @@
   {% if task.figure and task.figure.tiles %}
   <figure class="figure figure-tiles">
     {% with tiles=task.figure.tiles, editor=False, alt=task.figure.alt, zoom=not preview %}{% include "child/_tiles.html" %}{% endwith %}
-    <figcaption class="hint">Рисунок: {{ task.source }}{% if not preview %} · вырезан и проверен родителем{% endif %}</figcaption>
+    <figcaption class="hint">Рисунок: {{ task.source }}{% if not preview %} · {{ 'проверено двумя моделями' if task.verified_by_two_models else 'вырезан и проверен родителем' }}{% endif %}</figcaption>
   </figure>
   {% if not preview %}<dialog class="zoom" id="zoom" aria-label="Рисунок крупно">
     <button type="button" data-close-zoom>Закрыть · Esc</button>
@@ -14,7 +14,7 @@
   {% elif task.figure %}
   <figure class="figure">
     <a href="{{ task.figure.url }}"{% if not preview %} data-zoom{% endif %}><img src="{{ task.figure.url }}" alt="{{ task.figure.alt }}" data-figure-img></a>
-    <figcaption class="hint">Рисунок: {{ task.source }}{% if not preview %} · вырезан и проверен родителем
+    <figcaption class="hint">Рисунок: {{ task.source }}{% if not preview %} · {{ 'проверено двумя моделями' if task.verified_by_two_models else 'вырезан и проверен родителем' }}
       <button type="button" data-zoom>Открыть крупно</button>{% endif %}</figcaption>
   </figure>
   {% if not preview %}<dialog class="zoom" id="zoom" aria-label="Рисунок крупно">

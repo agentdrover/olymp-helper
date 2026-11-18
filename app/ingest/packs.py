@@ -10,13 +10,13 @@ import logging
 import re
 from dataclasses import dataclass
 
+from app.ingest import sampling
 from app.ingest.answers import display, key_json, normalize_answer
 from app.ingest.importer import FIGURE_WORDS
 from app.ingest.leaks import condition_leaks, norm
 from app.ingest.prompt import OPTIONS_SCHEMA, neutralize
-from app.ingest.sampling import new_sample_state
 from app.ingest.schema import InvalidStructure, validate_tasks
-from app.ingest.store import atomic, now, save_snapshot
+from app.ingest.store import atomic, get_task, now, save_snapshot, update_task
 from app.ingest.topics import load_catalog
 from app.model.types import LIMIT_MESSAGE
 
@@ -221,7 +221,7 @@ def _check_labels(options) -> None:
             _fail("обозначения вариантов совпадают после нормализации")
 
 
-def check_item(raw, kind: str) -> dict:
+def check_item(raw, kind: str, *, allow_figure: bool = False) -> dict:
     """Задание из ответа модели в виде, готовом к записи; иначе InvalidStructure с причиной."""
     if not isinstance(raw, dict):
         _fail("ожидался объект")
@@ -252,7 +252,7 @@ def check_item(raw, kind: str) -> dict:
         _fail("задание на рисование не поддерживается")
     if parsed["answer_text"]:
         _fail("в условии остались элементы ответа")
-    if FIGURE_WORDS.search(parsed["text"]):
+    if not allow_figure and FIGURE_WORDS.search(parsed["text"]):
         _fail("условие ссылается на рисунок, схему или таблицу, а их у вопроса нет")
     options = parsed["options"]
     _check_labels(options)
@@ -266,7 +266,7 @@ def check_item(raw, kind: str) -> dict:
         if kind != "truefalse" and not 3 <= size <= 8:
             _fail("вариантов должно быть от 3 до 8")
     parsed["value"] = _check_key(parsed, raw.get("answer_key"))
-    if condition_leaks(parsed["text"], display(parsed["value"]), bank_type):
+    if not allow_figure and condition_leaks(parsed["text"], display(parsed["value"]), bank_type):
         _fail("ответ назван в условии")
     explanation = raw.get("explanation")
     parsed["explanation"] = explanation.strip()[:2000] if isinstance(explanation, str) else ""
@@ -339,14 +339,14 @@ def _bank_texts(conn) -> list[str]:
     return [r[0] for r in conn.execute("SELECT text FROM task_item WHERE excluded = 0")]
 
 
-def _insert(conn, pack_id: int, number: int, topic: str, task: dict, verdict) -> None:
+def _insert(conn, pack_id: int, number: int, topic: str, task: dict, verdict) -> bool:
     published = verdict.published
     note = None if published else f"{GENERATED_NOTE} Не опубликовано без вас: {verdict.reason}."
     cur = conn.execute(
         "INSERT INTO task_item (material_id, source_number, type, text, options, topic, "
         "import_status, answer_key, key_source, review_note, parent_note, pack_id, auto_checked, "
-        "pipeline_outcome, pipeline_gate, pipeline_reason, sample_state) "
-        "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?, ?)",
+        "pipeline_outcome, pipeline_gate, pipeline_reason) "
+        "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?)",
         (
             f"Г{pack_id}.{number}",
             task["type"],
@@ -362,10 +362,23 @@ def _insert(conn, pack_id: int, number: int, topic: str, task: dict, verdict) ->
             "passed" if published else "failed",
             None if published else verdict.gate or "other",
             None if published else verdict.reason,
-            new_sample_state(conn) if published else None,
         ),
     )
-    save_snapshot(conn, cur.lastrowid)
+    task_id = cur.lastrowid
+    held = False
+    if published:
+        item = get_task(conn, task_id)
+        held = sampling.reserve(conn, task_id, item["revision"], sampling.text_digest(item))
+        if held:
+            update_task(
+                conn,
+                task_id,
+                import_status="draft",
+                auto_checked=0,
+                auto_hold=sampling.HOLD_TEXT_SAMPLE,
+            )
+    save_snapshot(conn, task_id)
+    return published and not held
 
 
 def _write(conn, pack_id: int, topic: str, vetted: list, rejected: list, channel) -> None:
@@ -380,9 +393,9 @@ def _write(conn, pack_id: int, topic: str, vetted: list, rejected: list, channel
             if where and verdict.published:  # за время запросов появилось такое же: к родителю
                 verdict = Verdict(False, task, "повтор: " + where, "duplicate")
             known.append((tokens, f"повторяет вопрос {task['number']} этой же пачки"))
-            _insert(conn, pack_id, number, topic, task, verdict)
-            published += verdict.published
-            saved += not verdict.published
+            released = _insert(conn, pack_id, number, topic, task, verdict)
+            published += released
+            saved += not released
         conn.execute(
             "UPDATE question_pack SET status = 'done', error = NULL, accepted_count = ?, "
             "published_count = ?, rejected = ?, channel = ? WHERE id = ?",

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from app.ingest.answers import display, normalize_answer
 from app.ingest.leaks import norm
 from app.ingest.packs import KINDS, Verdict, _example_text, check_item
-from app.ingest.prompt import neutralize
+from app.ingest.prompt import OPTIONS_SCHEMA, neutralize
 from app.ingest.schema import InvalidStructure
 from app.model.client import MAX_REQUEST_BYTES, request_size
 from app.model.types import CHANNELS
@@ -52,7 +52,7 @@ EDIT_SCHEMA = {
             "properties": {
                 "text": {"type": "string"},
                 "type": {"enum": ["single", "multiple", "match", "numeric"]},
-                "options": {},
+                "options": OPTIONS_SCHEMA,
                 "answer_key": {"type": "string"},
                 "explanation": {"type": "string"},
             },

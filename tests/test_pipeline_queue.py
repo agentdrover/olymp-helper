@@ -75,8 +75,17 @@ def kinds(c) -> dict:
     return out
 
 
+def sample_body(c, task_id) -> dict:
+    r = c.get(f"/parent/tasks/{task_id}", headers=PARENT)
+    assert r.status_code == 200, r.text
+    card = r.json()["card"]
+    assert card and card["kind"] == "sample"
+    return {"revision": card["revision"], "digest": card["sample_digest"]}
+
+
 def judge(c, task_id, found_error=False):
-    r = c.post(f"/parent/tasks/{task_id}/sample", headers=PARENT, json={"found_error": found_error})
+    body = {**sample_body(c, task_id), "found_error": found_error}
+    r = c.post(f"/parent/tasks/{task_id}/sample", headers=PARENT, json=body)
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -114,6 +123,8 @@ def test_the_parent_sees_failures_and_a_sample(tmp_path):
         assert cards[failed[0]]["label"] == "не прошло конвейер"
         assert cards[found["sample"][0]]["label"] == "выборка прошедших"
         assert journal(c)["sample"]["every"] == 5
+        visible = {t["id"] for t in c.get("/api/tasks", headers=CHILD).json()["tasks"]}
+        assert visible == set(passed) - set(found["sample"])
 
         # the parent checks the five and finds nothing: 5 clean checks, still every 5th
         for tid in found["sample"]:
@@ -149,13 +160,13 @@ def test_the_parent_sees_failures_and_a_sample(tmp_path):
         assert listed.isdisjoint(failed) and set(passed) <= listed
 
 
-
 @pytest.mark.parametrize("passed_count", [5, 10])
 def test_a_sample_error_keeps_its_draft_in_the_feed(tmp_path, passed_count):
     with boot(tmp_path) as c:
         ids = land(tmp_path, [True] * passed_count)
         first = ids[4]
         assert [card["task_id"] for card in queue(c)] == ids[4::5]
+        assert c.get(f"/api/tasks/{first}", headers=CHILD).status_code == 404
 
         draft = judge(c, first, found_error=True)["next"]
         assert draft is not None and (draft["task_id"], draft["kind"]) == (first, "confirm")
@@ -270,6 +281,7 @@ def test_a_parents_edit_exclusion_or_withdrawal_of_a_sampled_task_is_a_found_err
         edit = c.post(f"/parent/tasks/{sampled[0]}/edit", headers=PARENT, json={"text": "Новое?"})
         assert edit.status_code == 200, edit.text
         assert c.post(f"/parent/tasks/{sampled[1]}/exclude", headers=PARENT).status_code == 200
+        judge(c, sampled[2])
         assert c.post(f"/parent/tasks/{sampled[2]}/withdraw", headers=PARENT).status_code == 200
         sample = journal(c)["sample"]
         assert (sample["reviewed"], sample["errors"], sample["pending"]) == (3, 3, 0)
@@ -286,13 +298,21 @@ def test_only_a_pending_sample_can_be_judged(tmp_path):
         ids = land(tmp_path, [True] * 5 + [("leak", "в условии очевидный признак ответа (х)")])
         picked, failed = ids[4], ids[5]
         other = ids[0]  # published, but not in the sample
+        body = sample_body(c, picked)
         for tid in (other, failed):
-            r = c.post(f"/parent/tasks/{tid}/sample", headers=PARENT, json={})
+            r = c.post(f"/parent/tasks/{tid}/sample", headers=PARENT, json=body)
             assert r.status_code == 409, tid
-        assert c.post("/parent/tasks/9999/sample", headers=PARENT, json={}).status_code == 404
+        assert c.post("/parent/tasks/9999/sample", headers=PARENT, json=body).status_code == 404
         assert c.post(f"/parent/tasks/{failed}/withdraw", headers=PARENT).status_code == 409
-        judge(c, picked)
-        assert c.post(f"/parent/tasks/{picked}/sample", headers=PARENT, json={}).status_code == 409
+        url = f"/parent/tasks/{picked}/sample"
+        assert c.post(f"/parent/tasks/{picked}/confirm", headers=PARENT).status_code == 409
+        assert c.post(url, headers=PARENT, json={**body, "digest": "stale"}).status_code == 409
+        stale = {**body, "revision": body["revision"] + 1, "found_error": True}
+        assert c.post(url, headers=PARENT, json=stale).status_code == 409
+        assert c.get(f"/api/tasks/{picked}", headers=CHILD).status_code == 404
+        assert c.post(url, headers=PARENT, json=body).status_code == 200
+        assert c.get(f"/api/tasks/{picked}", headers=CHILD).status_code == 200
+        assert c.post(url, headers=PARENT, json=body).status_code == 409
         # a failed question is an ordinary draft card: confirming it publishes it, off the queue
         card = next(x for x in queue(c) if x["task_id"] == failed)
         assert card["button"] and "Конвейер не пропустил" in card["hint"]
@@ -316,8 +336,8 @@ def test_the_migration_marks_tasks_that_already_went_through_the_pipeline(tmp_pa
     files = schema._migration_files()
     conn = schema.connect(tmp_path / "olymp.db")
     try:
-        monkeypatch.setattr(schema, "_migration_files", lambda: [f for f in files if f[0] <= 18])
-        assert schema.migrate(conn) == 18
+        monkeypatch.setattr(schema, "_migration_files", lambda: [f for f in files if f[0] <= 19])
+        assert schema.migrate(conn) == 19
         conn.execute(
             "INSERT INTO question_pack (id, created_at, topic, task_type, requested_count) "
             "VALUES (1, 'now', 'b10.cell', 'single', 3)"
@@ -339,13 +359,13 @@ def test_the_migration_marks_tasks_that_already_went_through_the_pipeline(tmp_pa
         got = {
             r[0]: r[1:]
             for r in conn.execute(
-                "SELECT id, pipeline_outcome, pipeline_gate, pipeline_reason, sample_state, "
+                "SELECT id, pipeline_outcome, pipeline_gate, pipeline_reason, "
                 "withdrawn_at FROM task_item"
             )
         }
-        assert got[1] == ("passed", None, None, None, None)
-        assert got[2] == ("failed", "other", "критик решил иначе", None, None)
-        assert got[3] == (None, None, None, None, None)
+        assert got[1] == ("passed", None, None, None)
+        assert got[2] == ("failed", "other", "критик решил иначе", None)
+        assert got[3] == (None, None, None, None)
     finally:
         conn.close()
 
@@ -360,8 +380,10 @@ def test_an_error_found_in_an_accepted_sample_resets_the_streak(tmp_path):
         assert journal(c)["sample"]["clean_streak"] == 2
         # published without the parent, whether sampled or not, the parent can withdraw them
         listed = c.get("/parent/review/auto/list", headers=PARENT).text
-        for tid in ids:
+        for tid in set(ids) - {first, second}:
             assert f'data-withdraw="{tid}"' in listed
+        assert f'data-withdraw="{first}"' not in listed
+        assert f'data-withdraw="{first}"' in c.get("/parent/published", headers=PARENT).text
         # the error in an already accepted sample is found later: it counts as an error
         assert c.post(f"/parent/tasks/{first}/withdraw", headers=PARENT).status_code == 200
         sample = journal(c)["sample"]

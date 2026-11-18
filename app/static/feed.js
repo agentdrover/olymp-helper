@@ -159,10 +159,18 @@
     el.classList.toggle("bad", ok === false);
   }
 
+  const sampleBaselines = new WeakMap();
   function refreshReady() {
     const list = problems();
     const btn = feed.querySelector('button[data-action="figure"]');
     if (btn) btn.disabled = list.length > 0 || !tilesFresh();
+    const sample = feed.querySelector('button[data-action="accept-figure-sample"]');
+    if (sample) {
+      const node = card();
+      const snapshot = JSON.stringify({alt: val("alt"), note: teacherNote(), key: keyAnswer().text, tiles: tilesState(), frame});
+      if (!sampleBaselines.has(node)) sampleBaselines.set(node, snapshot);
+      sample.disabled = sampleBaselines.get(node) !== snapshot || !tilesFresh();
+    }
     const leak = document.querySelector('input[name="leak"]:checked');
     const key = keyAnswer();
     setSum("leak", leak && leak.value === "none", leak && leak.value === "none" ? "✓ Ответа на картинках нет" : "✗ Не отмечено, что ответа на картинках нет");
@@ -371,14 +379,19 @@
     return true;
   }
 
+  function reviewSample(foundError) {
+    const {revision, sampleDigest} = card().dataset;
+    return post("sample", {revision: Number(revision), digest: sampleDigest, found_error: foundError});
+  }
+
   const actions = {
+    "accept-figure-sample": () => post("figure/sample/confirm", {revision: Number(card().dataset.revision), digest: card().dataset.proofDigest}),
     confirm: (b) => post("confirm", { answer: val("answer") || (b && b.dataset.answer) || null }),
     "confirm-no-key": () => post("confirm", {}),
     skip: () => post("skip"),
     exclude: () => post("exclude"),
-    "sample-ok": () => post("sample", { found_error: false }),
-    "sample-error": () => post("sample", { found_error: true }),
-    withdraw: () => post("withdraw"),
+    "sample-ok": () => reviewSample(false),
+    "sample-error": () => reviewSample(true),
     retry: async () => { await post("retry-model"); return { next: { task_id: Number(taskId()) }, counter: card().dataset.counter }; },
     resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: (b.dataset.choice === "key" ? b.dataset.answer : val("answer")) || null }),
     figure: publishFigure,
