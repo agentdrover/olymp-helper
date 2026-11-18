@@ -728,7 +728,7 @@ def task_exclude(task_id: int, request: Request, conn: Db):
 @_action
 def task_sample(task_id: int, body: SampleBody, request: Request, conn: Db):
     parent_queue.review_sample(conn, task_id, found_error=body.found_error)
-    return _advance(request, conn, task_id)
+    return _advance(request, conn, task_id, stay_if_open=body.found_error)
 
 
 @parent.post("/parent/tasks/{task_id}/withdraw")

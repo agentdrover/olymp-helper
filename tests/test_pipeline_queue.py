@@ -5,6 +5,7 @@ pipeline journal counts passed, rejected and the error rate in the sample."""
 import ast
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import db as schema
@@ -146,6 +147,51 @@ def test_the_parent_sees_failures_and_a_sample(tmp_path):
         # the child never sees a failed question; the sampled passed ones stay published
         listed = {t["id"] for t in c.get("/api/tasks", headers=CHILD).json()["tasks"]}
         assert listed.isdisjoint(failed) and set(passed) <= listed
+
+
+
+@pytest.mark.parametrize("passed_count", [5, 10])
+def test_a_sample_error_keeps_its_draft_in_the_feed(tmp_path, passed_count):
+    with boot(tmp_path) as c:
+        ids = land(tmp_path, [True] * passed_count)
+        first = ids[4]
+        assert [card["task_id"] for card in queue(c)] == ids[4::5]
+
+        draft = judge(c, first, found_error=True)["next"]
+        assert draft is not None and (draft["task_id"], draft["kind"]) == (first, "confirm")
+        assert draft["note"] and "ошибку" in draft["note"]
+        assert c.get(f"/api/tasks/{first}", headers=CHILD).status_code == 404
+
+        response = c.post(f"/parent/tasks/{first}/confirm", headers=PARENT)
+        assert response.status_code == 200, response.text
+        following = response.json()["next"]
+        if passed_count == 5:
+            assert following is None
+        else:
+            assert (following["task_id"], following["kind"]) == (ids[9], "sample")
+            assert judge(c, ids[9])["next"] is None
+
+
+def test_a_new_revision_does_not_display_the_previous_pipeline_failure(tmp_path):
+    reason = "утечка ответа в старом условии"
+    with boot(tmp_path) as c:
+        (tid,) = land(tmp_path, [("leak", reason)])
+        (failed,) = queue(c)
+        assert failed["pipeline_failed"] and failed["reason"] == reason
+
+        response = c.post(f"/parent/tasks/{tid}/confirm", headers=PARENT)
+        assert response.status_code == 200, response.text
+        assert queue(c) == []
+
+        new_text = "Новое условие без утечки?"
+        response = c.post(f"/parent/tasks/{tid}/edit", headers=PARENT, json={"text": new_text})
+        assert response.status_code == 200, response.text
+        (draft,) = queue(c)
+        assert draft["text"] == new_text and draft["kind"] == "confirm"
+        assert draft["pipeline_failed"] is False
+        assert draft["gate"] is None and draft["reason"] is None
+        assert reason not in (draft["note"] or "")
+        assert journal(c)["rejected"] == 1
 
 
 def test_a_withdrawn_task_disappears_but_its_history_stays(tmp_path):

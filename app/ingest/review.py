@@ -424,8 +424,9 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         kind, hint = "confirm", "Проверьте, что условие распознано верно."
     if kind is None:
         return None
-    # Составленное задание, которое конвейер не пропустил: обычная карточка проверки с причиной.
-    failed = kind == "confirm" and task["pipeline_outcome"] == "failed"
+    # Конвейер проверял исходную ревизию, а его результат остаётся в журнале.
+    recorded_failure = task["pipeline_outcome"] == "failed"
+    failed = kind == "confirm" and recorded_failure and task["revision"] == 1
     if failed:
         hint = (
             f"Конвейер не пропустил задание: {task['pipeline_reason']}. Проверьте условие и ответ."
@@ -454,7 +455,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "kind": kind,
         "label": FAILED_LABEL if failed else LABELS[kind],
         "hint": hint,
-        "note": None if failed else task["review_note"],
+        "note": None if recorded_failure else task["review_note"],
         "pipeline_failed": failed,
         "reason": task["pipeline_reason"] if failed else None,
         "gate": task["pipeline_gate"] if failed else None,
