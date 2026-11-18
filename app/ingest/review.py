@@ -3,7 +3,7 @@
 import json
 
 from app.ingest.answers import display, key_json, key_value, normalize_answer
-from app.ingest.keys import candidate
+from app.ingest.keys import candidate, page_refusal
 from app.ingest.model_answer import compute_model_answer, model_value
 from app.ingest.publish import leak_notice, publication
 from app.ingest.schema import InvalidStructure, check_options
@@ -30,6 +30,9 @@ LABELS = {
 }
 
 
+AUTO_NOTE = "опубликовано автоматически"
+
+
 class Refusal(Exception):
     """Действие отклонено; message читает родитель."""
 
@@ -50,12 +53,31 @@ def _task(conn, task_id: int):
 # ------------------------------------------------------------------------- ключ
 
 
+UNVERIFIED_SOURCES = {
+    "page": "page_rule",
+    "page_model": "page_model",
+}
+CANDIDATE_SOURCE_LABELS = {
+    "key_file": "загруженный ключ",
+    "page": "правило по ответу на странице",
+    "page_model": "модель по ответу на странице",
+}
+SOURCE_LABELS = {
+    "page_rule": "кандидат со страницы по правилу, не проверен",
+    "page_model": "кандидат со страницы через модель, не проверен",
+}
+
+
 def key_info(conn, task):
-    """(значение, источник, это кандидат из загруженного ключа). Кандидат ещё не ключ."""
+    """(значение, источник, это кандидат). Кандидат ещё не ключ. Источник "official" только у
+    загруженного ключа и у формы со страницы, которую принимал прежний разбор; непроверенные
+    кандидаты получают источник page_rule / page_model и official не называются."""
     if task["answer_key"] is not None:
         return key_value(task["answer_key"]), task["key_source"], False
     cand = candidate(conn, task)
     if cand:
+        if cand.get("unverified"):
+            return cand["value"], UNVERIFIED_SOURCES[cand["source"]], True
         return cand["value"], "official", True
     return None, None, False
 
@@ -94,7 +116,9 @@ def _parse_answer(task, raw) -> object:
     return value
 
 
-def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
+def set_key(
+    ctx, conn, task_id: int, value, source: str, candidate_source: str | None = None
+) -> dict:
     """Сменить ключ. У проверенного задания это правка: новая ревизия, «проверено» снято.
     Подтверждённый рисунок проходит защиту от текста ответа заново: решение было для другого ключа;
     то же для рисунков других заданий материала: новый ключ не должен быть напечатан в их вырезках."""
@@ -113,8 +137,9 @@ def set_key(ctx, conn, task_id: int, value, source: str) -> dict:
             "answer_key": key_json(value, task["type"]),
             "key_source": source,
             "key_version": task["key_version"] + 1,
+            "key_candidate_source": candidate_source,
         }
-        if task["import_status"] == "checked":
+        if task["import_status"] == "checked" or (figure_of(task) or {}).get("auto_verification"):
             new_revision(conn, task_id, **cols)
         else:
             update_task(conn, task_id, **cols)
@@ -137,9 +162,17 @@ def set_parent_key(ctx, conn, task_id: int, raw, keep_candidate: bool = False) -
     # POST /key без флага по-прежнему ставит ключ родителя.
     if keep_candidate and task["answer_key"] is None:
         cand = candidate(conn, task)
-        if cand and cand["value"] == value:
+        if cand and cand["value"] == value and not cand.get("unverified"):
             return {"revision": task["revision"], "key_version": task["key_version"]}
-    return set_key(ctx, conn, task_id, value, "parent")
+    return set_key(ctx, conn, task_id, value, "parent", _candidate_source(conn, task, value))
+
+
+def _candidate_source(conn, task, value) -> str | None:
+    """Источник кандидата, с которым совпал ответ родителя (ключа ещё нет); иначе None."""
+    if task["answer_key"] is not None:
+        return None
+    cand = candidate(conn, task)
+    return cand["source"] if cand and cand["value"] == value else None
 
 
 # ------------------------------------------------------------------------ правки
@@ -210,7 +243,10 @@ def edit_task(
 
 
 def exclude_task(conn, task_id: int) -> None:
-    _task(conn, task_id)
+    task = _task(conn, task_id)
+    from app.ingest.sampling import parent_outcome
+
+    parent_outcome(conn, task_id, task["revision"], "excluded")
     update_task(conn, task_id, excluded=1)
 
 
@@ -251,25 +287,37 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     figure = figure_of(task)
     if figure is not None and not figure.get("confirmed"):
         raise Refusal("Сначала подтвердите рисунок.")
-    if figure is not None and not figure.get("no_answer_ack"):
+    from app.ingest.figure_proof import verified
+
+    if figure is not None and not figure.get("no_answer_ack") and not verified(task):
         raise Refusal("Отметьте: в рисунке и в описании нет ответа (шаг 1 карточки рисунка).")
     has_answer = answer is not None and str(answer).strip() != ""
     if has_answer:
         value = _parse_answer(task, answer)
         if value != key_value(task["answer_key"]):
-            set_key(ctx, conn, task_id, value, "parent")
+            set_key(ctx, conn, task_id, value, "parent", _candidate_source(conn, task, value))
     elif task["answer_key"] is None:
         cand = candidate(conn, task)
+        if cand and cand.get("unverified"):
+            raise Refusal(
+                "Ответ со страницы не проверен: подтвердите его явно "
+                f"(«{cand['answer']}») или впишите свой."
+            )
         if cand:
             set_key(ctx, conn, task_id, cand["value"], "official")
     task = _task(conn, task_id)
     if task["import_status"] == "unsupported":  # новый ключ вернул рисунок на проверку
         raise Refusal(task["unsupported_reason"])
+    if figure_of(task) is not None and not figure_of(task).get("confirmed"):
+        raise Refusal("После правки ключа подтвердите рисунок заново.")
     if figure_of(task) is not None:
         missing = uncovered_lefts(task, key_value(task["answer_key"]))
         if missing:
             raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
-    update_task(conn, task_id, import_status="checked")
+    from app.ingest.sampling import parent_outcome
+
+    parent_outcome(conn, task_id, task["revision"], "clean" if verified(task) else "edited")
+    update_task(conn, task_id, import_status="checked", auto_checked=0, auto_hold=None)
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
     task = get_task(conn, task_id)
@@ -282,7 +330,7 @@ def resolve(ctx, conn, task_id: int, choice: str, answer=None) -> None:
     task = _task(conn, task_id)
     seen = model_value(task)
     if choice == "key":
-        confirm(ctx, conn, task_id)
+        confirm(ctx, conn, task_id, answer=answer)  # у непроверенного кандидата ответ явный
     elif choice == "mine":
         if answer is None or not str(answer).strip():
             raise Refusal("Укажите свой ответ.")
@@ -306,7 +354,8 @@ def retry_model(ctx, conn, task_id: int) -> bool:
             "затем повторяйте запрос к модели.",
             409,
         )
-    if key_info(conn, task)[0] is not None:
+    value, source, _ = key_info(conn, task)
+    if value is not None and source not in SOURCE_LABELS:
         raise Refusal("У задания есть ключ: ответ модели не нужен.", 409)
     if task["model_answer"] is not None:
         raise Refusal(
@@ -332,8 +381,15 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     if task["excluded"]:
         return None
     figure = figure_of(task)
+    from app.ingest.figure_pipeline import HOLD_SAMPLE, assessment
+    from app.ingest.figure_proof import verified
+
+    image_report = assessment(conn, task) if figure else None
     status = task["import_status"]
     key, source, _ = key_info(conn, task)
+    unverified = source in SOURCE_LABELS
+    # Непроверенный кандидат показывается, но ключом не считается: он не убирает задание из ленты.
+    trusted = None if unverified else key
     model = model_value(task)
     kind, hint = None, ""
     if status == "checked" and _open_dispute(conn, task):
@@ -348,9 +404,17 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
                 "Нужен рисунок: подтвердите найденный или поправьте рамку и alt, либо впишите "
                 "самодостаточное условие."
             )
-    elif status == "checked" and figure is None and key is None and task["model_answer"] is None:
+    elif figure and task["auto_hold"] == HOLD_SAMPLE:
+        kind, hint = "needs_figure", HOLD_SAMPLE
+    elif (
+        status == "checked" and figure is None and trusted is None and task["model_answer"] is None
+    ):
         kind, hint = "model_missing", "Ответ модели не получен. Повторите запрос."
-    elif key is None and (figure is not None or status == "draft"):
+    elif (
+        trusted is None
+        and not (unverified and figure is None)
+        and (figure is not None or status == "draft")
+    ):
         kind = "no_key"
         hint = (
             "Для задания с рисунком нужен ключ или ваш ответ: без него оно не публикуется."
@@ -364,6 +428,8 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         kind, hint = "confirm", "Проверьте, что условие распознано верно."
     if kind is None:
         return None
+    if task["auto_hold"] and status in ("draft", "unsupported") and task["auto_hold"] not in hint:
+        hint = f"{hint} {task['auto_hold']}".strip()
     # Две разные страницы: текст проверяется по page_from..page_to, рисунок - на своей.
     first, last = task["page_from"], task["page_to"] or task["page_from"]
     pages = list(range(first, last + 1)) if first else []
@@ -384,7 +450,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     card = {
         "task_id": task["id"],
         "kind": kind,
-        "label": LABELS[kind],
+        "label": "выборочная проверка" if task["auto_hold"] == HOLD_SAMPLE else LABELS[kind],
         "hint": hint,
         "note": task["review_note"],
         "parent_note": task["parent_note"],
@@ -406,7 +472,12 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "page_url": f"/materials/{material}/pages/{shown}.png" if shown else None,
         "page_urls": [{"page": p, "url": f"/materials/{material}/pages/{p}.png"} for p in pages],
         "key": None if key is None else display(key),
-        "key_source": source,
+        "key_source": SOURCE_LABELS.get(source, source),
+        "key_unverified": unverified,
+        "key_refusal": page_refusal(conn, task),
+        "key_candidate_source": task["key_candidate_source"],
+        "key_candidate_source_label": CANDIDATE_SOURCE_LABELS.get(task["key_candidate_source"]),
+        "button_answer": display(key) if unverified else None,
         "model_answer": None if model is None else display(model),
         "model_explanation": json.loads(task["model_answer"]).get("explanation")
         if task["model_answer"]
@@ -414,6 +485,15 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "model_agrees": agrees,
         "figure": figure,
         "revision": task["revision"],
+        "auto_published": bool(task["auto_published"]),
+        "auto_note": AUTO_NOTE if task["auto_published"] else None,
+        "auto_hold": task["auto_hold"],
+        "figure_assessment": image_report,
+        "figure_auto_verified": verified(task),
+        "figure_proof_digest": (figure or {}).get("auto_verification", {}).get("digest"),
+        "proposed_figure_answer": display(image_report["author"]["value"])
+        if image_report and image_report.get("agrees")
+        else None,
     }
     if kind == "needs_figure" and figure is not None:
         from app.ingest.figure_card import card_extras  # figure_service импортирует review
@@ -444,12 +524,16 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         "options": options_of(task),
         "key": None if not task["answer_key"] else display(key_value(task["answer_key"])),
         "key_source": task["key_source"],
+        "key_candidate_source": task["key_candidate_source"],
+        "key_refusal": page_refusal(conn, task),
         "key_candidate": None
         if cand is None
         else {
             "answer": cand["answer"],
             "material_id": cand["material_id"],
             "source": cand["source"],
+            "reason": cand.get("reason"),
+            "unverified": bool(cand.get("unverified")),
         },
         "answer_text": task["answer_text"],
         "parent_note": task["parent_note"],
@@ -458,12 +542,40 @@ def task_detail(ctx, conn, task_id: int) -> dict:
         else json.loads(task["model_answer"])["answer"],
         "figure": figure_of(task),
         "model_discrepancies": discrepancies(conn, task_id),
+        "auto_published": bool(task["auto_published"]),
+        "auto_note": AUTO_NOTE if task["auto_published"] else None,
+        "auto_hold": task["auto_hold"],
         "publication": publication(task),
         "card": card,
     }
 
 
 # --------------------------------------------------------------------------- лента
+
+
+def auto_published(conn) -> list[dict]:
+    """Задания, опубликованные без родителя: родитель видит их здесь (и выборка K5c)."""
+    rows = conn.execute(
+        "SELECT t.*, m.original_name AS source_name FROM task_item t "
+        "LEFT JOIN material m ON m.id=t.material_id "
+        "WHERE t.auto_published = 1 AND t.import_status = 'checked' "
+        "AND t.excluded = 0 ORDER BY t.id"
+    ).fetchall()
+    catalog = load_catalog(conn)
+    return [
+        {
+            "task_id": r["id"],
+            "number": r["source_number"],
+            "text": r["text"],
+            "key": display(key_value(r["answer_key"])),
+            "key_source": r["key_source"],
+            "note": AUTO_NOTE,
+            "options": options_of(r),
+            "topic_title": catalog.get(r["topic"], {}).get("title"),
+            "source_name": r["source_name"],
+        }
+        for r in rows
+    ]
 
 
 def queue(ctx, conn) -> list[dict]:

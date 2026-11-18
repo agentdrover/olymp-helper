@@ -23,15 +23,16 @@ RASTER_WARNING = (
     "Текст внутри картинок не проверяется автоматически — посмотрите на вырезку глазами."
 )
 PREVIEW_URL = "/parent/tasks/{}/figure-preview.png"
-_LINE = re.compile(r"^\s*(\d{1,2}|[A-ZА-ЯЁ])\s*[:—–-]\s*(.*)$")
 
 
 def note_lines(note: str | None, items: list[str]) -> tuple[dict[str, str], str]:
     """Описания по обозначениям из teacher_note и остаток, который не разобрался по строкам."""
     notes: dict[str, str] = {}
     rest: list[str] = []
+    labels = "|".join(re.escape(item) for item in sorted(items, key=len, reverse=True))
+    pattern = re.compile(r"^\s*(" + labels + r")\s*[:—–-]\s*(.*)$") if labels else None
     for piece in re.split(r"[\n;]+", note or ""):
-        found = _LINE.match(piece)
+        found = pattern.match(piece) if pattern else None
         if found and found.group(1) in items and found.group(1) not in notes:
             notes[found.group(1)] = found.group(2).strip()
         elif piece.strip():
@@ -162,6 +163,12 @@ def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> di
     frame = frame or {}
     stored = figures.regions_of(figure)
     key, _source, is_candidate = key_info(conn, task)
+    if key is None and not frame and state is None:
+        from app.ingest.figure_pipeline import assessment
+
+        report = assessment(conn, task)
+        if report and report.get("agrees") is True:
+            key = report["author"]["value"]  # A proposal for the parent, never a persisted key.
     options = options_of(task)
     area = {
         "tiles": [],
@@ -225,16 +232,18 @@ def card_extras(ctx, conn, task, figure: dict, shown_page: int | None, deep: boo
     плитки, есть ли в них текстовый слой); в общей очереди PDF не открывается."""
     regions = figures.regions_of(figure)
     items = ordered_designations(options_of(task))
+    from app.ingest.figure_pipeline import assessment
+    from app.ingest.figure_proof import verified
+
+    image_report = assessment(conn, task) if verified(task) else None
+    if image_report:
+        items = [d["label"] for d in image_report["author"]["descriptions"]]
     notes, rest = note_lines(figure.get("teacher_note"), items)
     view, screen = child_preview(conn, task, figure, regions)
     area = area_context(ctx, conn, task, figure) if deep else None
-    key = area["key"] if area else None
-    if area is None:
-        from app.ingest.review import key_info
+    from app.ingest.review import SOURCE_LABELS, key_info
 
-        key, _source, is_candidate = key_info(conn, task)
-    else:
-        is_candidate = area["key_is_candidate"]
+    key, source, is_candidate = key_info(conn, task)
     shown_tiles = area["tiles"] if area else []
     extras = {
         "figure_items": items,
@@ -246,6 +255,7 @@ def card_extras(ctx, conn, task, figure: dict, shown_page: int | None, deep: boo
         "mode": assist_caption(screen["assist"]),
         "key_value": key,
         "key_is_candidate": is_candidate,
+        "key_source_label": SOURCE_LABELS.get(source),
         "figure_check": {"raster_only": None, "warning": None},
         "overlays": [],
         "area": area,

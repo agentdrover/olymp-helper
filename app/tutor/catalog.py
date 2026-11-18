@@ -96,7 +96,9 @@ def _rows(conn):
         out.append(
             {
                 "task": task,
-                "material": materials.get(task["material_id"]),
+                "material": None
+                if task["key_source"] == "generated"
+                else materials.get(task["material_id"]),
                 "run": run,
                 "status": task_status(task, run),
                 "code": code,

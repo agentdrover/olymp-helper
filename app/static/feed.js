@@ -50,6 +50,16 @@
 
   async function advance(data) { await show(data.next ? data.next.task_id : null, data.counter); }
 
+  document.addEventListener("autopublish:done", async () => {
+    try {
+      const response = await fetch("/parent/review/queue");
+      if (!response.ok) throw new Error("Не удалось обновить ленту. Обновите страницу.");
+      const data = await response.json();
+      await show(data.cards.length ? data.cards[0].task_id : null,
+                 data.cards.length ? `1 из ${data.total}` : "");
+    } catch (error) { fail(error); }
+  });
+
   function fail(e) {
     const el = document.getElementById("error");
     if (el) el.textContent = e.message;
@@ -149,10 +159,18 @@
     el.classList.toggle("bad", ok === false);
   }
 
+  const sampleBaselines = new WeakMap();
   function refreshReady() {
     const list = problems();
     const btn = feed.querySelector('button[data-action="figure"]');
     if (btn) btn.disabled = list.length > 0 || !tilesFresh();
+    const sample = feed.querySelector('button[data-action="accept-figure-sample"]');
+    if (sample) {
+      const node = card();
+      const snapshot = JSON.stringify({alt: val("alt"), note: teacherNote(), key: keyAnswer().text, tiles: tilesState(), frame});
+      if (!sampleBaselines.has(node)) sampleBaselines.set(node, snapshot);
+      sample.disabled = sampleBaselines.get(node) !== snapshot || !tilesFresh();
+    }
     const leak = document.querySelector('input[name="leak"]:checked');
     const key = keyAnswer();
     setSum("leak", leak && leak.value === "none", leak && leak.value === "none" ? "✓ Ответа на картинках нет" : "✗ Не отмечено, что ответа на картинках нет");
@@ -362,12 +380,13 @@
   }
 
   const actions = {
-    confirm: () => post("confirm", { answer: val("answer") || null }),
+    "accept-figure-sample": () => post("figure/sample/confirm", {revision: Number(card().dataset.revision), digest: card().dataset.proofDigest}),
+    confirm: (b) => post("confirm", { answer: val("answer") || (b && b.dataset.answer) || null }),
     "confirm-no-key": () => post("confirm", {}),
     skip: () => post("skip"),
     exclude: () => post("exclude"),
     retry: async () => { await post("retry-model"); return { next: { task_id: Number(taskId()) }, counter: card().dataset.counter }; },
-    resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: val("answer") || null }),
+    resolve: (b) => post("resolve", { choice: b.dataset.choice, answer: (b.dataset.choice === "key" ? b.dataset.answer : val("answer")) || null }),
     figure: publishFigure,
     "save-edit": () => post("edit", changedEdit())
       .then(() => ({ next: { task_id: Number(taskId()) }, counter: card().dataset.counter })),
@@ -415,6 +434,7 @@
   });
 
   document.addEventListener("keydown", (e) => {
+    if (e.target && e.target.closest && e.target.closest("#auto-published")) return;
     // Enter на переключателе или флажке своего действия не имеет: он подтверждает карточку.
     const choice = e.target && e.target.closest && e.target.closest("input[type=radio], input[type=checkbox]");
     const t = choice && e.key === "Enter" ? null : e.target;

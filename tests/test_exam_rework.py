@@ -17,7 +17,9 @@ def test_exam_blank_has_no_background_save(tmp_path):
         seed(tmp_path, number="1")
         save_format(client, tmp_path)
         assert start_real(client).status_code == 200
-        page = client.get("/exam/run", headers=CHILD).text
+        response = client.get("/exam/run", headers=CHILD)
+        assert response.headers["server-timing"].startswith("exam;dur=")
+        page = response.text
         assert 'method="post" action="/exam/act"' in page
         assert "fetch(" not in page and "hx-" not in page
         assert "Срок определяет сервер" in page

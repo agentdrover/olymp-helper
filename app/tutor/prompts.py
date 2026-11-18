@@ -131,12 +131,14 @@ def build_request(
 ) -> tuple[str, list[dict]]:
     """(system, messages). mode - hint1, hint2, mistake, solution или explain_<имя>."""
     options = json.loads(task["options"]) if task["options"] else None
-    figure = json.loads(task["figure"]) if task["figure"] else None
+    from app.ingest.figure_proof import trusted_note
+
+    note = trusted_note(task)
     parts = [f"Условие: {neutralize(task['text'])}"]
     if options:
         parts.append("Варианты:\n" + neutralize(_options_text(options)))
-    if use_note and figure and figure.get("teacher_note"):
-        parts.append("Пояснение к рисунку: " + neutralize(figure["teacher_note"]))
+    if use_note and note:
+        parts.append("Пояснение к рисунку: " + neutralize(note))
     child = []
     for i, att in enumerate(attempts, 1):
         mark = {"sure": "уверен", "doubt": "сомневаюсь"}.get(att.get("confidence"), "не отмечено")
@@ -182,6 +184,13 @@ JUDGE_QUESTION = {
         "(блок shown_data): если вместе они выдают ответ, reveals=true. Общий наводящий вопрос "
         "или идея без ответа - reveals=false."
     ),
+    "question": (
+        "Проверяемый текст - условие и варианты вопроса, который увидит ребёнок. Выдаёт ли он "
+        "верный ответ сам: условие называет ответ или его часть, верный вариант выделяется формой "
+        "(единственный подробный, с пометкой, повторяет формулировку условия), намёк на номер "
+        "или положение варианта? Сам верный вариант среди вариантов - не утечка. Если условие "
+        "и варианты честны, reveals=false."
+    ),
     "claims": (
         "Утверждает ли текст, что ответ верный, правильный или проверенный? "
         "Нейтральное объяснение без такой оценки - reveals=false."
@@ -189,6 +198,7 @@ JUDGE_QUESTION = {
 }
 JUDGE_SCHEMA = {
     "title": "tutor_judge",
+    "x-strict-json": True,  # судья: ответ - ровно один объект (adapters.STRICT_KEY)
     "type": "object",
     "required": ["reveals", "reason"],
     "properties": {"reveals": {"type": "boolean"}, "reason": {"type": "string"}},
@@ -221,13 +231,15 @@ def build_judge_request(
     task, text: str, answer_text: str, purpose: str = "reveal", shown=(), attempts=()
 ):
     options = json.loads(task["options"]) if task["options"] else None
-    figure = json.loads(task["figure"]) if task["figure"] else None
+    from app.ingest.figure_proof import trusted_note
+
+    note = trusted_note(task)
     parts = [f"Условие: {neutralize(task['text'])}"]
     if options:
         parts.append("Варианты:\n" + neutralize(_options_text(options)))
     parts.append("Верный ответ: " + neutralize(answer_text))
-    if figure and figure.get("teacher_note"):
-        parts.append("Скрытое пояснение к рисунку: " + neutralize(figure["teacher_note"]))
+    if note:
+        parts.append("Скрытое пояснение к рисунку: " + neutralize(note))
     content = (
         f"Режим: judge\n{JUDGE_QUESTION[purpose]}\n"
         "Ниже блоки данных.\n<task_data>\n" + "\n".join(parts) + "\n</task_data>\n"

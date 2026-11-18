@@ -9,6 +9,8 @@ from app.ingest.store import figure_of, options_of
 from app.ingest.tiles import stored_view
 
 PUBLISHED_STATUS = "checked"
+# Решение владельца 27.10: без родителя публикуется только то, что прошло двух моделей и код.
+AUTO_CHECKED_MARK = "составлено помощником, проверено двумя моделями"
 
 
 def has_key(task) -> bool:
@@ -17,6 +19,10 @@ def has_key(task) -> bool:
 
 def leak_of(task) -> list[str]:
     """Части ответа со страницы, оставшиеся в условии: пока они там, задание не публикуется."""
+    from app.ingest.figure_proof import text_leak, verified
+
+    if verified(task):
+        return ["ответ в условии"] if text_leak(task, key_value(task["answer_key"])) else []
     return condition_leaks(task["text"], task["answer_text"], task["type"])
 
 
@@ -37,7 +43,13 @@ def is_published(task) -> bool:
         return False
     figure = figure_of(task)
     if figure is not None:
-        return bool(figure.get("confirmed")) and has_key(task)
+        from app.ingest.figure_proof import verified
+
+        return (
+            bool(figure.get("confirmed"))
+            and has_key(task)
+            and (not figure.get("auto_verification") or verified(task))
+        )
     return has_key(task) or task["model_answer"] is not None
 
 
@@ -117,6 +129,10 @@ def assist_mode(task) -> str | None:
     figure = figure_of(task)
     if figure is None:
         return "hints"
+    from app.ingest.figure_proof import verified
+
+    if verified(task):
+        return "hints"
     missing = missing_designations(
         options_of(task), figure.get("teacher_note", ""), bool(figure.get("items_v2"))
     )
@@ -152,6 +168,8 @@ def publication(task) -> dict:
 def child_view(task, material) -> dict:
     """Единственное представление задания для ребёнка: без ключа, model_answer и teacher_note."""
     figure = figure_of(task)
+    from app.ingest.figure_proof import verified
+
     view = {
         "id": task["id"],
         "number": task["source_number"],
@@ -161,6 +179,7 @@ def child_view(task, material) -> dict:
         "assist": assist_mode(task),
         "source": _source_label(task, material),
         "figure": None,
+        "verified_by_two_models": verified(task),
     }
     if figure is not None:
         view["figure"] = {"url": f"/tasks/{task['id']}/figure.png", "alt": figure.get("alt", "")}
@@ -192,8 +211,12 @@ def source_caption(material, page) -> str:
 
 
 def _source_label(task, material) -> str:
-    if material is None:  # сгенерированное задание: сборника и страницы нет
-        return "составлено помощником, проверено родителем"
+    if material is None or task["key_source"] == "generated":
+        return (
+            AUTO_CHECKED_MARK
+            if task["auto_checked"]
+            else "составлено помощником, проверено родителем"
+        )
     return source_caption(material, task["page_from"])
 
 

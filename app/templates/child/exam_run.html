@@ -57,8 +57,9 @@ const form = document.getElementById("exam-form");
 const deadline = Date.parse(left.dataset.deadline) - Date.parse(left.dataset.now);
 const navigation = performance.getEntriesByType("navigation")[0];
 const receivedAt = navigation?.responseStart || performance.now();
-// Время от отправки запроса до первого байта включает доставку страницы.
-const transit = navigation ? Math.max(0, receivedAt - navigation.requestStart) : 0;
+// Из времени до первого байта исключаем время сборки бланка, измеренное сервером.
+const preparation = navigation?.serverTiming?.find(metric => metric.name === "exam")?.duration || 0;
+const transit = navigation ? Math.max(0, receivedAt - navigation.requestStart - preparation) : 0;
 const lock = () => {
   form.querySelectorAll("button, input:not([type=hidden]), select, input[name=answer_present]")
     .forEach(control => { control.disabled = true; });

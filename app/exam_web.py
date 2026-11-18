@@ -1,6 +1,7 @@
 """Маршруты имитации олимпиады: формат (родитель), сборка, прохождение, сдача и итог (ребёнок)."""
 
 import uuid
+from time import perf_counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -139,17 +140,20 @@ def _blank(
     entered: dict | None = None, lost: str | None = None,
 ):  # fmt: skip
     """Бланк: обычная страница, каждое действие - отправка формы (POST) и 303 на эту страницу."""
+    started = perf_counter()
     now = now_of(request)
     view = exam.current_view(conn, now)
     if view is None:
         return RedirectResponse("/exam", status_code=303)
     item = view["items"][view["current"] - 1]
     view["server_now"] = exam.iso(now_of(request))
+    prepared_ms = (perf_counter() - started) * 1000
     page = TEMPLATES.TemplateResponse(
         request,
         "child/exam_run.html",
         {"v": view, "item": item, "fill": _fill(item, entered), "message": message,
          "lost": lost, "action_id": uuid.uuid4().hex, "type_labels": exam.TYPE_LABELS},
+        headers={"Server-Timing": f"exam;dur={prepared_ms:.3f}"},
     )  # fmt: skip
     page.status_code = status
     return page

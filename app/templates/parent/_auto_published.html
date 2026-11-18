@@ -1,0 +1,23 @@
+<section id="auto-published" aria-labelledby="auto-published-title">
+  <h2 id="auto-published-title">Опубликовано автоматически · {{ published|length }}</h2>
+  {% for task in published %}
+  <details class="card" data-published-task="{{ task.task_id }}">
+    <summary>Задание {{ task.number }} — {{ task.note }}</summary>
+    {% if task.source_name %}<p class="hint">{{ task.source_name }}</p>{% endif %}
+    <p class="text">{{ task.text }}</p>
+    {% if task.options %}
+    <ul>
+      {% if task.options is mapping %}
+        {% for side in task.options.values() %}{% for option in side %}<li>{{ option.label }}) {{ option.text }}</li>{% endfor %}{% endfor %}
+      {% else %}
+        {% for option in task.options %}<li>{{ option.label }}) {{ option.text }}</li>{% endfor %}
+      {% endif %}
+    </ul>
+    {% endif %}
+    <p>Официальный ключ: <b>{{ task.key }}</b></p>
+    {% if task.topic_title %}<p class="hint">Тема: {{ task.topic_title }}</p>{% endif %}
+  </details>
+  {% else %}
+  <p class="hint">Пока нет заданий, опубликованных автоматически.</p>
+  {% endfor %}
+</section>

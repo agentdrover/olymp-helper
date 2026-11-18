@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app import exam
-from app.ingest import packs, review
+from app.ingest import packs, page_normalizer, review
 from app.ingest.figure_card import area_context, mode_for
 from app.ingest.figure_service import confirm_figure, preview_png, preview_tile_png
 from app.ingest.limits import MAX_PDF_BYTES, UploadRejected, check_pdf
@@ -202,6 +202,32 @@ def upload_material(
     return RedirectResponse(
         f"/parent/materials?msg={code}&id={body['material_id']}", status_code=303
     )
+
+
+@parent.post("/parent/figures/generated")
+def upload_generated_figures(
+    request: Request,
+    conn: Db,
+    file: Annotated[UploadFile, File()],
+    questions: Annotated[str, Form()],
+):
+    """Import explicit author-made figures; their keys never enter the official-key table."""
+    from app.ingest.generated_figures import import_package
+
+    if len(questions) > 200_000:
+        raise HTTPException(422, "Слишком большой список авторских заданий.")
+    try:
+        answer = import_package(
+            ctx_of(request),
+            conn,
+            file.file.read(MAX_PDF_BYTES + 1),
+            json.loads(questions),
+            file.filename or "авторские.pdf",
+        )
+    except (ValueError, UploadRejected) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    answer["auto_started"] = ctx_of(request).autorun.start(ctx_of(request), answer["material_id"])
+    return JSONResponse(answer, status_code=202)
 
 
 class StartFailed(Exception):
@@ -524,13 +550,49 @@ def review_page(request: Request, conn: Db):
         first = review.card_for(ctx_of(request), conn, first["task_id"]) or first
     counter = f"1 из {feed['total']}" if first else None
     return TEMPLATES.TemplateResponse(
-        request, "parent/review.html", {"card": first, "counter": counter, "total": feed["total"]}
+        request,
+        "parent/review.html",
+        {
+            "card": first,
+            "counter": counter,
+            "total": feed["total"],
+            "published": review.auto_published(conn),
+        },
     )
 
 
 @parent.get("/parent/review/queue")
 def review_queue(request: Request, conn: Db):
     return review.open_feed(ctx_of(request), conn)
+
+
+@parent.get("/parent/review/auto")
+def review_auto(conn: Db):
+    return {"tasks": review.auto_published(conn)}
+
+
+@parent.get("/parent/review/auto/list", response_class=HTMLResponse)
+def review_auto_list(request: Request, conn: Db):
+    return TEMPLATES.TemplateResponse(
+        request, "parent/_auto_published.html", {"published": review.auto_published(conn)}
+    )
+
+
+class AutoRunBody(BaseModel):
+    material_id: int | None = None
+
+
+@parent.post("/parent/review/auto/run")
+def review_auto_run(request: Request, body: AutoRunBody | None = None):
+    """Проверить и опубликовать черновики с официальным ключом (фоном: запрос не ждёт)."""
+    ctx = ctx_of(request)
+    started = ctx.autorun.start(ctx, (body or AutoRunBody()).material_id)
+    return {"started": started, **ctx.autorun.snapshot()}
+
+
+@parent.get("/parent/review/auto/status")
+def review_auto_status(request: Request):
+    return ctx_of(request).autorun.snapshot()
 
 
 @parent.get("/parent/review/{task_id}", response_class=HTMLResponse)
@@ -541,7 +603,14 @@ def review_card(task_id: int, request: Request, conn: Db, fragment: int = 0):
     counter = f"{order.index(task_id) + 1} из {len(order)}" if task_id in order else None
     template = "parent/card.html" if fragment else "parent/review.html"
     return TEMPLATES.TemplateResponse(
-        request, template, {"card": card, "counter": counter, "total": len(order)}
+        request,
+        template,
+        {
+            "card": card,
+            "counter": counter,
+            "total": len(order),
+            "published": review.auto_published(conn) if not fragment else [],
+        },
     )
 
 
@@ -583,8 +652,73 @@ def _action(handler):
 @parent.post("/parent/tasks/{task_id}/confirm")
 @_action
 def task_confirm(task_id: int, request: Request, conn: Db, body: ConfirmBody | None = None):
+    from app.ingest.figure_pipeline import HOLD_SAMPLE
+
+    task = get_task(conn, task_id)
+    if task is not None and figure_of(task) and task["auto_hold"] == HOLD_SAMPLE:
+        raise Refusal("Подтвердите показанную выборку кнопкой принятия без изменений.", 409)
     review.confirm(ctx_of(request), conn, task_id, (body or ConfirmBody()).answer)
     return _advance(request, conn, task_id, stay_if_open=True)
+
+
+class FigureSampleBody(BaseModel):
+    revision: int
+    digest: str
+
+
+@parent.post("/parent/tasks/{task_id}/figure/sample/confirm")
+@_action
+def confirm_figure_sample(task_id: int, request: Request, conn: Db, body: FigureSampleBody):
+    from app.ingest.figure_pipeline import HOLD_SAMPLE
+    from app.ingest.figure_proof import verified
+    from app.ingest.store import atomic
+
+    with atomic(conn):
+        task = get_task(conn, task_id)
+        if (
+            task is None
+            or task["revision"] != body.revision
+            or not verified(task)
+            or task["auto_hold"] != HOLD_SAMPLE
+            or figure_of(task)["auto_verification"]["digest"] != body.digest
+        ):
+            raise Refusal("Выборка изменилась: обновите карточку перед подтверждением.", 409)
+        review.confirm(ctx_of(request), conn, task_id)
+    return _advance(request, conn, task_id, stay_if_open=True)
+
+
+@parent.post("/parent/page-answers/normalize")
+@_action
+def page_answers_normalize(request: Request, conn: Db):
+    """Явный пакетный шаг: нормализовать ответы со страниц моделью. Карточки модель не зовут.
+    В работе - фоновый поток со своим соединением (один за раз); в тестах (sync) - в запросе."""
+    ctx = ctx_of(request)
+    if not page_normalizer.LOCK.acquire(blocking=False):
+        return {"started": False, "message": "Нормализация уже идёт."}
+    if request.app.state.imports.sync:
+        try:
+            return {"started": True, "counts": page_normalizer.normalize_pending(ctx, conn)}
+        finally:
+            page_normalizer.LOCK.release()
+
+    def background():
+        try:  # соединение открывается внутри: при любой ошибке замок отпускается
+            db = open_db(ctx.db_path)
+            try:
+                page_normalizer.normalize_pending(ctx, db)
+            finally:
+                db.close()
+        except Exception:
+            log.exception("page answer normalization failed")
+        finally:
+            page_normalizer.LOCK.release()
+
+    try:
+        threading.Thread(target=background, daemon=True, name="page-answers").start()
+    except BaseException:
+        page_normalizer.LOCK.release()
+        raise
+    return {"started": True}
 
 
 @parent.post("/parent/tasks/{task_id}/skip")

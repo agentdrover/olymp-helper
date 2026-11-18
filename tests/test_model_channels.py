@@ -10,6 +10,7 @@ import pytest
 
 from app.db import connect, migrate
 from app.model.adapters import TOKEN_VARS, ClaudeAdapter, CursorAdapter, build_env
+from app.model.client import MAX_REQUEST_BYTES, request_size
 from app.model.ledger import usage_report
 from app.model.runner import run_cli
 from app.model.service import ModelService
@@ -213,7 +214,7 @@ class FakeChannel:
 def db(tmp_path):
     conn = connect(tmp_path / "olymp.db")
     migrate(conn)
-    conn.execute("UPDATE settings SET claude_model='sonnet', cursor_model='auto-c'")
+    conn.execute("UPDATE settings SET codex_model='gpt-6.1-sol', claude_model='sonnet', cursor_model='auto-c'")
     conn.execute(
         "INSERT INTO study_session (id, started_at, last_activity_at) "
         "VALUES (1, '2026-10-23T10:00:00+00:00', '2026-10-23T10:00:00+00:00')"
@@ -226,32 +227,32 @@ def clock():
 
 
 def test_ac2(db, caplog):
-    claude, cursor = FakeChannel("claude", fail=True), FakeChannel("cursor")
-    svc = ModelService(db, {"claude": claude, "cursor": cursor}, clock)
+    codex, cursor = FakeChannel("codex", fail=True), FakeChannel("cursor")
+    svc = ModelService(db, {"codex": codex, "cursor": cursor}, clock)
     res = svc.complete(SYSTEM, HISTORY, session_id=1)
     assert res.error is None and res.channel == "cursor" and res.text == "ответ cursor"
-    assert len(claude.calls) == 1 and len(cursor.calls) == 1  # ровно одна запасная попытка
-    assert claude.calls[0][3] == "sonnet" and cursor.calls[0][3] == "auto-c"  # своя модель
+    assert len(codex.calls) == 1 and len(cursor.calls) == 1  # ровно одна запасная попытка
+    assert codex.calls[0][3] == "gpt-6.1-sol" and cursor.calls[0][3] == "auto-c"  # своя модель
     events = db.execute("SELECT type, data FROM event").fetchall()
     assert [e[0] for e in events] == ["fallback"]
     data = json.loads(events[0][1])
-    assert data["from"] == "claude" and data["to"] == "cursor"
+    assert data["from"] == "codex" and data["to"] == "cursor"
     # Основной канал берётся из настроек.
     db.execute("UPDATE settings SET primary_channel='cursor'")
-    claude, cursor = FakeChannel("claude"), FakeChannel("cursor")
-    svc = ModelService(db, {"claude": claude, "cursor": cursor}, clock)
+    codex, cursor = FakeChannel("codex"), FakeChannel("cursor")
+    svc = ModelService(db, {"codex": codex, "cursor": cursor}, clock)
     assert svc.complete(SYSTEM, HISTORY, session_id=1).channel == "cursor"
-    assert not claude.calls
+    assert not codex.calls
     # Оба канала упали (в том числе исключением): понятная ошибка без трассы.
-    db.execute("UPDATE settings SET primary_channel='claude'")
-    claude = FakeChannel("claude", raises=RuntimeError("Traceback secret detail"))
+    db.execute("UPDATE settings SET primary_channel='codex'")
+    codex = FakeChannel("codex", raises=RuntimeError("Traceback secret detail"))
     cursor = FakeChannel("cursor", fail=True)
-    svc = ModelService(db, {"claude": claude, "cursor": cursor}, clock)
+    svc = ModelService(db, {"codex": codex, "cursor": cursor}, clock)
     res = svc.complete(SYSTEM, HISTORY, session_id=1)
     assert res.error and res.text is None
     for bad in ("Traceback", "secret detail", "boom", "RuntimeError"):
         assert bad not in res.error
-    assert len(claude.calls) == 1 and len(cursor.calls) == 1
+    assert len(codex.calls) == 1 and len(cursor.calls) == 1
     assert "secret detail" not in caplog.text  # текст исключения канала не пишется в журнал
     # Событие fallback пишется и в учёт: запасной запуск помечен.
     flags = [r[0] for r in db.execute("SELECT fallback FROM model_run ORDER BY id")]
@@ -259,21 +260,21 @@ def test_ac2(db, caplog):
 
 
 def test_ac7(db):
-    claude, cursor = FakeChannel("claude", duration_ms=1500), FakeChannel("cursor", duration_ms=700)
-    svc = ModelService(db, {"claude": claude, "cursor": cursor}, clock)
+    codex, cursor = FakeChannel("codex", duration_ms=1500), FakeChannel("cursor", duration_ms=700)
+    svc = ModelService(db, {"codex": codex, "cursor": cursor}, clock)
     svc.complete(SYSTEM, HISTORY)
     db.execute("UPDATE settings SET primary_channel='cursor'")
     svc.complete(SYSTEM, HISTORY)
-    claude.fail = True
-    db.execute("UPDATE settings SET primary_channel='claude'")
-    svc.complete(SYSTEM, HISTORY)  # claude падает -> cursor
+    codex.fail = True
+    db.execute("UPDATE settings SET primary_channel='codex'")
+    svc.complete(SYSTEM, HISTORY)  # codex падает -> cursor
     rows = usage_report(db)
     assert len(rows) == 4
     for row in rows:
         assert {"channel", "model", "duration_ms"} <= set(row)
         assert row["duration_ms"] is not None
     assert [(r["channel"], r["model"], r["duration_ms"]) for r in rows[:2]] == [
-        ("claude", "sonnet", 1500),
+        ("codex", "gpt-6.1-sol", 1500),
         ("cursor", "auto-c", 700),
     ]
     assert [r["fallback"] for r in rows] == [False, False, False, True]
@@ -344,3 +345,44 @@ def test_tmpdir_is_set_after_the_uid_switch(tmp_path):
     tmpdir, home = out.read_text(encoding="utf-8").splitlines()
     assert tmpdir == home
     assert home.startswith(str(tmp_path))
+
+
+def _pad_for(total, channel, model):
+    """Длина ASCII-реплики, при которой тело запроса ровно total байт."""
+    base = request_size(SYSTEM, [{"role": "user", "content": ""}], None, (), channel, model)
+    return [{"role": "user", "content": "a" * (total - base)}]
+
+
+def test_boundary_request_is_rejected_before_reserve_and_fallback(db):
+    # Граница по фактическому имени модели: с пустым именем (как мерил старый код) запрос
+    # помещается, с "gpt-6.1-sol" - нет. Лимит не списывается, запасной канал не зовётся.
+    big = _pad_for(MAX_REQUEST_BYTES + 1, "codex", "gpt-6.1-sol")
+    assert request_size(SYSTEM, big, None) <= MAX_REQUEST_BYTES  # старая мерка: «помещается»
+    codex, cursor = FakeChannel("codex"), FakeChannel("cursor")
+    svc = ModelService(db, {"codex": codex, "cursor": cursor}, clock)
+    before = db.execute("SELECT count(*) FROM model_run").fetchone()[0]
+    res = svc.complete(SYSTEM, big, session_id=1)
+    assert res.error_kind == "request_too_large" and res.text is None
+    assert not codex.calls and not cursor.calls
+    assert db.execute("SELECT count(*) FROM model_run").fetchone()[0] == before
+    assert db.execute("SELECT count(*) FROM event").fetchone()[0] == 0
+    res = svc.complete_on("codex", SYSTEM, big)
+    assert res.error_kind == "request_too_large" and not codex.calls
+    assert db.execute("SELECT count(*) FROM model_run").fetchone()[0] == before
+    # Чуть меньше границы проходит.
+    ok = _pad_for(MAX_REQUEST_BYTES, "codex", "gpt-6.1-sol")
+    assert svc.complete(SYSTEM, ok).error is None
+    assert len(codex.calls) == 1
+    assert db.execute("SELECT count(*) FROM model_run").fetchone()[0] == before + 1
+
+
+def test_fits_uses_the_real_model_of_every_channel(db):
+    svc = ModelService(db, {}, clock)
+    edge = _pad_for(MAX_REQUEST_BYTES, "claude", "sonnet")
+    assert svc.fits(SYSTEM, edge, None, "claude")
+    over = _pad_for(MAX_REQUEST_BYTES + 1, "claude", "sonnet")
+    assert request_size(SYSTEM, over, None) <= MAX_REQUEST_BYTES  # мерка по умолчанию слепа
+    assert not svc.fits(SYSTEM, over, None, "claude")
+    # Без названного канала должен помещаться на обоих: у cursor имя модели иное.
+    db.execute("UPDATE settings SET cursor_model = ?", ("m" * 40,))
+    assert not svc.fits(SYSTEM, edge, None)

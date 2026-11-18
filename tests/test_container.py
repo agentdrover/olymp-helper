@@ -88,20 +88,23 @@ def _env_names(svc: dict) -> list[str]:
 
 def test_compose_app_and_two_executors_each_with_only_its_own_token():
     services = _compose()["services"]
-    assert set(services) == {"app", "executor-claude", "executor-cursor"}
+    assert set(services) == {"app", "executor-codex", "executor-cursor"}
     assert not [e for e in _env_names(services["app"]) if re.search(r"TOKEN|API_KEY|SECRET", e)]
-    claude = _env_names(services["executor-claude"])
+    codex = _env_names(services["executor-codex"])
     cursor = _env_names(services["executor-cursor"])
-    assert "CLAUDE_CODE_OAUTH_TOKEN" in claude and "CURSOR_API_KEY" not in claude
+    assert "CODEX_SEED_DIR" in codex and "CURSOR_API_KEY" not in codex
     assert "CURSOR_API_KEY" in cursor and "CLAUDE_CODE_OAUTH_TOKEN" not in cursor
 
 
 def test_compose_executors_have_writable_limited_work_tmpfs_and_read_only_root():
     services = _compose()["services"]
-    for name in ("executor-claude", "executor-cursor"):
+    for name in ("executor-codex", "executor-cursor"):
         svc = services[name]
         assert svc.get("read_only") is True
-        assert not svc.get("volumes")
+        if name == "executor-codex":
+            assert svc["volumes"] == ["${CODEX_SEED_DIR:?set the sbx proxy seed directory}:/codex-seed:ro"]
+        else:
+            assert not svc.get("volumes")
         assert svc["environment"]["EXECUTOR_WORKROOT"] == "/work"
         work = [t for t in svc["tmpfs"] if str(t).startswith("/work")]
         assert len(work) == 1, name
@@ -165,8 +168,8 @@ def test_deploy_doc_names_variables_volume_ports_hosts_and_procedures():
         e = svc.get("environment") or []
         names |= {str(x).split("=")[0] for x in (e if isinstance(e, list) else list(e))}
     names.add("OLYMP_INSECURE_HTTP")
-    assert names >= {"OLYMP_DB", "OLYMP_TLS_CERT", "OLYMP_TLS_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
-    assert {"executor-claude", "executor-cursor"} <= set(env)
+    assert names >= {"OLYMP_DB", "OLYMP_TLS_CERT", "OLYMP_TLS_KEY", "CODEX_SEED_DIR"}
+    assert {"executor-codex", "executor-cursor"} <= set(env)
     for name in names:
         assert f"| `{name}` |" in doc or f"`{name}`," in doc, name
     for must in (
@@ -179,7 +182,7 @@ def test_deploy_doc_names_variables_volume_ports_hosts_and_procedures():
         "make-certs.sh",
     ):
         assert must in doc, must
-    for host in ("api.anthropic.com", "api2.cursor.sh"):
+    for host in ("chatgpt.com", "api2.cursor.sh"):
         assert host in doc, host
     for heading in ("Выпуск токена", "Замена токена", "Сертификаты", "Доверие на ноутбуке"):
         assert heading in doc, heading

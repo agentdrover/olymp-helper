@@ -44,7 +44,7 @@ def test_ac3(tmp_path):
     results, barrier = [], threading.Barrier(10)
 
     def worker():
-        svc = ModelService(connect(path), {"claude": channel, "cursor": channel}, clock)
+        svc = ModelService(connect(path), {"codex": channel, "cursor": channel}, clock)
         barrier.wait()
         results.append(svc.complete("s", [{"role": "user", "content": "q"}]))
 

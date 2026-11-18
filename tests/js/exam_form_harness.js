@@ -12,7 +12,7 @@ const script = html.slice(html.indexOf("<script>") + 8, html.indexOf("</script>"
 
 const serverNow = Date.parse("2026-01-01T10:00:00Z");
 const deadline = serverNow + 60000;
-let elapsed = 10000;
+let elapsed = 12000;
 class LocalDate extends Date {
   static now() { return serverNow + 300000 + elapsed; }
 }
@@ -40,7 +40,11 @@ vm.runInNewContext(script, {
   document: {getElementById: id => id === "exam-left" ? left : form},
   performance: {
     now: () => elapsed,
-    getEntriesByType: () => [{requestStart: 0, responseStart: 10000}],
+    getEntriesByType: () => [{
+      requestStart: 0,
+      responseStart: 12000,
+      serverTiming: [{name: "exam", duration: 2000}],
+    }],
   },
   setInterval: callback => { tick = callback; },
   clearInterval() {},
