@@ -2,6 +2,7 @@
 
 import json
 
+from app.ingest import sampling
 from app.ingest.answers import display, key_json, key_value, normalize_answer
 from app.ingest.keys import candidate, page_refusal
 from app.ingest.model_answer import compute_model_answer, model_value
@@ -27,7 +28,13 @@ LABELS = {
     "child_dispute": "от ребёнка",
     "model_missing": "ответ модели не получен — повторить",
     "confirm": "проверить",
+    "sample": "выборка прошедших",
 }
+FAILED_LABEL = "не прошло конвейер"
+SAMPLE_HINT = (
+    sampling.HOLD_TEXT_SAMPLE + " Проверьте условие и ответ."
+)
+SAMPLE_ERROR_NOTE = "Родитель нашёл ошибку в выборке: проверьте и поправьте задание"
 
 
 AUTO_NOTE = "опубликовано автоматически"
@@ -139,7 +146,11 @@ def set_key(
             "key_version": task["key_version"] + 1,
             "key_candidate_source": candidate_source,
         }
-        if task["import_status"] == "checked" or (figure_of(task) or {}).get("auto_verification"):
+        if (
+            task["import_status"] == "checked"
+            or task["auto_hold"] == sampling.HOLD_TEXT_SAMPLE
+            or (figure_of(task) or {}).get("auto_verification")
+        ):
             new_revision(conn, task_id, **cols)
         else:
             update_task(conn, task_id, **cols)
@@ -243,11 +254,10 @@ def edit_task(
 
 
 def exclude_task(conn, task_id: int) -> None:
-    task = _task(conn, task_id)
-    from app.ingest.sampling import parent_outcome
-
-    parent_outcome(conn, task_id, task["revision"], "excluded")
-    update_task(conn, task_id, excluded=1)
+    with atomic(conn):
+        task = _task(conn, task_id)
+        sampling.parent_outcome(conn, task_id, task["revision"], "excluded")
+        update_task(conn, task_id, excluded=1)
 
 
 # ----------------------------------------------------------------------- споры
@@ -276,6 +286,8 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
     task = _task(conn, task_id)
     if task["excluded"]:
         raise Refusal("Задание исключено.")
+    if task["auto_hold"] == sampling.HOLD_TEXT_SAMPLE:
+        raise Refusal("Подтвердите показанную выборку кнопкой принятия без изменений.", 409)
     if task["import_status"] == "unsupported":
         raise Refusal(
             task["unsupported_reason"]
@@ -314,9 +326,7 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
         missing = uncovered_lefts(task, key_value(task["answer_key"]))
         if missing:
             raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
-    from app.ingest.sampling import parent_outcome
-
-    parent_outcome(conn, task_id, task["revision"], "clean" if verified(task) else "edited")
+    sampling.parent_outcome(conn, task_id, task["revision"], "clean" if verified(task) else "edited")
     update_task(conn, task_id, import_status="checked", auto_checked=0, auto_hold=None)
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
@@ -378,7 +388,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     """Карточка ленты или None, если по заданию родителю нечего делать.
 
     Только чтение: ответ модели считается лишь после подтверждения условия (POST)."""
-    if task["excluded"]:
+    if task["excluded"] or task["withdrawn_at"]:
         return None
     figure = figure_of(task)
     from app.ingest.figure_pipeline import HOLD_SAMPLE, assessment
@@ -394,6 +404,8 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
     kind, hint = None, ""
     if status == "checked" and _open_dispute(conn, task):
         kind, hint = "child_dispute", "Ребёнок считает ключ спорным. Проверьте ответ."
+    elif status == "draft" and task["auto_hold"] == sampling.HOLD_TEXT_SAMPLE:
+        kind, hint = "sample", SAMPLE_HINT
     elif status == "unsupported":
         if task["type"] == "open":
             kind = "open_exclude"
@@ -428,6 +440,13 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         kind, hint = "confirm", "Проверьте, что условие распознано верно."
     if kind is None:
         return None
+    # Конвейер проверял исходную ревизию, а его результат остаётся в журнале.
+    recorded_failure = task["pipeline_outcome"] == "failed"
+    failed = kind == "confirm" and recorded_failure and task["revision"] == 1
+    if failed:
+        hint = (
+            f"Конвейер не пропустил задание: {task['pipeline_reason']}. Проверьте условие и ответ."
+        )
     if task["auto_hold"] and status in ("draft", "unsupported") and task["auto_hold"] not in hint:
         hint = f"{hint} {task['auto_hold']}".strip()
     # Две разные страницы: текст проверяется по page_from..page_to, рисунок - на своей.
@@ -447,12 +466,20 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
             if key is not None
             else "Верно — подтвердить и дальше"
         )
+    label = LABELS[kind]
+    if failed:
+        label = FAILED_LABEL
+    elif task["auto_hold"] == HOLD_SAMPLE:
+        label = "выборочная проверка"
     card = {
         "task_id": task["id"],
         "kind": kind,
-        "label": "выборочная проверка" if task["auto_hold"] == HOLD_SAMPLE else LABELS[kind],
+        "label": label,
         "hint": hint,
-        "note": task["review_note"],
+        "note": None if recorded_failure else task["review_note"],
+        "pipeline_failed": failed,
+        "reason": task["pipeline_reason"] if failed else None,
+        "gate": task["pipeline_gate"] if failed else None,
         "parent_note": task["parent_note"],
         "warning": leak_notice(task),
         "button": button,
@@ -485,6 +512,7 @@ def build_card(ctx, conn, task, *, deep: bool = False) -> dict | None:
         "model_agrees": agrees,
         "figure": figure,
         "revision": task["revision"],
+        "sample_digest": sampling.text_digest(task) if kind == "sample" else None,
         "auto_published": bool(task["auto_published"]),
         "auto_note": AUTO_NOTE if task["auto_published"] else None,
         "auto_hold": task["auto_hold"],
@@ -554,12 +582,12 @@ def task_detail(ctx, conn, task_id: int) -> dict:
 
 
 def auto_published(conn) -> list[dict]:
-    """Задания, опубликованные без родителя: родитель видит их здесь (и выборка K5c)."""
+    """Задания, опубликованные без родителя: родитель видит их здесь."""
     rows = conn.execute(
         "SELECT t.*, m.original_name AS source_name FROM task_item t "
         "LEFT JOIN material m ON m.id=t.material_id "
-        "WHERE t.auto_published = 1 AND t.import_status = 'checked' "
-        "AND t.excluded = 0 ORDER BY t.id"
+        "WHERE (t.auto_published = 1 OR t.auto_checked = 1) AND t.import_status = 'checked' "
+        "AND t.excluded = 0 AND t.withdrawn_at IS NULL ORDER BY t.id"
     ).fetchall()
     catalog = load_catalog(conn)
     return [
@@ -569,6 +597,7 @@ def auto_published(conn) -> list[dict]:
             "text": r["text"],
             "key": display(key_value(r["answer_key"])),
             "key_source": r["key_source"],
+            "key_label": "Ключ автора" if r["key_source"] == "generated" else "Официальный ключ",
             "note": AUTO_NOTE,
             "options": options_of(r),
             "topic_title": catalog.get(r["topic"], {}).get("title"),

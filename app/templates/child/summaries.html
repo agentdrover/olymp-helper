@@ -30,7 +30,7 @@
   {% if d.revisit %}
   <ul class="revisit">
     {% for r in d.revisit %}
-    <li>{% if r.task_id %}<a href="/tasks/{{ r.task_id }}">№ {{ r.number }}</a>{% else %}№ {{ r.number }}{% endif %} <span class="pill">{{ r.reason }}</span></li>
+    <li>{% if r.task_id and not r.withdrawn %}<a href="/tasks/{{ r.task_id }}">№ {{ r.number }}</a>{% else %}№ {{ r.number }}{% endif %} <span class="pill">{{ r.reason }}</span>{% if r.withdrawn %} <span class="pill">задание снято</span>{% endif %}</li>
     {% endfor %}
   </ul>
   {% else %}

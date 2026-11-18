@@ -8,8 +8,9 @@
 <div id="feed">{% include "parent/card.html" %}</div>
 <p><button id="autorun" data-material-id="">Проверить и опубликовать задания с ключом</button>
   <span class="hint" id="autorun-status" aria-live="polite"></span></p>
-<p><a href="/parent/generate">Составить пачку вопросов</a></p>
+<p><a href="/parent/generate">Составить пачку вопросов</a> · <a href="/parent/published">Опубликованные задания</a></p>
 <p class="hint"><kbd>Enter</kbd> — верно и подтвердить, <kbd>→</kbd> — пропустить, <kbd>E</kbd> — поправить.</p>
+{% include "parent/_pipeline_journal.html" %}
 {% include "parent/_auto_published.html" %}
 <script src="/static/feed.js"></script>
 <script src="/static/autorun.js" defer></script>

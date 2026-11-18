@@ -1,6 +1,31 @@
 """One durable sample counter for publication pipelines and parent outcomes."""
 
+import hashlib
+import json
+
 from app.ingest.store import atomic
+
+HOLD_TEXT_SAMPLE = "Задание прошло конвейер и ждёт вашей проверки перед публикацией."
+
+GATES = {
+    "topic": "тема не из каталога",
+    "no_critic": "нет критика другого семейства",
+    "unavailable": "критик, редактор или судья недоступны",
+    "size": "запрос к модели слишком велик",
+    "limit": "исчерпан дневной лимит вопросов к помощнику",
+    "remarks": "замечания критика не сняты",
+    "disagree": "критик решил иначе, чем ключ",
+    "editor": "редактор не смог исправить",
+    "duplicate": "повтор вопроса из банка",
+    "leak": "в условии очевидный признак ответа",
+    "judge": "судья нашёл подсказку ответа",
+    "other": "другая причина",
+}
+
+
+def text_digest(task) -> str:
+    fields = ("type", "text", "options", "answer_key", "key_source", "key_version")
+    return hashlib.sha256(json.dumps([task[field] for field in fields]).encode()).hexdigest()
 
 
 def state(conn) -> dict:
@@ -31,6 +56,17 @@ def reserve(conn, task_id: int, revision: int, digest: str) -> bool:
             (task_id, revision, digest, ordinal, int(chosen)),
         )
         return chosen
+
+
+def matches_pending(conn, task_id: int, revision: int, digest: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM pipeline_sample WHERE task_item_id=? AND revision=? "
+            "AND input_digest=? AND chosen=1 AND outcome IS NULL",
+            (task_id, revision, digest),
+        ).fetchone()
+        is not None
+    )
 
 
 def parent_outcome(conn, task_id: int, revision: int, outcome: str) -> None:

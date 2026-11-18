@@ -82,11 +82,18 @@ EDITOR_SYSTEM = (
 
 
 class Stop(Exception):
-    """Задание не публикуется; message читает родитель."""
+    """Задание не публикуется; message читает родитель, gate - ворота из sampling.GATES (журнал)."""
+
+    def __init__(self, message: str, gate: str = "other"):
+        super().__init__(message)
+        self.gate = gate
 
 
 class Limit(Stop):
     """Дневной лимит: остальные задания пачки модель уже не спрашивают."""
+
+    def __init__(self, message: str):
+        super().__init__(message, "limit")
 
 
 @dataclass
@@ -152,20 +159,23 @@ class PackRun:
             raise Limit(LIMIT_REASON)
         ask = getattr(self.model, "complete_on", None)
         if channel is None:
-            raise Stop(self.no_critic or f"{who} недоступен")
+            raise Stop(
+                self.no_critic or f"{who} недоступен",
+                "no_critic" if self.no_critic else "unavailable",
+            )
         if ask is None:
-            raise Stop(f"{who} недоступен")
+            raise Stop(f"{who} недоступен", "unavailable")
         if request_size(system, messages, schema) > MAX_REQUEST_BYTES:
-            raise Stop(f"{who}: запрос слишком велик")
+            raise Stop(f"{who}: запрос слишком велик", "size")
         try:
             result = ask(channel, system, messages, schema)
         except Exception as exc:
-            raise Stop(f"{who} недоступен") from exc
+            raise Stop(f"{who} недоступен", "unavailable") from exc
         if getattr(result, "error_kind", None) == "limit":
             self.halted = True
             raise Limit(LIMIT_REASON)
         if not getattr(result, "ok", False):
-            raise Stop(f"{who} недоступен")
+            raise Stop(f"{who} недоступен", "unavailable")
         return result.json if getattr(result, "json", None) is not None else result.text
 
 
@@ -211,7 +221,7 @@ def _critic(run, task, kind, title) -> Critique:
     )
     critique = parse_critique(payload)
     if critique is None:
-        raise Stop("критик недоступен")
+        raise Stop("критик недоступен", "unavailable")
     return critique
 
 
@@ -227,24 +237,25 @@ def _edit(run, task, kind, critique) -> dict:
     )
     data = _as_object(payload)
     if data is None or not isinstance(data.get("unfixable"), bool):
-        raise Stop("редактор недоступен")
+        raise Stop("редактор недоступен", "unavailable")
     if data["unfixable"]:
         why = data.get("reason") if isinstance(data.get("reason"), str) else ""
-        raise Stop("редактор не смог исправить: " + (why.strip() or "причина не названа"))
+        raise Stop("редактор не смог исправить: " + (why.strip() or "причина не названа"), "editor")
     try:
         edited = check_item(data.get("question"), kind)
     except InvalidStructure as exc:
-        raise Stop(f"после правки задание не прошло проверку: {exc}") from exc
+        raise Stop(f"после правки задание не прошло проверку: {exc}", "editor") from exc
     return edited
 
 
 def _gates(task, critique, kind, known: set) -> None:
     if norm(task["text"]) in known:
-        raise Stop("повтор: такое условие уже есть в банке заданий")
+        raise Stop("повтор: такое условие уже есть в банке заданий", "duplicate")
     bank_type = KINDS[kind][0]
     if normalize_answer(critique.solution, bank_type) != task["value"]:
         raise Stop(
-            f"критик решил иначе: ответ «{critique.solution}», ключ «{display(task['value'])}»"
+            f"критик решил иначе: ответ «{critique.solution}», ключ «{display(task['value'])}»",
+            "disagree",
         )
 
 
@@ -276,7 +287,7 @@ def _no_leak(run, task) -> None:
     # условием само условие, правило option_text ("слов нет в условии") не сработает никогда.
     reason = prefilter_reason(plain(task["text"]), task["type"], task["options"], task["value"], "")
     if reason:
-        raise Stop(f"в условии очевидный признак ответа ({reason})")
+        raise Stop(f"в условии очевидный признак ответа ({reason})", "leak")
     shown = task["text"] + "\n" + "\n".join(_option_lines(task["options"]))
     like = {
         "text": task["text"],
@@ -288,9 +299,9 @@ def _no_leak(run, task) -> None:
     try:
         reveals, why = parse_verdict(payload)
     except ModelOutputError as exc:
-        raise Stop("судья недоступен") from exc
+        raise Stop("судья недоступен", "unavailable") from exc
     if reveals:
-        raise Stop("судья: " + (why or "условие или варианты выдают ответ"))
+        raise Stop("судья: " + (why or "условие или варианты выдают ответ"), "judge")
 
 
 def vet_item(run: PackRun, task: dict, kind: str, topic: str, catalog: dict, known: set):
@@ -304,7 +315,7 @@ def vet_item(run: PackRun, task: dict, kind: str, topic: str, catalog: dict, kno
         critique = box["critique"]
         if critique and critique.issues and not isinstance(stop, Limit):
             reason += f". Замечания критика: {critique.notes()}"
-        return Verdict(False, box["task"], reason)
+        return Verdict(False, box["task"], reason, stop.gate)
     known.add(norm(box["task"]["text"]))
     return Verdict(True, box["task"])
 
@@ -319,23 +330,24 @@ def _recheck(run, box, kind, title) -> Critique:
     original = box["task"]
     edited = _edit(run, original, kind, box["critique"])
     if _same_question(original, edited):
-        raise Stop("замечания критика не сняты: редактор вернул вопрос без изменений")
+        raise Stop("замечания критика не сняты: редактор вернул вопрос без изменений", "remarks")
     box["task"] = edited
     again = _critic(run, edited, kind, title)
     if again.issues:
         box["critique"] = again
-        raise Stop("замечания критика не сняты после правки")
+        raise Stop("замечания критика не сняты после правки", "remarks")
     if normalize_answer(again.solution, KINDS[kind][0]) != edited["value"]:
         raise Stop(
             f"после правки критик не согласен: ответ «{again.solution}», "
-            f"ключ «{display(edited['value'])}»"
+            f"ключ «{display(edited['value'])}»",
+            "disagree",
         )
     return again
 
 
 def _vet(run, box, kind, topic, catalog, known) -> None:
     if topic not in catalog:
-        raise Stop("тема не найдена в каталоге")
+        raise Stop("тема не найдена в каталоге", "topic")
     title = catalog[topic]["title"]
     box["critique"] = critique = _critic(run, box["task"], kind, title)
     if critique.issues:
