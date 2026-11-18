@@ -4,7 +4,7 @@
 загруженный файл ключа), а ответ модели совпал с ключом, публикуется без проверки родителем.
 Публикация идёт тем же путём, что и подтверждение родителя (review.confirm), с пометкой
 `auto_published`. Не прошедшее условие оставляет задание в ленте родителя с причиной
-(`auto_hold`). Рисунок всегда идёт к родителю: модель картинку не видит.
+(`auto_hold`). Рисунки проходят отдельный конвейер двух моделей (figure_pipeline).
 """
 
 import logging
@@ -154,6 +154,10 @@ def _hold(conn, task, reason: str) -> str:
 def try_publish(ctx, conn, task_id: int, state: dict) -> str | None:
     """None - опубликовано или задание не для автопубликации; иначе причина остановки."""
     task = get_task(conn, task_id, with_import=True)
+    if task is not None and figure_of(task) is not None:
+        from app.ingest.figure_pipeline import try_publish as publish_figure
+
+        return publish_figure(ctx, conn, task_id, state)
     key_cache = state.setdefault("keys", {})
     reason = _check(ctx, conn, task, key_cache=key_cache, need_model=False)
     if reason is not None:
@@ -199,7 +203,10 @@ def publish_pending(
     limit) вызывается после каждого задания."""
     if not force and not getattr(ctx, "auto_publish", False):
         return 0
-    sql = "SELECT id FROM task_item WHERE import_status = 'draft' AND excluded = 0"
+    sql = (
+        "SELECT id FROM task_item WHERE excluded=0 AND "
+        "(import_status='draft' OR (import_status='unsupported' AND figure IS NOT NULL))"
+    )
     args: tuple = ()
     if material_id is not None:
         sql += " AND material_id = ?"

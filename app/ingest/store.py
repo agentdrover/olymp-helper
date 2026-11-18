@@ -107,6 +107,9 @@ def save_snapshot(conn: sqlite3.Connection, task_id: int) -> None:
 def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
     """Правка, создающая новую ревизию: «проверено» снимается, model_answer сбрасывается."""
     task = get_task(conn, task_id)
+    from app.ingest import figure_proof, sampling
+
+    sampling.parent_outcome(conn, task_id, task["revision"], "edited")
     status = "draft" if task["import_status"] == "checked" else task["import_status"]
     fields = {
         "revision": task["revision"] + 1,
@@ -118,6 +121,11 @@ def new_revision(conn: sqlite3.Connection, task_id: int, **cols) -> int:
     if status == "draft":  # правка родителя: «проверено двумя моделями» больше не про это задание
         fields["auto_checked"] = 0
     fields.update(cols)
+    figure = fields.get("figure", figure_of(task))
+    if isinstance(figure, str):
+        figure = json.loads(figure)
+    if figure and figure.get("auto_verification"):
+        fields["figure"] = figure_proof.invalidate(figure)
     update_task(conn, task_id, **fields)
     save_snapshot(conn, task_id)
     return task["revision"] + 1

@@ -52,7 +52,9 @@ class ModelService:
         session_id: int | None = None,
     ) -> ModelResult:
         """Ответ модели. Никогда не бросает исключений; ребёнку - только безопасное сообщение."""
-        primary = self.conn.execute("SELECT primary_channel FROM settings WHERE id = 1").fetchone()[0]
+        primary = self.conn.execute("SELECT primary_channel FROM settings WHERE id = 1").fetchone()[
+            0
+        ]
         models = self._models()
         spare = "cursor" if primary in ("codex", "claude") else "codex"
         first = self._attempt(primary, models[primary], system, messages, schema, fallback=False)
@@ -91,15 +93,20 @@ class ModelService:
         messages: list[dict],
         schema: dict | None = None,
         channel: str | None = None,
+        images: list[bytes] | None = None,
     ) -> bool:
         """Помещается ли запрос в лимит исполнителя с фактической моделью канала. Без названного
         канала - на обоих: запрос, который не лезет на запасной, нельзя считать пригодным."""
         models = self._models()
         names = [channel] if channel in models else ["codex", "cursor"]
-        return all(
-            request_size(system, messages, schema, (), n, models[n]) <= MAX_REQUEST_BYTES
-            for n in names
-        )
+        try:
+            limit = MAX_IMAGE_REQUEST_BYTES if images else MAX_REQUEST_BYTES
+            return all(
+                request_size(system, messages, schema, images or (), n, models[n]) <= limit
+                for n in names
+            )
+        except ChannelError:
+            return False
 
     def _models(self) -> dict:
         claude_model, cursor_model, codex_model = self.conn.execute(

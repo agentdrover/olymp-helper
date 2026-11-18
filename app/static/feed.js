@@ -159,10 +159,18 @@
     el.classList.toggle("bad", ok === false);
   }
 
+  const sampleBaselines = new WeakMap();
   function refreshReady() {
     const list = problems();
     const btn = feed.querySelector('button[data-action="figure"]');
     if (btn) btn.disabled = list.length > 0 || !tilesFresh();
+    const sample = feed.querySelector('button[data-action="accept-figure-sample"]');
+    if (sample) {
+      const node = card();
+      const snapshot = JSON.stringify({alt: val("alt"), note: teacherNote(), key: keyAnswer().text, tiles: tilesState(), frame});
+      if (!sampleBaselines.has(node)) sampleBaselines.set(node, snapshot);
+      sample.disabled = sampleBaselines.get(node) !== snapshot || !tilesFresh();
+    }
     const leak = document.querySelector('input[name="leak"]:checked');
     const key = keyAnswer();
     setSum("leak", leak && leak.value === "none", leak && leak.value === "none" ? "✓ Ответа на картинках нет" : "✗ Не отмечено, что ответа на картинках нет");
@@ -372,6 +380,7 @@
   }
 
   const actions = {
+    "accept-figure-sample": () => post("figure/sample/confirm", {revision: Number(card().dataset.revision), digest: card().dataset.proofDigest}),
     confirm: (b) => post("confirm", { answer: val("answer") || (b && b.dataset.answer) || null }),
     "confirm-no-key": () => post("confirm", {}),
     skip: () => post("skip"),
