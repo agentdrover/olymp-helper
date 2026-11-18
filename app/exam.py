@@ -16,8 +16,9 @@ from fastapi import HTTPException
 from app.ingest.answers import display, key_value, label_key
 from app.ingest.publish import is_published
 from app.ingest.store import atomic, figure_of, options_of
+from app.ingest.tiles import stored_view
 from app.tutor import seq
-from app.tutor.check import BadAnswer, check_answer, parse_answer
+from app.tutor.check import BadAnswer, parse_answer
 from app.tutor.seq import bump
 
 TYPES = ("single", "multiple", "match", "numeric")
@@ -188,12 +189,27 @@ def stock(conn, fmt: dict) -> dict:
 # ------------------------------------------------------------------------- сборка
 
 
-def _snapshot_item(task) -> dict:
+def _snapshot_figure(task, read_figure):
     figure = figure_of(task)
+    if not figure:
+        return None, None, []
+    snap = {"alt": figure.get("alt", ""), "tiles": []}
+    whole = read_figure(figure["file"]) if read_figure and figure.get("file") else None
+    pngs = []
+    for n, tile in enumerate(stored_view(figure), 1):
+        png = read_figure(tile["file"]) if read_figure else None
+        if png is None:
+            raise ExamError(409, "missing_figure", "Не удалось загрузить рисунок задания.")
+        snap["tiles"].append({"n": n, "id": tile["id"], "label": tile.get("label")})
+        pngs.append((n, png))
+    return snap, whole, pngs
+
+
+def _snapshot_item(task, figure) -> dict:
     return {
         "text": task["text"],
         "options": options_of(task),
-        "figure": {"alt": figure.get("alt", "")} if figure else None,
+        "figure": figure,
         "number": task["source_number"],
         "revision": task["revision"],
         "key_version": task["key_version"],
@@ -219,14 +235,17 @@ def _create(conn, now, *, mode, title, fmt, picked, reduced, read_figure=None) -
         raise ExamError(409, "already_running", "Вариант уже идёт.") from exc
     attempt_id = cur.lastrowid
     for position, task in enumerate(picked, 1):
-        figure = figure_of(task)
-        png = read_figure(figure["file"]) if figure and read_figure and figure.get("file") else None
+        figure, png, tile_pngs = _snapshot_figure(task, read_figure)
         conn.execute(
             "INSERT INTO exam_item (attempt_id, position, task_item_id, task_type, points, "
             "snapshot, figure_png) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (attempt_id, position, task["id"], task["type"], fmt["points"][task["type"]],
-             json.dumps(_snapshot_item(task), ensure_ascii=False), png),
+             json.dumps(_snapshot_item(task, figure), ensure_ascii=False), png),
         )  # fmt: skip
+        conn.executemany(
+            "INSERT INTO exam_figure_tile (attempt_id, position, ordinal, png) VALUES (?, ?, ?, ?)",
+            ((attempt_id, position, n, content) for n, content in tile_pngs),
+        )
     _open_view(conn, attempt_id, 1, now)
     bump(conn)  # задания варианта закрылись для панели: версия растёт в той же транзакции
     return attempt_id
@@ -351,7 +370,7 @@ def _score(conn, attempt_id: int) -> tuple[float, int]:
     for item in conn.execute("SELECT * FROM exam_item WHERE attempt_id = ?", (attempt_id,)):
         snap = json.loads(item["snapshot"])
         given = None if item["answer"] is None else json.loads(item["answer"])
-        ok = given is not None and check_answer(item["task_type"], snap["key"], given)
+        ok = given is not None and given == snap["key"]
         earned = item["points"] if ok else 0
         conn.execute(
             "UPDATE exam_item SET is_correct = ?, earned = ? WHERE attempt_id = ? AND position = ?",
@@ -440,14 +459,39 @@ def _item(conn, attempt_id: int, position: int):
     return item
 
 
+def _option_token(options, raw: str) -> str:
+    token = label_key(raw)
+    if not any(token == label_key(option["label"]) for option in options):
+        raise BadAnswer("Такого варианта в задании нет.")
+    return token
+
+
+def _match_tokens(options, raw: dict) -> dict:
+    answer = {}
+    for left, right in raw.items():
+        token = _option_token(options["left"], left)
+        if token in answer:
+            raise BadAnswer("Для каждого обозначения выбери один ответ.")
+        answer[token] = _option_token(options["right"], right)
+    return answer
+
+
 def _answer_value(item, raw):
-    """Нормализованный ответ (None - пусто); число «28,0» сводится к «28», неполное соответствие
-    сохраняется как есть и оценивается по §1.1."""
+    """Проверить отдельные обозначения из формы по снимку. Пустой ответ хранится как None."""
     if raw is None or raw == [] or raw == {} or (isinstance(raw, str) and not raw.strip()):
         return None
+    kind = item["task_type"]
     options = json.loads(item["snapshot"])["options"]
     try:
-        return parse_answer(item["task_type"], options, raw)
+        if kind == "numeric":
+            return parse_answer(kind, options, raw)
+        if kind == "single" and isinstance(options, list) and isinstance(raw, str):
+            return _option_token(options, raw)
+        if kind == "multiple" and isinstance(options, list) and isinstance(raw, list):
+            return sorted({_option_token(options, value) for value in raw})
+        if kind == "match" and isinstance(options, dict) and isinstance(raw, dict):
+            return _match_tokens(options, raw)
+        raise BadAnswer("Не получилось понять ответ: выбери вариант.")
     except BadAnswer as exc:
         raise ExamError(422, "bad_answer", str(exc)) from exc
 
@@ -563,6 +607,14 @@ def _with_keys(options):
     return options
 
 
+def _figure_view(position: int, snapshot: dict | None) -> dict | None:
+    if snapshot is None:
+        return None
+    url = f"/exam/figure/{position}.png"
+    tiles = [{**tile, "url": f"{url}?tile={tile['n']}"} for tile in snapshot.get("tiles", [])]
+    return {"url": url, "alt": snapshot["alt"], "tiles": tiles}
+
+
 def current_view(conn, now) -> dict | None:
     """Бланк идущего прохождения, собранный в одном снимке чтения; перед возвратом идентичность
     активного прохождения проверяется заново (сдано и заменено новым - сборка повторяется)."""
@@ -590,16 +642,13 @@ def running_view(conn, attempt, now=None) -> dict:
         "SELECT * FROM exam_item WHERE attempt_id = ? ORDER BY position", (attempt["id"],)
     ):
         s = json.loads(item["snapshot"])
-        figure = s["figure"]
         items.append({
             "position": item["position"],
             "type": item["task_type"],
             "number": s["number"],
             "text": s["text"],
             "options": _with_keys(s["options"]),
-            "figure": None if figure is None else {
-                "url": f"/exam/figure/{item['position']}.png", "alt": figure["alt"],
-            },
+            "figure": _figure_view(item["position"], s["figure"]),
             "answer": None if item["answer"] is None else json.loads(item["answer"]),
             "marked": bool(item["marked"]),
         })  # fmt: skip
@@ -715,11 +764,17 @@ def _result_data(conn, attempt_id: int) -> dict:
     }
 
 
-def figure_png(conn, attempt_id: int, position: int) -> bytes | None:
-    row = conn.execute(
-        "SELECT figure_png FROM exam_item WHERE attempt_id = ? AND position = ?",
-        (attempt_id, position),
-    ).fetchone()
+def figure_png(conn, attempt_id: int, position: int, tile: int | None = None) -> bytes | None:
+    if tile is None:
+        row = conn.execute(
+            "SELECT figure_png FROM exam_item WHERE attempt_id = ? AND position = ?",
+            (attempt_id, position),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT png FROM exam_figure_tile WHERE attempt_id = ? AND position = ? AND ordinal = ?",
+            (attempt_id, position, tile),
+        ).fetchone()
     return row[0] if row else None
 
 

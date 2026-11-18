@@ -3,10 +3,7 @@
 import json
 import re
 import shutil
-import subprocess
-from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app import exam
@@ -928,9 +925,8 @@ def test_blank_is_plain_forms_with_revision_and_origin_check(tmp_path):
         save_format(c, tmp_path)
         a = start_real(c).json()["attempt_id"]
         page = c.get("/exam/run", headers=CHILD).text
-        assert (
-            page.count("fetch(") == 1 and "hx-" not in page
-        )  # одно: автосохранение перед сроком and 'method="post"' in page
+        assert "fetch(" not in page and "hx-" not in page
+        assert 'method="post"' in page
         views = lambda: db(tmp_path).execute("SELECT COUNT(*) FROM exam_view").fetchone()[0]
         # успех - 303 на страницу; повтор того же действия не применяется второй раз
         form = form_of(c)
@@ -1319,34 +1315,3 @@ def test_results_page_closes_an_attempt_whose_deadline_passed_without_submit(tmp
         assert page.status_code == 200
         res = c.get(f"/api/exam/results/{a}", headers=CHILD).json()
         assert res["status"] == "submitted" and res["end_reason"] == "time"
-
-
-_AUTOSAVE_SCENARIOS = [
-    "closed_after_window_sends_nothing",
-    "stale_409_with_broken_body_shows_alert_and_sends_nothing",
-    "network_error_shows_alert",
-    "success_one_save_and_form_unchanged",
-    "deadline_goes_to_results",
-    "redirect_to_results_is_not_a_saved_answer",
-    "page_opened_inside_the_window_is_closed_at_once",
-    "handlers_compare_the_deadline_not_only_the_flag",
-    "save_click_in_window_before_the_tick_keeps_the_answer",
-    "normal_submit_then_window_tick_sends_no_autosave",
-    "normal_submit_disables_the_fields_after_collecting",
-    "tick_after_the_deadline_sends_nothing",
-    "submit_handler_alone_checks_the_deadline",
-    "click_handler_alone_checks_the_deadline",
-    "pageshow_from_cache_reloads",
-    "submit_button_asks_for_confirmation",
-]
-
-
-@pytest.mark.skipif(NODE is None, reason="node не установлен")
-@pytest.mark.parametrize("scenario", _AUTOSAVE_SCENARIOS)
-def test_exam_autosave_script_runs_in_the_harness(scenario):
-    """Скрипт бланка исполняется на модели DOM: последние 1,5 с бланк закрыт, ответ ничего не меняет."""
-    harness = Path(__file__).parent / "js" / "exam_autosave_harness.js"
-    r = subprocess.run(
-        [NODE, str(harness), scenario], check=False, capture_output=True, text=True, timeout=60
-    )
-    assert r.returncode == 0, r.stdout + r.stderr

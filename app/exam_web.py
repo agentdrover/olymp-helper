@@ -108,10 +108,10 @@ def exam_current(request: Request, conn: Db):
 
 
 @child.get("/exam/figure/{position}.png", dependencies=[Depends(child_notice_gate)])
-def exam_figure(position: int, request: Request, conn: Db):
+def exam_figure(position: int, request: Request, conn: Db, tile: int | None = None):
     """Рисунок условия из снимка идущего варианта."""
     attempt = exam.active(conn, now_of(request))
-    png = exam.figure_png(conn, attempt["id"], position) if attempt else None
+    png = exam.figure_png(conn, attempt["id"], position, tile) if attempt else None
     if png is None:
         return HTMLResponse("Рисунка нет", status_code=404)
     return Response(png, media_type="image/png")
@@ -144,6 +144,7 @@ def _blank(
     if view is None:
         return RedirectResponse("/exam", status_code=303)
     item = view["items"][view["current"] - 1]
+    view["server_now"] = exam.iso(now_of(request))
     page = TEMPLATES.TemplateResponse(
         request,
         "child/exam_run.html",
@@ -171,7 +172,7 @@ def _entered(task_type: str, form) -> tuple[Any, dict, str]:
         chosen = {k: v for k, v in pairs.items() if v}
         return chosen, {"m": pairs}, "; ".join(f"{k} → {v}" for k, v in chosen.items())
     chosen = [str(v) for v in form.getlist("a")]
-    raw: Any = chosen if task_type == "multiple" else (chosen[0] if chosen else None)
+    raw: Any = chosen[0] if task_type == "single" and len(chosen) == 1 else chosen
     return raw, {"a": chosen}, ", ".join(chosen)
 
 

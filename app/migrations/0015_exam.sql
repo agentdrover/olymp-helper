@@ -58,6 +58,16 @@ CREATE TABLE exam_item (
 );
 CREATE INDEX idx_exam_item_task ON exam_item (task_item_id);
 
+-- Плитки снимка, по порядку показа. Оригиналы материала могут измениться после старта.
+CREATE TABLE exam_figure_tile (
+    attempt_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    png BLOB NOT NULL,
+    PRIMARY KEY (attempt_id, position, ordinal),
+    FOREIGN KEY (attempt_id, position) REFERENCES exam_item (attempt_id, position) ON DELETE CASCADE
+);
+
 -- Интервалы просмотра задания; открытый интервал - closed_at IS NULL.
 CREATE TABLE exam_view (
     id INTEGER PRIMARY KEY,
