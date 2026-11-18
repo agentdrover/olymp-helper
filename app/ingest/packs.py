@@ -218,7 +218,7 @@ def _check_labels(options) -> None:
             _fail("обозначения вариантов совпадают после нормализации")
 
 
-def check_item(raw, kind: str) -> dict:
+def check_item(raw, kind: str, *, allow_figure: bool = False) -> dict:
     """Задание из ответа модели в виде, готовом к записи; иначе InvalidStructure с причиной."""
     if not isinstance(raw, dict):
         _fail("ожидался объект")
@@ -249,7 +249,7 @@ def check_item(raw, kind: str) -> dict:
         _fail("задание на рисование не поддерживается")
     if parsed["answer_text"]:
         _fail("в условии остались элементы ответа")
-    if FIGURE_WORDS.search(parsed["text"]):
+    if not allow_figure and FIGURE_WORDS.search(parsed["text"]):
         _fail("условие ссылается на рисунок, схему или таблицу, а их у вопроса нет")
     options = parsed["options"]
     _check_labels(options)
@@ -263,7 +263,7 @@ def check_item(raw, kind: str) -> dict:
         if kind != "truefalse" and not 3 <= size <= 8:
             _fail("вариантов должно быть от 3 до 8")
     parsed["value"] = _check_key(parsed, raw.get("answer_key"))
-    if condition_leaks(parsed["text"], display(parsed["value"]), bank_type):
+    if not allow_figure and condition_leaks(parsed["text"], display(parsed["value"]), bank_type):
         _fail("ответ назван в условии")
     explanation = raw.get("explanation")
     parsed["explanation"] = explanation.strip()[:2000] if isinstance(explanation, str) else ""

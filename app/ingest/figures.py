@@ -323,6 +323,7 @@ def region_lines(doc: pymupdf.Document, regions: list[dict]) -> list[str]:
 
 def leaks_in_lines(lines: list[str], units: list[str]) -> list[str]:
     """Тексты из units, которые есть в строках рамки (см. crop_leaks)."""
+    lines = [norm(line) for line in lines]
     wanted = list(dict.fromkeys(u for u in map(norm, units) if u))
     return [
         unit

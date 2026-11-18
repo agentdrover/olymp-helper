@@ -203,6 +203,32 @@ def upload_material(
     )
 
 
+@parent.post("/parent/figures/generated")
+def upload_generated_figures(
+    request: Request,
+    conn: Db,
+    file: Annotated[UploadFile, File()],
+    questions: Annotated[str, Form()],
+):
+    """Import explicit author-made figures; their keys never enter the official-key table."""
+    from app.ingest.generated_figures import import_package
+
+    if len(questions) > 200_000:
+        raise HTTPException(422, "Слишком большой список авторских заданий.")
+    try:
+        answer = import_package(
+            ctx_of(request),
+            conn,
+            file.file.read(MAX_PDF_BYTES + 1),
+            json.loads(questions),
+            file.filename or "авторские.pdf",
+        )
+    except (ValueError, UploadRejected) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    answer["auto_started"] = ctx_of(request).autorun.start(ctx_of(request), answer["material_id"])
+    return JSONResponse(answer, status_code=202)
+
+
 class StartFailed(Exception):
     """Разбор после сброса не запущен; материал уже помечен failed."""
 
@@ -625,7 +651,38 @@ def _action(handler):
 @parent.post("/parent/tasks/{task_id}/confirm")
 @_action
 def task_confirm(task_id: int, request: Request, conn: Db, body: ConfirmBody | None = None):
+    from app.ingest.figure_pipeline import HOLD_SAMPLE
+
+    task = get_task(conn, task_id)
+    if task is not None and figure_of(task) and task["auto_hold"] == HOLD_SAMPLE:
+        raise Refusal("Подтвердите показанную выборку кнопкой принятия без изменений.", 409)
     review.confirm(ctx_of(request), conn, task_id, (body or ConfirmBody()).answer)
+    return _advance(request, conn, task_id, stay_if_open=True)
+
+
+class FigureSampleBody(BaseModel):
+    revision: int
+    digest: str
+
+
+@parent.post("/parent/tasks/{task_id}/figure/sample/confirm")
+@_action
+def confirm_figure_sample(task_id: int, request: Request, conn: Db, body: FigureSampleBody):
+    from app.ingest.figure_pipeline import HOLD_SAMPLE
+    from app.ingest.figure_proof import verified
+    from app.ingest.store import atomic
+
+    with atomic(conn):
+        task = get_task(conn, task_id)
+        if (
+            task is None
+            or task["revision"] != body.revision
+            or not verified(task)
+            or task["auto_hold"] != HOLD_SAMPLE
+            or figure_of(task)["auto_verification"]["digest"] != body.digest
+        ):
+            raise Refusal("Выборка изменилась: обновите карточку перед подтверждением.", 409)
+        review.confirm(ctx_of(request), conn, task_id)
     return _advance(request, conn, task_id, stay_if_open=True)
 
 
