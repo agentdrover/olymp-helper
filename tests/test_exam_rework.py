@@ -8,7 +8,7 @@ import pytest
 
 from tests.bank_helpers import quad_png
 from tests.test_exam import NODE, act, at, current, form_of, save_format, start_real, submit
-from tests.tutor_helpers import CHILD, boot, db, seed
+from tests.tutor_helpers import CHILD, PARENT, boot, db, seed
 
 
 def test_exam_blank_has_no_background_save(tmp_path):
@@ -88,3 +88,15 @@ def test_exam_figure_tiles_keep_snapshot_order_labels_and_files(tmp_path):
         assert 'data-label="2"' in page and 'data-label="1"' in page
         submit(client)
         assert client.get(view[0]["url"], headers=CHILD).status_code == 404
+
+
+def test_withdrawn_task_is_omitted_from_new_exam_variant(tmp_path):
+    client, _clock, _model = boot(tmp_path)
+    with client:
+        withdrawn = seed(tmp_path, number="1")
+        seed(tmp_path, number="2")
+        save_format(client, tmp_path)
+        assert client.post(f"/parent/tasks/{withdrawn}/withdraw", headers=PARENT).status_code == 200
+        assert start_real(client).status_code == 200
+        (item,) = current(client)[1]["items"]
+        assert item["number"] == "2"

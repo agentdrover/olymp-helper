@@ -268,6 +268,23 @@ def test_sample_rate_follows_parent_edits(bank):
     assert sampling.state(conn)["interval"] == 5
 
 
+def test_figure_and_text_tasks_share_sample_positions_and_parent_outcomes(bank, tmp_path):
+    from tests.test_pipeline_queue import judge, land
+
+    ctx, conn, client, _model, add = bank
+    land(tmp_path, [True] * 4)
+    figure_id = add()
+    assert figure_pipeline.try_publish(ctx, conn, figure_id, {})
+    assert not is_published(get_task(conn, figure_id))
+    review.confirm(ctx, conn, figure_id)
+
+    text_ids = land(tmp_path, [True] * 5)
+    assert [is_published(get_task(conn, tid)) for tid in text_ids] == [True] * 4 + [False]
+    assert sampling.state(conn) == {"passed": 10, "clean_streak": 1, "interval": 5}
+    judge(client, text_ids[-1], found_error=True)
+    assert sampling.state(conn) == {"passed": 10, "clean_streak": 0, "interval": 5}
+
+
 def test_public_entrypoint_also_processes_suggested_unsupported_figures(bank):
     ctx, conn, _client, _model, add = bank
     tid = add()
