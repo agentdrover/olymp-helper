@@ -236,6 +236,7 @@ def test_keyless_task_goes_to_parent_with_both_models_reasoning(bank):
     assert card["proposed_figure_answer"] == "Б"
     html = client.get(f"/parent/review/{tid}", headers=PARENT).text
     assert "совпали" in html and AUTHOR["reasoning"] in html
+    assert '<option value="Б" selected>' in html
     assert client.get(f"/api/tasks/{tid}").status_code == 404
 
 
@@ -466,3 +467,73 @@ def test_unverified_machine_description_is_not_tutor_or_judge_evidence(bank):
             "content"
         ]
     )
+
+
+@pytest.mark.parametrize(
+    "line,unit",
+    [
+        ("Ответ: Б", "Б"),
+        ("ANSWER: B", "B"),
+        ("Верный ответ — Б", "Б"),
+        ("Ответ: Рибосома", "рибосома"),
+    ],
+)
+def test_crop_leak_guard_accepts_unnormalized_pdf_lines(line, unit):
+    from app.ingest.figure_proof import crop_leaks
+
+    assert crop_leaks([line], [unit])
+
+
+@pytest.mark.parametrize(
+    "kind,options,solution",
+    [
+        ("single", OPTIONS, "Б"),
+        ("multiple", OPTIONS, "Б, В"),
+        ("numeric", None, "36"),
+        (
+            "match",
+            {
+                "left": [{"label": "1", "text": "Объект 1"}, {"label": "2", "text": "Объект 2"}],
+                "right": [
+                    {"label": "А", "text": "Первое свойство"},
+                    {"label": "Б", "text": "Второе свойство"},
+                ],
+            },
+            "1-А; 2-Б",
+        ),
+    ],
+)
+def test_agreed_keyless_proposal_fills_the_real_input_without_writing_a_key(
+    bank, kind, options, solution
+):
+    from app.ingest.figure_card import area_context
+    from app.ingest.store import figure_of
+
+    ctx, conn, client, model, add = bank
+    tid = add(key=None)
+    conn.execute(
+        "UPDATE task_item SET type=?,options=? WHERE id=?",
+        (kind, json.dumps(options) if options else None, tid),
+    )
+    model.solution = solution
+    assert figure_pipeline.try_publish(ctx, conn, tid, {}) == figure_pipeline.HOLD_KEYLESS
+    task = get_task(conn, tid)
+    assert task["answer_key"] is None and task["key_source"] is None
+    area = area_context(ctx, conn, task, figure_of(task))
+    assert area["key_display"] == solution
+    html = client.get(f"/parent/review/{tid}", headers=PARENT).text
+    assert "Обе модели предлагают ответ" in html
+    if kind == "single":
+        assert '<option value="Б" selected>' in html
+    elif kind in ("numeric", "multiple"):
+        assert f'id="key_text" size="12" value="{solution}"' in html
+    else:
+        assert '<option value="А" selected>' in html and '<option value="Б" selected>' in html
+    assert (
+        area_context(ctx, conn, task, figure_of(task), frame={"rect": [60, 120, 250, 250]})["key"]
+        is None
+    )
+    new_revision(conn, tid, text="Другая редакция условия")
+    current = get_task(conn, tid)
+    assert area_context(ctx, conn, current, figure_of(current))["key"] is None
+    assert client.get(f"/api/tasks/{tid}").status_code == 404

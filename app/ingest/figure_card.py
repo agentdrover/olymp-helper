@@ -163,6 +163,12 @@ def area_context(ctx, conn, task, figure: dict, *, frame=None, state=None) -> di
     frame = frame or {}
     stored = figures.regions_of(figure)
     key, _source, is_candidate = key_info(conn, task)
+    if key is None and not frame and state is None:
+        from app.ingest.figure_pipeline import assessment
+
+        report = assessment(conn, task)
+        if report and report.get("agrees") is True:
+            key = report["author"]["value"]  # A proposal for the parent, never a persisted key.
     options = options_of(task)
     area = {
         "tiles": [],
