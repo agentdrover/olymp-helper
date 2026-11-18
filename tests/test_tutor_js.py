@@ -22,6 +22,7 @@ SCENARIOS = [
     "hint_response_keeps_unsent_answer",
     "attempt_response_resets_the_form",
     "refused_attempt_keeps_unsent_answer",
+    "delayed_pre_exam_response_does_not_replace_exam_block",
 ]
 
 

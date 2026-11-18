@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from app import privacy, summary
+from app import exam, privacy, summary
 from app.ingest.web import TEMPLATES, Db, child_notice_gate
 from app.notice import notice_redirect
 from app.roles import now_of, require_csrf, require_parent
@@ -23,13 +23,22 @@ parent = APIRouter(dependencies=[Depends(require_parent), Depends(require_csrf)]
 
 
 def _my_data(conn, now, selected_id: int | None) -> dict:
-    sessions = summary.list_sessions(conn, now)
+    exam.expire_due(conn, now)
+    summary.ensure(conn, now)  # запись - до снимка чтения
+    return exam.stable(conn, lambda hidden: _my_data_in(conn, now, selected_id, hidden))
+
+
+def _my_data_in(conn, now, selected_id: int | None, hidden) -> dict:
+    # hidden: идёт олимпиада, её задания скрыты и в прошлых занятиях
+    sessions = summary.list_sessions(conn, now, write=False)  # внутри снимка - без записи
+    for s in sessions:
+        s["summary"] = summary.hide_tasks(s["summary"], hidden) if s["summary"] else None
     done = [s for s in sessions if s["summary"]]
     if selected_id is None and done:
         selected_id = done[0]["id"]
     selected = next((s["summary"] for s in done if s["id"] == selected_id), None)
     if selected is not None:
-        selected = summary.present(conn, selected, child=True)
+        selected = summary.present(conn, selected, child=True, hidden=hidden)
     return {
         "sessions": [
             {k: v for k, v in s.items() if k != "summary"}
@@ -72,10 +81,17 @@ def my_json(request: Request, conn: Db, session: int | None = None):
 
 @child.get("/api/my/sessions/{session_id}", dependencies=[Depends(child_notice_gate)])
 def my_summary_json(session_id: int, request: Request, conn: Db):
-    found = summary.get_summary(conn, session_id, now_of(request))
-    if found is None:
-        raise HTTPException(404, "Итога этого занятия нет")
-    return JSONResponse(summary.present(conn, found, child=True))
+    now = now_of(request)
+    exam.expire_due(conn, now)
+    summary.ensure(conn, now)  # запись - до снимка чтения
+
+    def build(hidden):
+        found = summary.get_summary(conn, session_id, now, write=False)
+        if found is None:
+            raise HTTPException(404, "Итога этого занятия нет")
+        return summary.present(conn, found, child=True, hidden=hidden)
+
+    return JSONResponse(exam.stable(conn, build))
 
 
 @child.post(
@@ -89,9 +105,11 @@ def finish(request: Request, conn: Db):
             {"ok": False, "code": "no_session", "message": "Идущего занятия нет."},
             status_code=409,
         )
-    return JSONResponse({"ok": True, "session_id": built["session_id"],
-         "summary": summary.present(conn, built, child=True)}
-    )  # fmt: skip
+    exam.expire_due(conn, now_of(request))
+    shown = exam.stable(
+        conn, lambda hidden: summary.present(conn, built, child=True, hidden=hidden)
+    )
+    return JSONResponse({"ok": True, "session_id": built["session_id"], "summary": shown})
 
 
 @child.post(

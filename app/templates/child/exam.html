@@ -1,0 +1,58 @@
+{% extends "base_child.html" %}
+{% block title %}Олимпиада{% endblock %}
+{% block content %}
+<header>
+  <div class="kicker">Имитация олимпиады · биология</div>
+  <h1>Олимпиада</h1>
+</header>
+{% if not d.format %}
+<section class="card"><p>Формат не задан — попроси родителя.</p></section>
+{% else %}
+<section class="card" aria-label="Формат">
+  <p>{{ d.format.stage_label|capitalize }} этап, {{ d.format.grade }} класс · {{ d.format.minutes }} мин. · заданий: {{ d.format.total }}.
+  Подсказок, чата и проверки по ходу нет; после сдачи — баллы и обычный разбор ошибок.</p>
+</section>
+<section class="card" aria-label="По формату">
+  <h2>Вариант по формату</h2>
+  <ul>
+  {% for t, s in d.stock.items() %}
+    <li>{{ s.label }}: нужно {{ s.need }}, доступно {{ s.have }}{% if s.have < s.need %} — не хватает {{ s.need - s.have }}{% endif %}</li>
+  {% endfor %}
+  </ul>
+  <p id="exam-msg" class="hint" role="status"></p>
+  <button class="btn primary" data-start-format>Начать</button>
+  <button class="btn" data-start-reduced hidden>Начать меньший вариант</button>
+</section>
+<section class="card" aria-label="Настоящий вариант">
+  <h2>Настоящий вариант</h2>
+  {% for g in d.groups %}
+  <p>{{ g.material }}{% if g.section %} · {{ g.section }}{% endif %}{% if g.variant %} · вариант {{ g.variant }}{% endif %}{% if g.stage %} · {{ g.stage }}{% endif %}:
+     заданий {{ g.admitted }}{% if g.skipped %}, не войдут (нет подтверждённого ключа): {{ g.skipped|join(", ") }}{% endif %}
+     {% if g.admitted %}<button class="btn" data-start-real data-material="{{ g.material_id }}" data-section="{{ g.section or '' }}" data-variant="{{ g.variant or '' }}" data-stage="{{ g.stage or '' }}">Начать</button>{% endif %}</p>
+  {% else %}
+  <p class="hint">Нет загруженных сборников.</p>
+  {% endfor %}
+</section>
+{% endif %}
+{% if d.history %}
+<section aria-label="Прошлые варианты"><h2>Прошлые варианты</h2>
+  {% for h in d.history %}<p><a href="/exam/results/{{ h.id }}">{{ h.title }}</a> · {{ h.score }} из {{ h.max_score }}</p>{% endfor %}
+</section>
+{% endif %}
+<script>
+const msg = document.getElementById("exam-msg");
+async function start(body) {
+  const r = await fetch("/exam/start", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (r.ok) { location.href = j.url; return; }
+  if (msg) msg.textContent = j.message + (j.shortage ? " " + Object.values(j.shortage).map(s => s.label + ": нужно " + s.need + ", есть " + s.have).join("; ") : "");
+  const reduced = document.querySelector("[data-start-reduced]");
+  if (reduced) reduced.hidden = j.code !== "shortage";
+}
+document.querySelector("[data-start-format]")?.addEventListener("click", () => start({mode: "format"}));
+document.querySelector("[data-start-reduced]")?.addEventListener("click", () => start({mode: "format", accept_reduced: true}));
+document.querySelectorAll("[data-start-real]").forEach(b => b.addEventListener("click", () => start({
+  mode: "real", material_id: +b.dataset.material, section: b.dataset.section || null,
+  variant: b.dataset.variant || null, stage: b.dataset.stage || null})));
+</script>
+{% endblock %}

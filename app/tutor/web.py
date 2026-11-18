@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from app import exam
 from app.chat.flow import ChatFlow
 from app.ingest.publish import is_published
 from app.ingest.store import atomic, get_task, open_db
@@ -48,6 +49,17 @@ class Body(BaseModel):
     confirm: bool = False
     mode: str | None = None
     message: str | None = None
+
+
+async def read_body(request: Request) -> Body:
+    """Тело читается после exam_gate: при идущей олимпиаде 409 важнее 422."""
+    raw = await request.body()
+    if not raw.strip():
+        return Body()
+    try:
+        return Body.model_validate_json(raw)
+    except ValueError as exc:
+        raise HTTPException(422, "Неверное тело запроса") from exc
 
 
 def _published(conn, task_id: int):
@@ -92,8 +104,52 @@ def child_same_origin(request: Request) -> None:
         )
 
 
+def child_same_origin_form(request: Request) -> None:
+    """Отправка обычной формы бланка: чужой источник отклоняется. Нужен свой Origin или Referer
+    (Sec-Fetch-Site: same-origin тоже годится); чужой или отсутствующий источник - 403."""
+    site = request.headers.get("sec-fetch-site")
+    source = request.headers.get("origin") or request.headers.get("referer")
+    same = source is not None and urlsplit(source).netloc == request.url.netloc
+    if site is not None:
+        same = site == "same-origin" and (source is None or same)
+    if not same:
+        raise HTTPException(
+            403, detail={"error": "cross_origin", "message": "Чужой источник запроса."}
+        )
+    kind = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if kind not in ("application/x-www-form-urlencoded", "multipart/form-data"):
+        raise HTTPException(
+            415, detail={"error": "form_required", "message": "Запрос должен быть формой."}
+        )
+
+
 def _is_fragment(request: Request) -> bool:
     return request.headers.get("hx-request") == "true"
+
+
+def _exam_block(request: Request, conn, task_id: int, *, page: bool = False, force=False):
+    """Идёт олимпиада по этому заданию: 409 на любой маршрут задания (JSON, HTMX, страница).
+
+    Ответ несёт версию панели (как любой ответ панели): вкладка применяет блок, а опоздавший ответ
+    с меньшей версией его не перекрывает. Версия читается ПОСЛЕ того, как замок подтверждён: старт
+    олимпиады поднял её в своей транзакции, значит она больше версии любого ответа до старта."""
+    if not force and not exam.task_locked(conn, task_id, request.app.state.clock()):
+        return None
+    version = seq.current(conn)
+    message = exam.RUNNING_MESSAGE
+    if page:
+        return TEMPLATES.TemplateResponse(
+            request, "child/exam_busy.html", {"message": message}, status_code=409
+        )
+    if _is_fragment(request) or "text/html" in request.headers.get("accept", ""):
+        return HTMLResponse(
+            f'<p class="notice" role="alert" data-version="{version}">{message}</p>',
+            status_code=409,
+        )
+    return JSONResponse(
+        {"ok": False, "code": "exam_running", "message": message, "version": version},
+        status_code=409,
+    )
 
 
 def _step_result(conn, task_id: int, step_id: int | None):
@@ -124,6 +180,8 @@ def _view_of(
 
 def _view_in_snapshot(request: Request, conn, task_id: int, live, step, flow, notice, version):
     app = request.app
+    if exam.task_running(conn, task_id):  # олимпиада началась между замком маршрута и снимком
+        raise ExamBusy(_exam_block(request, conn, task_id, force=True))
     task, material = _published(conn, task_id)
     # Итог шага - ДО прогона: если шаг найден оконченным, прогон читается после его записи, и ответ
     # с итогом (например «помощник не ответил») не прячет подсказку, которую шаг уже записал.
@@ -151,6 +209,8 @@ def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, not
     view = _view_of(
         request, conn, task_id, step=flow.step_id if flow else None, flow=flow, notice=notice
     )
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        raise ExamBusy(blocked)  # новое чтение после сборки: старт мог прийти, пока шла сборка
     started = flow is not None and flow.launched
     headers = {"X-Step-Started": "1"} if started else {}
     if flow is not None and flow.attempt_state:
@@ -164,7 +224,27 @@ def _respond(request: Request, conn, task_id: int, flow: Flow | None = None, not
     return JSONResponse(view, headers=headers)
 
 
+class ExamBusy(Exception):
+    """Идёт олимпиада: ответ 409 готов и отдаётся раньше любых других ошибок маршрута."""
+
+    def __init__(self, response):
+        self.response = response
+
+
+def exam_gate(task_id: int, request: Request, conn: Db) -> None:
+    """Первая зависимость каждого маршрута задания: приоритет над 404 (задание правили во время
+    варианта) и над 422 (тело запроса)."""
+    page = request.method == "GET" and request.url.path == f"/tasks/{task_id}"
+    blocked = _exam_block(request, conn, task_id, page=page)
+    if blocked is not None:
+        raise ExamBusy(blocked)
+
+
 def _refused(request: Request, conn, task_id: int, exc: Refused):
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked  # олимпиада началась, пока шёл запрос: ни отказа, ни вида задания
+    if exc.code == "exam_running":  # в том числе отложенный отказ: полного вида с результатом нет
+        return _exam_block(request, conn, task_id, force=True)
     if _is_fragment(request):
         return _respond(request, conn, task_id, notice=exc.message)
     return JSONResponse(
@@ -181,13 +261,21 @@ def _act(name: str, cls=Flow):
     def decorate(fn):
         @router.post(
             "/tasks/{task_id}/" + name,
-            dependencies=[Depends(child_same_origin), Depends(child_notice_gate)],
+            dependencies=[
+                Depends(exam_gate),
+                Depends(child_same_origin),
+                Depends(child_notice_gate),
+            ],
         )
-        def route(task_id: int, request: Request, conn: Db, body: Body | None = None):
+        def route(
+            task_id: int, request: Request, conn: Db, body: Annotated[Body, Depends(read_body)]
+        ):
             _published(conn, task_id)
+            if (blocked := _exam_block(request, conn, task_id)) is not None:
+                return blocked
             flow = _flow(request, conn, cls)
             try:
-                fn(flow, task_id, body or Body(), request)
+                fn(flow, task_id, body, request)
             except Refused as exc:
                 return _refused(request, conn, task_id, exc)
             except sqlite3.OperationalError as exc:
@@ -197,6 +285,9 @@ def _act(name: str, cls=Flow):
                     {"ok": False, "code": "busy", "message": "Занято, попробуй ещё раз."},
                     status_code=503, headers={"Retry-After": "2"},
                 )  # fmt: skip
+            # олимпиада могла начаться, пока шёл запрос: результат действия не выдаётся
+            if (blocked := _exam_block(request, conn, task_id)) is not None:
+                return blocked
             return _respond(request, conn, task_id, flow)
 
         return fn
@@ -246,22 +337,39 @@ def dispute(flow: Flow, task_id, body, request):
     flow.dispute(task_id)
 
 
-@router.get("/api/tasks/{task_id}/tutor", dependencies=[Depends(child_notice_gate)])
+@router.get(
+    "/api/tasks/{task_id}/tutor", dependencies=[Depends(exam_gate), Depends(child_notice_gate)]
+)
 def tutor_json(task_id: int, request: Request, conn: Db, step: int | None = None):
-    return JSONResponse(_view_of(request, conn, task_id, step=step))
+    _published(conn, task_id)
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked
+    view = _view_of(request, conn, task_id, step=step)
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked  # свежая проверка после сборки, вне снимка
+    return JSONResponse(view)
 
 
-@router.get("/tasks/{task_id}/tutor", response_class=HTMLResponse)
+@router.get(
+    "/tasks/{task_id}/tutor", response_class=HTMLResponse, dependencies=[Depends(exam_gate)]
+)
 def tutor_fragment(task_id: int, request: Request, conn: Db, step: int | None = None):
     _published(conn, task_id)
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
-    return _fragment(request, _view_of(request, conn, task_id, step=step))
+    view = _view_of(request, conn, task_id, step=step)
+    if (blocked := _exam_block(request, conn, task_id)) is not None:
+        return blocked  # свежая проверка после сборки, вне снимка
+    return _fragment(request, view)
 
 
-@router.get("/tasks/{task_id}", response_class=HTMLResponse)
+@router.get("/tasks/{task_id}", response_class=HTMLResponse, dependencies=[Depends(exam_gate)])
 def task_page(task_id: int, request: Request, conn: Db):
     task, material = _published(conn, task_id)
+    if (blocked := _exam_block(request, conn, task_id, page=True)) is not None:
+        return blocked
     if _needs_notice(request, conn):
         return notice_redirect(f"/tasks/{task_id}")
     app = request.app
@@ -270,11 +378,15 @@ def task_page(task_id: int, request: Request, conn: Db):
     with atomic(conn):  # экран открыт: с этого момента идут 60 секунд до подсказки 1
         state.ensure_run(conn, task_id, app.state.clock())
     with seq.read_snapshot(conn):
+        if exam.task_running(conn, task_id):  # олимпиада началась после замка маршрута
+            return _exam_block(request, conn, task_id, page=True, force=True)
         task, material = _published(conn, task_id)
         view = build_view(
             conn, task, material, state.active_run(conn, task), app.state.clock(),
             inflight=app.state.inflight, live=live, version=version,
         )  # fmt: skip
+    if (blocked := _exam_block(request, conn, task_id, page=True)) is not None:
+        return blocked  # свежая проверка после сборки, вне снимка
     return TEMPLATES.TemplateResponse(request, "child/task.html", {"v": view, "task": view["task"]})
 
 

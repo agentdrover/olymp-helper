@@ -1,0 +1,100 @@
+{% extends "base_child.html" %}
+{% block title %}Олимпиада{% endblock %}
+{% block content %}
+{# Бланк без фоновых запросов: каждое действие - обычная отправка формы (POST) и 303 на эту страницу. #}
+<header>
+  <div class="kicker">{{ v.title }} · {{ v.stage }} этап</div>
+  <h1>Олимпиада: осталось <span id="exam-left" data-deadline="{{ v.deadline_at }}" data-now="{{ v.server_now }}">…</span></h1>
+  <p class="hint">Таймер показывает примерное время. Срок определяет сервер. Сохраняй ответы по ходу варианта.</p>
+</header>
+{% if message %}<p class="err" role="alert">{{ message }}</p>{% endif %}
+{% if lost %}<p class="notice">Введённое тобой (не сохранено): {{ lost }}</p>{% endif %}
+<form method="post" action="/exam/act" id="exam-form">
+  <input type="hidden" name="attempt_id" value="{{ v.id }}">
+  <input type="hidden" name="rev" value="{{ v.rev }}">
+  <input type="hidden" name="shown" value="{{ item.position }}">
+  <input type="hidden" name="action_id" value="{{ action_id }}">
+  {# Первая кнопка отправки - «сохранить»: Enter в поле не должен открывать другое задание. #}
+  <button type="submit" name="action" value="save" class="visually-hidden" tabindex="-1">Сохранить ответ</button>
+  <nav aria-label="Задания варианта">
+  {% for x in v["items"] %}
+    <button type="submit" name="action" value="open:{{ x.position }}"{% if x.position == item.position %} aria-current="true"{% endif %}>{{ x.position }}{% if x.answer is not none and x.answer != "" and x.answer != [] and x.answer != {} %} ✓{% endif %}{% if x.marked %} ⚑{% endif %}</button>
+  {% endfor %}
+  </nav>
+  <section class="card">
+    <input type="hidden" name="answer_present" value="{{ item.position }}">
+    <p>{{ item.text }}</p>
+    {% if item.figure %}
+      {% if item.figure.tiles %}
+        {% with tiles=item.figure.tiles, alt=item.figure.alt, editor=false, zoom=false %}
+          {% include "child/_tiles.html" %}
+        {% endwith %}
+      {% else %}
+        <img src="{{ item.figure.url }}" alt="{{ item.figure.alt }}">
+      {% endif %}
+    {% endif %}
+    {% if item.type in ("single", "multiple") %}
+      {% for o in item.options %}
+      <label><input type="{{ 'radio' if item.type == 'single' else 'checkbox' }}" name="a" value="{{ o.token }}"{% if o.token in fill.a %} checked{% endif %}> {{ o.label }}) {{ o.text }}</label><br>
+      {% endfor %}
+    {% elif item.type == "match" %}
+      {% for l in item.options.left %}
+      <p>{{ l.label }}) {{ l.text }} → <select name="m.{{ l.token }}"><option value="">—</option>
+        {% for r in item.options.right %}<option value="{{ r.token }}"{% if fill.m[l.token] == r.token %} selected{% endif %}>{{ r.label }}) {{ r.text }}</option>{% endfor %}
+      </select></p>
+      {% endfor %}
+    {% else %}
+      <label>Число <input name="n" inputmode="decimal" value="{{ fill.n }}"></label>
+    {% endif %}
+    <p><button class="btn" type="submit" name="action" value="save">Сохранить ответ</button></p>
+  </section>
+  <p><button class="btn" type="submit" name="action" value="mark">{{ "Снять «вернусь»" if item.marked else "Вернусь" }}</button>
+     <button class="btn primary" type="submit" name="action" value="submit" id="exam-submit">Сдать вариант</button></p>
+</form>
+<script>
+const left = document.getElementById("exam-left");
+const form = document.getElementById("exam-form");
+const deadline = Date.parse(left.dataset.deadline) - Date.parse(left.dataset.now);
+const navigation = performance.getEntriesByType("navigation")[0];
+const receivedAt = navigation?.responseStart || performance.now();
+// Из времени до первого байта исключаем время сборки бланка, измеренное сервером.
+const preparation = navigation?.serverTiming?.find(metric => metric.name === "exam")?.duration || 0;
+const transit = navigation ? Math.max(0, receivedAt - navigation.requestStart - preparation) : 0;
+const lock = () => {
+  form.querySelectorAll("button, input:not([type=hidden]), select, input[name=answer_present]")
+    .forEach(control => { control.disabled = true; });
+};
+let submitted = false;
+let expired = false;
+
+function tick() {
+  const elapsed = Math.max(0, performance.now() - receivedAt);
+  const seconds = Math.max(0, Math.ceil((deadline - elapsed - transit) / 1000));
+  left.textContent = Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+  // Учитываем задержку для показа. Уходим с бланка, только когда сам срок точно прошёл.
+  if (!submitted && !expired && elapsed >= deadline) {
+    expired = true;
+    lock();
+    location.href = "/exam/results/{{ v.id }}";
+  }
+}
+
+form.addEventListener("submit", event => {
+  if (submitted || expired) {
+    event.preventDefault();
+    return;
+  }
+  if (event.submitter?.id === "exam-submit" && !confirm("Сдать вариант? После сдачи ответы изменить нельзя.")) {
+    event.preventDefault();
+    return;
+  }
+  submitted = true;
+  // Кнопку и поля можно выключить после того, как браузер собрал обычную форму POST.
+  setTimeout(lock, 0);
+});
+
+tick();
+setInterval(tick, 250);
+window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
+</script>
+{% endblock %}

@@ -7,6 +7,7 @@
     <a class="brand" href="/">{% include "_logo.html" %} Помощник</a>
     <a href="/today"{% if path == "/today" %} aria-current="page"{% endif %}>Сегодня</a>
     <a href="/tasks"{% if path.startswith("/tasks") %} aria-current="page"{% endif %}>Задания</a>
+    <a href="/exam"{% if path.startswith("/exam") %} aria-current="page"{% endif %}>Олимпиада</a>
     <a href="/my"{% if path == "/my" or path == "/how" %} aria-current="page"{% endif %}>Мои итоги</a>
     <button type="button" class="navlink" data-finish>Закончить занятие</button>
     <div class="spacer"></div>

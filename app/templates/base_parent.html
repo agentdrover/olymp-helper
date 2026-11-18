@@ -11,6 +11,7 @@
     <a href="/parent/materials"{% if path.startswith("/parent/materials") %} aria-current="page"{% endif %}>Материалы и модель</a>
     <a href="/parent/summaries"{% if path.startswith("/parent/summaries") or path.startswith("/parent/sessions") %} aria-current="page"{% endif %}>Итоги занятий</a>
     <a href="/parent/conversations"{% if path.startswith("/parent/conversations") %} aria-current="page"{% endif %}>Переписка</a>
+    <a href="/parent/exam"{% if path.startswith("/parent/exam") %} aria-current="page"{% endif %}>Олимпиада</a>
     <a href="/parent/settings"{% if path.startswith("/parent/settings") %} aria-current="page"{% endif %}>Настройки</a>
     <div class="spacer"></div>
     <form method="post" action="/parent/logout"><input type="hidden" name="csrf" value="{{ csrf_token(request) }}"><button class="navlink" type="submit">Выйти</button></form>
