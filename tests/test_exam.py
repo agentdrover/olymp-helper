@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import exam
@@ -292,7 +293,7 @@ def kw_now():
     return NOW["clock"]()
 
 
-def test_pending_helper_answer_is_withheld_after_start(tmp_path):
+def _pending_sync(tmp_path, _monkeypatch):
     model = StartsExam(tmp_path, 0)
     c, clock, _ = boot(tmp_path, model=model)
     NOW["clock"] = clock
@@ -543,7 +544,7 @@ def test_lock_wins_over_404_and_422_and_skips_list_everything(tmp_path):
         assert "server_now" in current(c)[1]
 
 
-def test_background_step_finishing_during_the_exam_shows_nothing(tmp_path):
+def _pending_background(tmp_path, _monkeypatch):
     """Шаг в фоне начат до старта и кончается во время олимпиады: ни ответ POST, ни опрос
     (с номером шага и без) его итога не показывают; отложенный итог не сохраняется, а после сдачи
     помощь работает штатно: подсказку можно взять заново."""
@@ -785,7 +786,7 @@ def _start_after_first_read(tmp_path, clock, monkeypatch):
     return fired
 
 
-def test_my_summaries_survive_a_variant_committed_inside_the_snapshot(tmp_path, monkeypatch):
+def _mixed_summary_snapshot(tmp_path, monkeypatch):
     c, clock, _ = boot(tmp_path)
     with c:
         task = seed(tmp_path, key="Б", number="1")
@@ -801,7 +802,7 @@ def test_my_summaries_survive_a_variant_committed_inside_the_snapshot(tmp_path, 
             monkeypatch.undo()
 
 
-def test_nothing_writes_inside_a_read_snapshot(tmp_path, monkeypatch):
+def _read_snapshot_does_not_write(tmp_path, monkeypatch):
     """Каждый маршрут со снимком чтения проходит с запретом INSERT/UPDATE/DELETE на время снимка:
     запись внутри снимка падает «database is locked», если чужой коммит успел раньше."""
     import sqlite3
@@ -883,7 +884,7 @@ def test_parent_preview_is_not_reachable_for_the_child(tmp_path):
             assert r.text.count("disabled") == plain.text.count("disabled"), query
 
 
-def test_start_during_assembly_is_caught_by_the_fresh_check(tmp_path, monkeypatch):
+def _fresh_check_after_assembly(tmp_path, monkeypatch):
     """Старт зафиксирован, пока собирался ответ (внутри снимка, который его не видит): свежее
     чтение после сборки отдаёт 409, а не экран с данными задания варианта."""
     from app.tutor import web
@@ -918,7 +919,21 @@ def test_start_during_assembly_is_caught_by_the_fresh_check(tmp_path, monkeypatc
             monkeypatch.undo()
 
 
-def test_blank_is_plain_forms_with_revision_and_origin_check(tmp_path):
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        _fresh_check_after_assembly,
+        _mixed_summary_snapshot,
+        _pending_sync,
+        _pending_background,
+        _read_snapshot_does_not_write,
+    ],
+)
+def test_fresh_check_after_build_and_late_model_answer(tmp_path, monkeypatch, scenario):
+    scenario(tmp_path, monkeypatch)
+
+
+def test_form_blank_revision_tokens_and_origin(tmp_path):
     c, _clock, _ = boot(tmp_path)
     with c:
         four(tmp_path)
@@ -927,6 +942,13 @@ def test_blank_is_plain_forms_with_revision_and_origin_check(tmp_path):
         page = c.get("/exam/run", headers=CHILD).text
         assert "fetch(" not in page and "hx-" not in page
         assert 'method="post"' in page
+        cross_origin = c.post(
+            "/exam/act",
+            data={**form_of(c), "action": "save", "a": "Б"},
+            headers={**CHILD, "Origin": "http://unrelated.example"},
+        )
+        assert cross_origin.status_code == 403
+        assert current(c)[1]["items"][0]["answer"] is None
         views = lambda: db(tmp_path).execute("SELECT COUNT(*) FROM exam_view").fetchone()[0]
         # успех - 303 на страницу; повтор того же действия не применяется второй раз
         form = form_of(c)
@@ -1084,7 +1106,6 @@ def test_task_map_has_no_status_for_the_running_variant_tasks(tmp_path):
 
 
 def test_stable_refuses_an_unchecked_snapshot(tmp_path, monkeypatch):
-    import pytest
     from fastapi import HTTPException
 
     c, _clock, _ = boot(tmp_path)
@@ -1175,7 +1196,7 @@ def test_submit_and_navigation_use_the_field_as_it_is_at_send_time(tmp_path):
         assert views() == before
 
 
-def test_save_one_second_before_deadline_is_taken_and_template_autosaves(tmp_path):
+def test_explicit_save_one_second_before_deadline_is_taken(tmp_path):
     c, clock, _ = boot(tmp_path)
     with c:
         four(tmp_path)
@@ -1194,10 +1215,7 @@ def test_save_one_second_before_deadline_is_taken_and_template_autosaves(tmp_pat
 
 
 def test_second_tab_save_makes_the_first_tab_submit_stale_and_keeps_the_newer_answer(tmp_path):
-    """Серверная часть гонки двух вкладок: старая ревизия получает 409, чужой ответ не затирается.
-
-    Клиентская часть (после окна 1,5 с бланк закрыт, отложенных действий нет) - в node-сценариях ниже.
-    """
+    """Старая ревизия получает 409 и сохраняет ответ из другой вкладки."""
     c, _clock, _ = boot(tmp_path)
     with c:
         four(tmp_path)
@@ -1205,14 +1223,14 @@ def test_second_tab_save_makes_the_first_tab_submit_stale_and_keeps_the_newer_an
         start_real(c)
         tab_a = form_of(c)
         assert act(c, "save", {**tab_a, "action_id": "tab-b"}, a="Б").status_code == 303
-        stale_auto = act(c, "save", {**tab_a, "action_id": "auto-a"}, a="А")
-        assert stale_auto.status_code == 409 and "не сохранён" in stale_auto.text
+        stale_save = act(c, "save", {**tab_a, "action_id": "save-a"}, a="А")
+        assert stale_save.status_code == 409 and "не сохранён" in stale_save.text
         assert act(c, "submit", tab_a, a="А").status_code == 409
         row = db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 1").fetchone()
         assert row[0] == '"Б"' and current(c)[1]["status"] == "running"
 
 
-def test_autosave_arriving_after_the_deadline_redirects_to_results_and_saves_nothing(tmp_path):
+def test_save_arriving_after_the_deadline_redirects_and_saves_nothing(tmp_path):
     """Запрос после срока: 303 на итог (не на бланк), ответ не сохранён - вкладка не вправе считать его сохранённым."""
     c, clock, _ = boot(tmp_path)
     with c:
@@ -1221,7 +1239,7 @@ def test_autosave_arriving_after_the_deadline_redirects_to_results_and_saves_not
         a = start_real(c).json()["attempt_id"]
         tab = form_of(c)
         clock.advance(601)
-        late = act(c, "save", {**tab, "action_id": "auto-late"}, a="А")
+        late = act(c, "save", {**tab, "action_id": "save-late"}, a="А")
         assert late.status_code == 303 and late.headers["location"] == f"/exam/results/{a}"
         row = db(tmp_path).execute("SELECT answer FROM exam_item WHERE position = 1").fetchone()
         assert row[0] is None
