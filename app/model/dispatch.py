@@ -19,6 +19,12 @@ def record_outcome(conn, ledger, run_id, result):
         ledger.finish(run_id, result.ok, result.duration_ms, result.error_kind)
 
 
+def remove_unspent(conn, run_id):
+    with atomic(conn):
+        conn.execute("DELETE FROM model_dispatch WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM model_run WHERE id = ?", (run_id,))
+
+
 class Dispatch:
     def __init__(self, conn, ledger, scope, channel, model):
         self.conn = conn
@@ -68,11 +74,7 @@ class Dispatch:
                 system, messages, schema, model=self.model, images=images, attempt=attempt
             )
             if result.error_kind in NOT_SENT:
-                with atomic(self.conn):
-                    self.conn.execute("DELETE FROM model_dispatch WHERE run_id = ?", (run_id,))
-                    self.conn.execute("DELETE FROM model_run WHERE id = ?", (run_id,))
-                self.scope.deferred = True
-                raise BoundaryWait
+                return self.defer(run_id)
             if result.error_kind not in AMBIGUOUS:
                 return self.finish(run_id, result)
         return self.reconcile(worker, attempt, run_id)
@@ -80,12 +82,19 @@ class Dispatch:
     def reconcile(self, worker, attempt, run_id):
         cached = self.scope.receipts or {}
         result = cached.get(attempt) if attempt in cached else worker.outcome(attempt, self.model)
+        if result is not None and result.error_kind in NOT_SENT:
+            return self.defer(run_id)
         if result is not None and result.error_kind not in AMBIGUOUS:
             return self.finish(run_id, result)
         self.conn.execute(
             "UPDATE model_dispatch SET disposition = 'unknown' WHERE run_id = ?", (run_id,)
         )
         return self.unknown()
+
+    def defer(self, run_id):
+        remove_unspent(self.conn, run_id)
+        self.scope.deferred = True
+        raise BoundaryWait
 
     def finish(self, run_id, result):
         record_outcome(self.conn, self.ledger, run_id, result)

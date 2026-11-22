@@ -461,3 +461,92 @@ def test_late_proof_finishes_ledger_after_domain_operation_is_superseded(tmp_pat
     assert admission.status()["unknown"] == 0
     assert admission.conn.execute("SELECT status FROM model_run").fetchall() == [("ok",)]
     assert runner.submit_again("answer", "12", conn=admission.conn) != op_id
+
+
+def test_lost_worker_prelaunch_refusal_requeues_without_spare_or_charge(tmp_path, monkeypatch):
+    import threading
+    from contextlib import closing
+    from functools import partial
+
+    from app.model import client, executor_server, work
+    from app.model.service import ModelService
+    from app.model.types import ModelResult
+
+    path = tmp_path / "olymp.db"
+    admission = open_admission(path)
+    op_id = admission.enqueue("answer", "12")
+    monkeypatch.setattr(work, "worker_status", lambda _: {"state": "ready", "active": 0})
+    monkeypatch.setenv("EXECUTOR_SHARED_KEY", "synthetic-only-key")
+    launches = []
+    posts = []
+    loss = True
+    original_post = client.http_post
+    original_outcome = client.ExecutorChannel.outcome
+
+    def fake_cli(channel, model, *args, **kwargs):
+        launches.append(channel)
+        return ModelResult(None, {"answer": "42"}, channel, model, 1, None)
+
+    def post(url, payload, timeout, headers):
+        posts.append(payload["attempt"])
+        lose_busy_reply = loss and payload["system"] == "stage-two"
+        if lose_busy_reply:
+            # The worker became busy after the status proof and first stage.
+            assert server.gate.try_enter() == "ok"
+        result = original_post(url, payload, timeout, headers)
+        if lose_busy_reply:
+            assert result["error_kind"] == "busy"
+            raise ConnectionError("synthetic loss of known busy reply")
+        return result
+
+    def outcome(self, attempt, model):
+        return None if loss else original_outcome(self, attempt, model)
+
+    monkeypatch.setattr(executor_server, "run_cli", fake_cli)
+    monkeypatch.setattr(client, "http_post", post)
+    monkeypatch.setattr(client.ExecutorChannel, "outcome", outcome)
+    with (
+        executor_server.make_server(
+            "127.0.0.1", 0, shared_key="synthetic-only-key", only_channel="codex"
+        ) as server,
+        closing(admission.conn),
+    ):
+        thread = threading.Thread(target=partial(server.serve_forever, poll_interval=0.01))
+        thread.start()
+        try:
+            monkeypatch.setenv("EXECUTOR_CODEX_URL", f"http://127.0.0.1:{server.server_address[1]}")
+            worker = client.configured_channel("codex")
+            service = ModelService(admission.conn, {"codex": worker}, managed=True)
+            runner = work.ModelWork(path)
+            received = []
+            messages = [{"role": "user", "content": "test"}]
+
+            def run_answer(_):
+                assert service.complete("stage-one", messages).ok
+                received.append(service.complete("stage-two", messages).json)
+
+            runner.handlers["answer"] = run_answer
+            assert runner.tick()
+            assert not runner.tick()
+            assert admission.status()["unknown"] == 1
+            assert len(posts) == 2
+            assert launches == ["codex"]
+            assert received == []
+
+            loss = False
+            assert runner.tick()
+            assert admission.queued() == [(op_id, "answer", "12")]
+            assert admission.conn.execute("SELECT status FROM model_run").fetchall() == [("ok",)]
+            assert launches == ["codex"]
+            assert len(posts) == 2
+
+            server.gate.leave()
+            assert runner.tick()
+            assert not runner.tick()
+            assert received == [{"answer": "42"}]
+            assert launches == ["codex", "codex"]
+            assert len(set(posts)) == 3
+            assert admission.conn.execute("SELECT COUNT(*) FROM model_run").fetchone()[0] == 2
+        finally:
+            server.shutdown()
+            thread.join()

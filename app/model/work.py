@@ -12,7 +12,7 @@ from app.ingest.store import atomic
 from app.model.admission import Admission
 from app.model.client import configured_channel
 from app.model.control import EXECUTORS, worker_status, workers_ready
-from app.model.dispatch import AMBIGUOUS, record_outcome
+from app.model.dispatch import AMBIGUOUS, NOT_SENT, record_outcome, remove_unspent
 from app.model.ledger import Ledger
 from app.model.types import BoundaryWait
 
@@ -161,7 +161,11 @@ class ModelWork:
         with atomic(conn):
             ledger = Ledger(conn, None)
             for attempt, _, _, run_id in attempts:
-                record_outcome(conn, ledger, run_id, receipts[attempt])
+                receipt = receipts[attempt]
+                if receipt.error_kind in NOT_SENT:
+                    remove_unspent(conn, run_id)
+                else:
+                    record_outcome(conn, ledger, run_id, receipt)
         self._execute(gate, op_id, kind, key, receipts=receipts)
         return True
 
