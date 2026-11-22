@@ -23,6 +23,7 @@ from app.ingest.schema import (
 )
 from app.ingest.store import open_db, save_snapshot
 from app.ingest.topics import catalog_prompt, load_catalog
+from app.model.types import BoundaryWait
 from app.search import index_pages
 
 log = logging.getLogger("app.ingest")
@@ -485,7 +486,12 @@ def _finish(
 def _auto_publish(ctx, conn, material_id: int | None) -> None:
     """Автопубликация (K5b) идёт после status=done и не влияет на итог импорта."""
     try:
-        ctx.autorun.run_inline(ctx, conn, material_id)
+        if getattr(getattr(ctx, "state", None), "model_work", None) is not None:
+            ctx.autorun.enqueue_candidates(ctx, conn, material_id, force=False)
+        else:
+            ctx.autorun.run_inline(ctx, conn, material_id)
+    except BoundaryWait:
+        raise
     except Exception:
         log.exception("auto publish after import %s failed", material_id)
 
@@ -593,6 +599,12 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 )
                 if finished:
                     _auto_publish(ctx, conn, material_id)
+        except BoundaryWait:
+            conn.execute(
+                "UPDATE material SET import_status = 'queued' "
+                "WHERE id = ? AND run_id = ? AND import_status = 'running'",
+                (material_id, run_id),
+            )
         except ImportAborted:
             log.info("import %s aborted", material_id)
         except ImportFailure as exc:

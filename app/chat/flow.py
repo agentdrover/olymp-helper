@@ -25,6 +25,7 @@ from app.chat.prompts import (
 )
 from app.ingest.publish import assist_mode
 from app.ingest.store import atomic, get_task
+from app.model.types import BoundaryWait
 from app.search.textbook import search_textbooks
 from app.tutor import state, steps
 from app.tutor.flow import LONG_TALK, Flow, fits_limit, too_large
@@ -79,6 +80,8 @@ class ChatFlow(Flow):
             return OVERFLOW
         try:
             result = self.model.complete(system, messages, CHAT_SCHEMA, session_id=self.session)
+        except BoundaryWait:
+            raise
         except Exception:  # noqa: BLE001 - модель любого вида: ребёнку «не отвечает»
             self.panel_state = "down"
             return None

@@ -10,7 +10,9 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app.model.adapters import ADAPTERS
@@ -23,9 +25,68 @@ log = logging.getLogger("app.model.executor")
 MAX_BODY = 3_000_000
 KEY_HEADER = "X-Executor-Key"
 RESTART_DELAY_S = 30
+_ATTEMPT = re.compile(r"[0-9a-f]{32}")
+RESULT_TTL = 600
+MAX_RESULTS = 64
+MAX_TOMBSTONES = 512
+MAX_RESULT_BYTES = 1_000_000
 
 
 __all__ = ["Gate", "cli_launcher", "handle_request", "main", "make_server"]
+
+
+class Outcomes:
+    """Short-lived receipt cache. Worker restarts make missing evidence unknown."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._active = set()
+        self._finished = {}
+        self._seen = {}
+
+    def _expire(self, now):
+        for attempt, until in list(self._seen.items()):
+            if until <= now:
+                del self._seen[attempt]
+                self._finished.pop(attempt, None)
+
+    def expire(self):
+        with self._lock:
+            self._expire(time.monotonic())
+
+    def active(self):
+        with self._lock:
+            return bool(self._active)
+
+    def accept(self, attempt):
+        with self._lock:
+            self._expire(time.monotonic())
+            if attempt in self._active or attempt in self._seen:
+                return "dispatch_unknown"
+            if len(self._active) + len(self._seen) >= MAX_TOMBSTONES:
+                return "receipt_capacity"
+            self._active.add(attempt)
+            return None
+
+    def complete(self, attempt, result):
+        stored = result if len(json.dumps(result).encode("utf-8")) <= MAX_RESULT_BYTES else None
+        with self._lock:
+            self._active.discard(attempt)
+            self._seen[attempt] = time.monotonic() + RESULT_TTL
+            if stored is not None:
+                if len(self._finished) == MAX_RESULTS:
+                    del self._finished[next(iter(self._finished))]
+                self._finished[attempt] = stored
+
+    def status(self, attempt):
+        with self._lock:
+            self._expire(time.monotonic())
+            if attempt in self._active:
+                return {"state": "active"}
+            receipt = self._finished.get(attempt)
+            if receipt is None:
+                return {"state": "unknown"}
+            return {"state": "complete", "result": receipt}
 
 
 class Gate:
@@ -48,6 +109,12 @@ class Gate:
             self._lock.release()
             return "faulty"
         return "ok"
+
+    def status(self) -> dict:
+        return {
+            "state": "faulty" if self.fault_reason else "ready",
+            "active": int(self._lock.locked()),
+        }
 
     def leave(self) -> None:
         self._lock.release()
@@ -154,6 +221,7 @@ def make_server(
         raise ValueError("shared key is required")
     key = shared_key.encode("utf-8")
     gate = gate or Gate()
+    outcomes = Outcomes()
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, body):
@@ -166,6 +234,19 @@ def make_server(
             self.wfile.write(data)
 
         def do_GET(self):
+            if self.path == "/status" or self.path.startswith("/outcome/"):
+                given = (self.headers.get(KEY_HEADER) or "").encode("utf-8")
+                if not hmac.compare_digest(given, key):
+                    return self._send(401, {"error": "unauthorized"})
+                identity = {"version": 1, "channel": only_channel}
+                if self.path == "/status":
+                    report = gate.status()
+                    report["active"] = int(report["active"] or outcomes.active())
+                    return self._send(200, {**identity, **report})
+                attempt = self.path.removeprefix("/outcome/")
+                if not _ATTEMPT.fullmatch(attempt):
+                    return self._send(404, {"error": "not_found"})
+                return self._send(200, {**identity, "attempt": attempt, **outcomes.status(attempt)})
             if self.path != "/healthz":
                 return self._send(404, {"error": "not_found"})
             if gate.fault_reason:
@@ -187,22 +268,41 @@ def make_server(
                 payload = json.loads(self.rfile.read(size))
             except ValueError:
                 return self._send(400, _failure("", "bad_request"))
-            reply = handle_request(
-                payload,
-                env=env,
-                spawn=spawn,
-                workroot=workroot,
-                only_channel=only_channel,
-                launcher=launcher,
-                gate=gate,
-                sweeper=sweeper,
-            )
+            attempt = payload.get("attempt") if isinstance(payload, dict) else None
+            if attempt is not None:
+                if not isinstance(attempt, str) or not _ATTEMPT.fullmatch(attempt):
+                    return self._send(400, _failure(only_channel, "bad_request"))
+                refused = outcomes.accept(attempt)
+                if refused:
+                    return self._send(503, _failure(only_channel, refused))
+            try:
+                reply = handle_request(
+                    payload,
+                    env=env,
+                    spawn=spawn,
+                    workroot=workroot,
+                    only_channel=only_channel,
+                    launcher=launcher,
+                    gate=gate,
+                    sweeper=sweeper,
+                )
+            except BaseException:
+                if attempt is not None:
+                    outcomes.complete(attempt, None)
+                raise
+            if attempt is not None:
+                outcomes.complete(attempt, reply)
+                reply = {**reply, "attempt": attempt}
             self._send(503 if reply.get("error_kind") == "faulty" else 200, reply)
 
         def log_message(self, fmt, *args):  # запросы с содержимым не журналируются
             pass
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    class Server(ThreadingHTTPServer):
+        def service_actions(self):
+            outcomes.expire()
+
+    server = Server((host, port), Handler)
     server.gate = gate
     return server
 

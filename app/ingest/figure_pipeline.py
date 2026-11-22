@@ -26,6 +26,7 @@ from app.ingest.store import (
 )
 from app.ingest.topics import load_catalog
 from app.model.images import MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE, MAX_IMAGES
+from app.model.types import BoundaryWait
 
 HOLD = "Проверка рисунка: "
 HOLD_SAMPLE = HOLD + "выбрано для вашей проверки до публикации."
@@ -285,6 +286,8 @@ def try_publish(ctx, conn, task_id: int, state: dict) -> str | None:
         reason = HOLD + str(exc)
         if "лимит" in reason:
             state["limit"] = True
+    except BoundaryWait:
+        raise
     except Exception:  # noqa: BLE001 - an unexpected model/parser failure must fail closed.
         reason = HOLD + "не удалось завершить проверку; задание осталось вам."
     with atomic(conn):

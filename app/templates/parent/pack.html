@@ -5,6 +5,10 @@
 <p>Тема: <b>{{ topic_title }}</b>. Тип: {{ kind_title }}. Запрошено: {{ pack.requested_count }}.</p>
 {% if pack.status == "failed" %}
 <p class="err" role="alert" id="pack-error">Пачка не создана: {{ pack.error }}</p>
+{% elif pack.model_status == "unknown" %}
+<p>Ожидаем подтверждения результата.</p>
+{% elif pack.model_status == "queued" %}
+<p>Пачка в очереди. Генерация начнётся, когда исполнитель будет доступен.</p>
 {% elif pack.status == "running" %}
 <p>Модель ещё составляет вопросы. Обновите страницу через минуту.</p>
 {% else %}

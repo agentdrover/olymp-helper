@@ -19,8 +19,9 @@ from app import exam
 from app.chat import store as chat_store
 from app.ingest.answers import display
 from app.ingest.publish import assist_mode
-from app.ingest.store import figure_of, get_task
+from app.ingest.store import atomic, figure_of, get_task
 from app.model.client import MAX_REQUEST_BYTES, request_size
+from app.model.types import BoundaryWait
 from app.tutor import state, steps
 from app.tutor.guard import GENERIC, finish, render_markdown
 from app.tutor.panel import Inflight, failure_state, panel
@@ -83,6 +84,16 @@ class Flow:
 
     def _begin(self, task, kind: str = "step") -> bool:
         """Весь шаг (генерация, судья, перегенерация) - один запрос в работе на задание."""
+        with atomic(self.conn):
+            return self._reserve(task, kind)
+
+    def _reserve(self, task, kind: str) -> bool:
+        waiting = steps.waiting(self.conn, task["id"])
+        if waiting is not None:
+            self.panel_state = (
+                "unknown_model" if waiting["operation_status"] == "unknown" else "waiting_model"
+            )
+            return False
         if self.inflight.since(task["id"]) is not None:
             self.panel_state = "thinking"
             return False
@@ -128,7 +139,10 @@ class Flow:
             self.execute(task["id"], name, args, reraise=True)
             return
         try:
-            self.runner.submit(type(self), task["id"], self.step_id, name, args)
+            if getattr(self.runner.state, "model_work", None) is None:
+                self.runner.submit(type(self), task["id"], self.step_id, name, args)
+            else:
+                self.runner.enqueue(self.conn, task, self.step_id, name, args, self.now)
         except BaseException as exc:
             self._end(task, f"{type(exc).__name__}")
             raise
@@ -140,6 +154,8 @@ class Flow:
         failure: Exception | None = None
         try:
             getattr(self, name)(task, *args)
+        except BoundaryWait:
+            raise
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"[:300]
             failure = exc
@@ -167,6 +183,8 @@ class Flow:
             return None
         try:
             result = self.model.complete(system, messages, OUTPUT_SCHEMA, session_id=self.session)
+        except BoundaryWait:
+            raise
         except Exception:  # noqa: BLE001 - модель любого вида: ребёнку «не отвечает»
             self.panel_state = "down"
             return None
@@ -226,6 +244,8 @@ class Flow:
             return None
         try:
             result = call(other, system, messages, JUDGE_SCHEMA, session_id=self.session)
+        except BoundaryWait:
+            raise
         except Exception:  # noqa: BLE001
             return None
         if not getattr(result, "ok", False):

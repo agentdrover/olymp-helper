@@ -44,13 +44,16 @@ def _figure_files(ctx, conn, ids: list[int]) -> set:
     return files
 
 
-def reset_material(ctx, conn: sqlite3.Connection, material_id: int) -> bool:
+def reset_material(ctx, conn: sqlite3.Connection, material_id: int, *, enqueue=None) -> bool:
     """Одна транзакция: проверка условия, удаление заданий материала (вместе с ревизиями,
     рамками и рисунками) и status=queued. True - разбор нужно запустить; False - он уже идёт.
     Отказ - Refusal 409 (ничего не удалено)."""
     with atomic(conn):
         row = conn.execute(
-            "SELECT kind, import_status, run_id, deleted_at FROM material WHERE id = ?",
+            "SELECT kind, import_status, run_id, deleted_at, "
+            "(SELECT status FROM model_operation WHERE kind = 'import' "
+            "AND object_key = material.id || ':' || material.run_id) AS model_status "
+            "FROM material WHERE id = ?",
             (material_id,),
         ).fetchone()
         if row is None:
@@ -59,6 +62,8 @@ def reset_material(ctx, conn: sqlite3.Connection, material_id: int) -> bool:
             raise Refusal("Файл материала удалён: разобрать заново нельзя.", 409)
         if row["kind"] != "tasks":
             raise Refusal("Разобрать заново можно только сборник заданий.", 409)
+        if row["model_status"] in ("queued", "active", "unknown"):
+            return False
         if row["import_status"] == "running" or (
             row["import_status"] == "queued"
             and ctx.progress.get(material_id, row["run_id"]) is not None
@@ -79,6 +84,8 @@ def reset_material(ctx, conn: sqlite3.Connection, material_id: int) -> bool:
             "UPDATE material SET import_status = 'queued', import_error = NULL WHERE id = ?",
             (material_id,),
         )
+        if enqueue is not None:
+            enqueue(conn, material_id)
     for path in files:  # файлы - после фиксации: откат транзакции не должен их терять
         try:
             path.unlink(missing_ok=True)

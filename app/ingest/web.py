@@ -26,7 +26,7 @@ from app.ingest.progress import progress_text
 from app.ingest.publish import child_view, is_published
 from app.ingest.reparse import UNAVAILABLE, reset_material, touched_materials
 from app.ingest.review import Refusal
-from app.ingest.store import figure_of, get_task, open_db
+from app.ingest.store import atomic, figure_of, get_task, open_db
 from app.ingest.tiles import stored_tiles
 from app.ingest.topics import load_catalog
 from app.notice import notice_redirect, notice_seen
@@ -139,7 +139,9 @@ def _wants_html(request: Request) -> bool:
 
 def _materials_view(request: Request, conn, *, flash=None, error=None, status=200):
     rows = conn.execute(
-        "SELECT m.*, (SELECT COUNT(*) FROM task_item t WHERE t.material_id = m.id) AS tasks "
+        "SELECT m.*, (SELECT COUNT(*) FROM task_item t WHERE t.material_id = m.id) AS tasks, "
+        "(SELECT status FROM model_operation WHERE kind = 'import' "
+        "AND object_key = m.id || ':' || m.run_id) AS model_status "
         "FROM material m ORDER BY m.id DESC"
     ).fetchall()
     progress = ctx_of(request).progress
@@ -147,7 +149,9 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
     stuck = {  # queued без хода разбора: запуск потерян
         m["id"]
         for m in rows
-        if m["import_status"] == "queued" and progress.get(m["id"], m["run_id"]) is None
+        if m["import_status"] == "queued"
+        and m["model_status"] not in ("queued", "active", "unknown")
+        and progress.get(m["id"], m["run_id"]) is None
     }
     page = TEMPLATES.TemplateResponse(
         request,
@@ -155,10 +159,7 @@ def _materials_view(request: Request, conn, *, flash=None, error=None, status=20
         {
             "materials": rows,
             "progress": {
-                m["id"]: progress_text(
-                    progress.get(m["id"], m["run_id"]), m["import_status"] == "running"
-                )
-                for m in rows
+                m["id"]: _import_progress(m, progress.get(m["id"], m["run_id"])) for m in rows
             },
             "touched": touched,
             "stuck": stuck,
@@ -262,8 +263,10 @@ def reparse_material(material_id: int, request: Request, conn: Db):
     html = _wants_html(request)
     try:
         with REPARSE_LOCK:  # сброс и запуск - одно действие: второй щелчок видит ход разбора
-            started = reset_material(ctx_of(request), conn, material_id)
-            if started:
+            managed = request.app.state.model_work is not None
+            enqueue = request.app.state.imports.enqueue if managed else None
+            started = reset_material(ctx_of(request), conn, material_id, enqueue=enqueue)
+            if started and not managed:
                 _submit_or_fail(request, material_id)
     except Refusal as exc:
         if html:
@@ -298,7 +301,10 @@ def _store_upload(
     conn = open_db(ctx.db_path)
     try:
         existing = conn.execute(
-            "SELECT id, kind, import_status, import_error, deleted_at FROM material WHERE sha256 = ?",
+            "SELECT id, kind, import_status, import_error, deleted_at, run_id, "
+            "(SELECT status FROM model_operation WHERE kind = 'import' "
+            "AND object_key = material.id || ':' || material.run_id) AS model_status "
+            "FROM material WHERE sha256 = ?",
             (sha,),
         ).fetchone()
         if existing is not None and existing["deleted_at"] is not None:
@@ -317,13 +323,22 @@ def _store_upload(
                     "SELECT 1 FROM task_item WHERE material_id = ? LIMIT 1", (existing["id"],)
                 ).fetchone()
             )
-            requeued = existing["import_status"] == "failed" or empty
+            requeued = existing["model_status"] not in ("queued", "active", "unknown") and (
+                existing["import_status"] == "failed" or empty
+            )
             if requeued:
-                conn.execute(
-                    "UPDATE material SET import_status = 'queued', import_error = NULL WHERE id = ?",
-                    (existing["id"],),
-                )
-                request.app.state.imports.submit(existing["id"])
+                managed = request.app.state.model_work is not None and existing["kind"] == "tasks"
+                with atomic(conn):
+                    changed = conn.execute(
+                        "UPDATE material SET import_status = 'queued', import_error = NULL "
+                        "WHERE id = ? AND import_status = ? AND run_id IS ?",
+                        (existing["id"], existing["import_status"], existing["run_id"]),
+                    )
+                    requeued = changed.rowcount == 1
+                    if requeued and managed:
+                        request.app.state.imports.enqueue(conn, existing["id"])
+                if requeued and not managed:
+                    request.app.state.imports.submit(existing["id"])
             return JSONResponse(
                 {"duplicate": True, "requeued": requeued, "material_id": existing["id"]}
             )
@@ -335,34 +350,41 @@ def _store_upload(
         target = ctx.material_path(relative)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        cur = conn.execute(
-            "INSERT INTO material (file, sha256, kind, olympiad, year, stage, variant, pages_total, "
-            "original_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                relative,
-                sha,
-                kind,
-                olympiad.strip() or None,
-                int(year) if year.strip() else None,
-                stage.strip() or None,
-                variant.strip() or None,
-                pages,
-                clean_original_name(file.filename),
-            ),
-        )
-        material_id = cur.lastrowid
+        managed = request.app.state.model_work is not None and kind == "tasks"
+        with atomic(conn):
+            cur = conn.execute(
+                "INSERT INTO material (file, sha256, kind, olympiad, year, stage, variant, pages_total, "
+                "original_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    relative,
+                    sha,
+                    kind,
+                    olympiad.strip() or None,
+                    int(year) if year.strip() else None,
+                    stage.strip() or None,
+                    variant.strip() or None,
+                    pages,
+                    clean_original_name(file.filename),
+                ),
+            )
+            material_id = cur.lastrowid
+            operation_id = request.app.state.imports.enqueue(conn, material_id) if managed else None
     finally:
         conn.close()
-    request.app.state.imports.submit(material_id)
-    return JSONResponse(
-        {"duplicate": False, "material_id": material_id, "status": "queued"}, status_code=202
-    )
+    if operation_id is None:
+        request.app.state.imports.submit(material_id)
+    detail = {"duplicate": False, "material_id": material_id, "status": "queued"}
+    if operation_id is not None:
+        detail["operation_id"] = operation_id
+    return JSONResponse(detail, status_code=202)
 
 
 @parent.get("/parent/materials/{material_id}")
 def material_status(material_id: int, request: Request, conn: Db):
     row = conn.execute(
         "SELECT id, kind, import_status, import_error, pages_total, run_id, "
+        "(SELECT status FROM model_operation WHERE kind = 'import' "
+        "AND object_key = material.id || ':' || material.run_id) AS model_status, "
         "(SELECT COUNT(*) FROM task_item t WHERE t.material_id = material.id) AS tasks "
         "FROM material WHERE id = ?",
         (material_id,),
@@ -374,10 +396,16 @@ def material_status(material_id: int, request: Request, conn: Db):
     running = row["import_status"] in ("queued", "running")
     item = ctx_of(request).progress.get(material_id, row["run_id"]) if running else None
     out["progress"] = item
-    out["progress_text"] = (
-        progress_text(item, row["import_status"] == "running") if running else None
-    )
+    out["progress_text"] = _import_progress(row, item) if running else None
     return out
+
+
+def _import_progress(row, item):
+    if row["model_status"] == "unknown":
+        return "Ожидаем подтверждения результата."
+    if row["model_status"] == "queued":
+        return "Ожидаем исполнителя."
+    return progress_text(item, row["import_status"] == "running")
 
 
 def _material_file(request: Request, conn, material_id: int) -> Path:
@@ -465,7 +493,11 @@ def generate_submit(
 
 @parent.get("/parent/packs/{pack_id}", response_class=HTMLResponse)
 def pack_page(pack_id: int, request: Request, conn: Db):
-    pack = conn.execute("SELECT * FROM question_pack WHERE id = ?", (pack_id,)).fetchone()
+    pack = conn.execute(
+        "SELECT p.*, (SELECT status FROM model_operation WHERE kind = 'pack' "
+        "AND object_key = CAST(p.id AS TEXT)) AS model_status FROM question_pack p WHERE id = ?",
+        (pack_id,),
+    ).fetchone()
     if pack is None:
         raise HTTPException(404, "Пачка не найдена")
     catalog = load_catalog(conn)
@@ -594,12 +626,20 @@ def review_auto_run(request: Request, body: AutoRunBody | None = None):
     """Проверить и опубликовать черновики с официальным ключом (фоном: запрос не ждёт)."""
     ctx = ctx_of(request)
     started = ctx.autorun.start(ctx, (body or AutoRunBody()).material_id)
-    return {"started": started, **ctx.autorun.snapshot()}
+    snapshot = (
+        ctx.autorun.model_snapshot(ctx)
+        if request.app.state.model_work is not None
+        else ctx.autorun.snapshot()
+    )
+    return {"started": started, **snapshot}
 
 
 @parent.get("/parent/review/auto/status")
 def review_auto_status(request: Request):
-    return ctx_of(request).autorun.snapshot()
+    ctx = ctx_of(request)
+    if request.app.state.model_work is not None:
+        return ctx.autorun.model_snapshot(ctx)
+    return ctx.autorun.snapshot()
 
 
 @parent.get("/parent/published", response_class=HTMLResponse)
@@ -713,6 +753,9 @@ def page_answers_normalize(request: Request, conn: Db):
     """Явный пакетный шаг: нормализовать ответы со страниц моделью. Карточки модель не зовут.
     В работе - фоновый поток со своим соединением (один за раз); в тестах (sync) - в запросе."""
     ctx = ctx_of(request)
+    if request.app.state.model_work is not None:
+        ids = page_normalizer.enqueue_pending(ctx, conn)
+        return {"started": bool(ids), "queued": len(ids), "operation_ids": ids}
     if not page_normalizer.LOCK.acquire(blocking=False):
         return {"started": False, "message": "Нормализация уже идёт."}
     if request.app.state.imports.sync:

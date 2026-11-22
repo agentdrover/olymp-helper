@@ -5,10 +5,11 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextvars import copy_context
 
 from app.ingest.importer import fail_material, run_import
 from app.ingest.limits import IMPORT_MAX_BASE_S, IMPORT_MAX_PER_CHUNK_S, IMPORT_STALL_S
-from app.ingest.store import open_db
+from app.ingest.store import atomic, open_db
 
 log = logging.getLogger("app.ingest")
 TIMEOUT_MESSAGE = "Импорт прерван: превышено время ожидания. Повторите загрузку."
@@ -39,27 +40,54 @@ class ImportJobs:
         # одновременных повторах последний владелец в базе совпадает с владельцем записи
         self._owner_lock = threading.Lock()
 
-    def _new_run(self, material_id: int) -> str:
-        """Новый запуск получает свой run_id: результат пишет только его владелец."""
+    def _new_run(self, conn, material_id: int) -> str:
         run_id = uuid.uuid4().hex
-        conn = open_db(self.ctx.db_path)
-        try:
-            conn.execute("UPDATE material SET run_id = ? WHERE id = ?", (run_id, material_id))
-        finally:
-            conn.close()
+        conn.execute("UPDATE material SET run_id = ? WHERE id = ?", (run_id, material_id))
         return run_id
+
+    def enqueue(self, conn, material_id: int) -> int:
+        work = self.ctx.state.model_work
+        with atomic(conn):
+            run_id = self._new_run(conn, material_id)
+            return work.submit("import", f"{material_id}:{run_id}", conn=conn)
 
     def submit(self, material_id: int) -> None:
         with self._owner_lock:
-            run_id = self._new_run(material_id)
+            conn = open_db(self.ctx.db_path)
+            try:
+                run_id = self._new_run(conn, material_id)
+            finally:
+                conn.close()
             self.ctx.progress.claim(material_id, run_id)
+        self._launch(material_id, run_id)
+
+    def run_queued(self, key: str) -> None:
+        identifier, run_id = key.split(":", 1)
+        material_id = int(identifier)
+        conn = open_db(self.ctx.db_path)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM material WHERE id = ? AND run_id = ? "
+                "AND import_status IN ('queued', 'running') AND deleted_at IS NULL",
+                (material_id, run_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return
+        self.ctx.progress.claim(material_id, run_id)
+        worker = self._launch(material_id, run_id)
+        if worker is not None:
+            worker.join()
+
+    def _launch(self, material_id: int, run_id: str):
         if self.sync:
             run_import(self.ctx, material_id, threading.Event(), run_id)
             return
         cancel = threading.Event()
         worker = threading.Thread(
-            target=run_import,
-            args=(self.ctx, material_id, cancel, run_id),
+            target=copy_context().run,
+            args=(run_import, self.ctx, material_id, cancel, run_id),
             daemon=True,
             name=f"import-{material_id}",
         )
@@ -71,6 +99,7 @@ class ImportJobs:
             daemon=True,
             name=f"watch-{material_id}",
         ).start()
+        return worker
 
     def _watch(self, worker, material_id: int, cancel: threading.Event, run_id: str) -> None:
         """Прервать запуск, который молчит дольше stall или идёт дольше потолка по размеру.

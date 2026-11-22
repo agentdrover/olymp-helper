@@ -20,6 +20,7 @@ from app.ingest.publish import leak_notice
 from app.ingest.schema import InvalidStructure, check_options
 from app.ingest.store import atomic, figure_of, get_task, options_of, update_task
 from app.ingest.topics import load_catalog
+from app.model.types import BoundaryWait
 from app.tutor.guard import prefilter_reason
 
 log = logging.getLogger("app.ingest")
@@ -95,6 +96,8 @@ def _child_leak(task, key) -> bool:
                 condition_leaks(piece, task["answer_text"], task["type"]) for piece in _pieces(task)
             )
         )
+    except BoundaryWait:
+        raise
     except Exception:
         log.exception("leak check failed for task %s", task["id"])
         return True
@@ -217,6 +220,8 @@ def publish_pending(
     for index, task_id in enumerate(ids, 1):
         try:
             try_publish(ctx, conn, task_id, state)
+        except BoundaryWait:
+            raise
         except Exception:
             log.exception("auto publish of task %s failed", task_id)
         if get_task(conn, task_id)["auto_published"]:
