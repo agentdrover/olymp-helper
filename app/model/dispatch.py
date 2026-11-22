@@ -5,10 +5,18 @@ import uuid
 
 from app.ingest.store import atomic
 from app.model.client import encode_payload, request_payload
-from app.model.types import LIMIT_MESSAGE, BoundaryWait, ModelResult
+from app.model.types import LIMIT_MESSAGE, BoundaryStale, BoundaryWait, ModelResult
 
 AMBIGUOUS = {"executor_unreachable", "dispatch_unknown", "exception", "timeout", "internal"}
 NOT_SENT = {"route_unavailable", "receipt_capacity", "busy", "faulty"}
+
+
+def record_outcome(conn, ledger, run_id, result):
+    with atomic(conn):
+        conn.execute(
+            "UPDATE model_dispatch SET disposition = 'confirmed' WHERE run_id = ?", (run_id,)
+        )
+        ledger.finish(run_id, result.ok, result.duration_ms, result.error_kind)
 
 
 class Dispatch:
@@ -37,7 +45,8 @@ class Dispatch:
             if prior is not None:
                 attempt, channel, expected, run_id = prior
                 if (channel, expected) != (self.channel, digest):
-                    return self.unknown()
+                    self.scope.failed = True
+                    raise BoundaryStale
             else:
                 if self.scope.replay_only:
                     self.scope.deferred = True
@@ -79,11 +88,7 @@ class Dispatch:
         return self.unknown()
 
     def finish(self, run_id, result):
-        with atomic(self.conn):
-            self.conn.execute(
-                "UPDATE model_dispatch SET disposition = 'confirmed' WHERE run_id = ?", (run_id,)
-            )
-            self.ledger.finish(run_id, result.ok, result.duration_ms, result.error_kind)
+        record_outcome(self.conn, self.ledger, run_id, result)
         return result
 
     def unknown(self):

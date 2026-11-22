@@ -12,6 +12,7 @@ from app.db import connect
 from app.model.admission import Admission
 
 EXECUTORS = ("codex", "cursor")
+WORKER_PROOF_TIMEOUT_S = 8
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -30,7 +31,7 @@ def worker_status(name):
             headers={"X-Executor-Key": key},
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
-        with opener.open(request, timeout=2) as response:
+        with opener.open(request, timeout=WORKER_PROOF_TIMEOUT_S) as response:
             content = response.read(1025)
             if len(content) > 1024:
                 return {"state": "unknown", "active": None}

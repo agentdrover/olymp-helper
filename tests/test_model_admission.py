@@ -319,3 +319,145 @@ def test_admission_contract_and_schema_boundary(tmp_path, monkeypatch):
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert control.status(Admission(conn))["version"] == 1
+
+
+def test_deterministic_attempts_continue_and_stale_model_work_is_discarded(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.model import work
+    from app.model.types import ModelResult
+    from tests.bank_helpers import build_app
+    from tests.chat_helpers import say
+    from tests.tutor_helpers import attempt, seed, view
+
+    monkeypatch.setattr(work.ModelWork, "_loop", lambda self: None)
+    monkeypatch.setattr(work, "worker_status", lambda _: {"state": "ready", "active": 0})
+    called = []
+
+    def fake_complete(self, system, messages, schema, **kwargs):
+        called.append(self.channel)
+        return ModelResult.failure(self.channel, kwargs["model"], "request_too_large")
+
+    monkeypatch.setattr("app.model.client.ExecutorChannel.complete", fake_complete)
+    with TestClient(build_app(tmp_path, sync_steps=False)) as web:
+        admission = Admission(connect(tmp_path / "olymp.db"))
+        admission.pause()
+        task_id = seed(tmp_path)
+        assert say(web, task_id, "Что изучает цитология?").status_code == 200
+        assert attempt(web, task_id, "А").headers["X-Attempt"] == "accepted"
+        assert attempt(web, task_id, "В").headers["X-Attempt"] == "accepted"
+        assert view(web, task_id)["attempts"] == 2
+        assert admission.status()["queued"] == 3
+        assert called == []
+        assert admission.resume(admission.status()["revision"])
+        runner = web.app.state.model_work
+        assert runner.tick()  # chat context was superseded by the attempts
+        assert runner.tick()  # first attempt was superseded by the second
+        assert called == []
+        assert runner.tick()
+        assert not runner.tick()
+        assert called == ["codex"]
+        admission.conn.close()
+
+
+def test_pre_dispatch_decline_leaves_only_the_original_queued_operation(tmp_path, monkeypatch):
+    from app.model import work
+    from app.model.service import ModelService
+    from app.model.types import ModelResult
+
+    path = tmp_path / "olymp.db"
+    admission = open_admission(path)
+    op_id = admission.enqueue("answer", "12")
+    monkeypatch.setattr(work, "worker_status", lambda _: {"state": "ready", "active": 0})
+
+    class Worker:
+        unavailable = True
+
+        def complete(self, system, messages, schema, **kwargs):
+            if self.unavailable:
+                return ModelResult.failure("codex", kwargs["model"], "route_unavailable")
+            return ModelResult(None, {"answer": "42"}, "codex", kwargs["model"], 1, None)
+
+    worker = Worker()
+    service = ModelService(admission.conn, {"codex": worker}, managed=True)
+    runner = work.ModelWork(path)
+    received = []
+    runner.handlers["answer"] = lambda _: received.append(service.complete("test", []).json)
+    assert runner.tick()
+    assert admission.queued() == [(op_id, "answer", "12")]
+    assert admission.status()["unknown"] == 0
+    assert admission.conn.execute("SELECT COUNT(*) FROM model_run").fetchone()[0] == 0
+    assert received == []
+    worker.unavailable = False
+    assert runner.tick()
+    assert not runner.tick()
+    assert received == [{"answer": "42"}]
+    assert admission.conn.execute("SELECT COUNT(*) FROM model_run").fetchone()[0] == 1
+
+
+def test_local_error_before_dispatch_does_not_freeze_following_operations(tmp_path, monkeypatch):
+    from app.model import work
+
+    path = tmp_path / "olymp.db"
+    admission = open_admission(path)
+    op_id = admission.enqueue("wrong", "17")
+    admission.enqueue("right", "18")
+    monkeypatch.setattr(work, "worker_status", lambda _: {"state": "ready", "active": 0})
+
+    def bad(_):
+        raise ValueError("bad local object")
+
+    runner = work.ModelWork(path)
+    received = []
+    runner.handlers.update(wrong=bad, right=received.append)
+    assert runner.tick()
+    assert admission.status()["unknown"] == 0
+    assert (
+        admission.conn.execute(
+            "SELECT status FROM model_operation WHERE id = ?", (op_id,)
+        ).fetchone()[0]
+        == "failed"
+    )
+    assert runner.tick()
+    assert received == ["18"]
+
+
+def test_late_proof_finishes_ledger_after_domain_operation_is_superseded(tmp_path, monkeypatch):
+    from app.model import work
+    from app.model.service import ModelService
+    from app.model.types import ModelResult
+
+    path = tmp_path / "olymp.db"
+    admission = open_admission(path)
+    op_id = admission.enqueue("answer", "12")
+    monkeypatch.setattr(work, "worker_status", lambda _: {"state": "ready", "active": 0})
+
+    class Worker:
+        outcome_ready = False
+        submitted = None
+
+        def complete(self, system, messages, schema, **kwargs):
+            self.submitted = kwargs["attempt"]
+            return ModelResult.failure("codex", kwargs["model"], "executor_unreachable")
+
+        def outcome(self, attempt, model):
+            assert attempt == self.submitted
+            if self.outcome_ready:
+                return ModelResult(None, {"answer": "42"}, "codex", model, 1, None)
+            return None
+
+    worker = Worker()
+    monkeypatch.setattr(work, "configured_channel", lambda _: worker)
+    service = ModelService(admission.conn, {"codex": worker}, managed=True)
+    runner = work.ModelWork(path)
+    runner.handlers["answer"] = lambda _: service.complete("test", [])
+    assert runner.tick()
+    assert admission.status()["unknown"] == 1
+    assert runner.submit_again("answer", "12", conn=admission.conn) == op_id
+    # The protected domain object no longer needs an answer when proof arrives.
+    runner.handlers["answer"] = lambda _: None
+    worker.outcome_ready = True
+    assert runner.tick()
+    assert admission.status()["unknown"] == 0
+    assert admission.conn.execute("SELECT status FROM model_run").fetchall() == [("ok",)]
+    assert runner.submit_again("answer", "12", conn=admission.conn) != op_id

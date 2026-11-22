@@ -8,10 +8,12 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from app.db import connect
+from app.ingest.store import atomic
 from app.model.admission import Admission
 from app.model.client import configured_channel
 from app.model.control import EXECUTORS, worker_status, workers_ready
-from app.model.dispatch import AMBIGUOUS
+from app.model.dispatch import AMBIGUOUS, record_outcome
+from app.model.ledger import Ledger
 from app.model.types import BoundaryWait
 
 log = logging.getLogger(__name__)
@@ -21,6 +23,7 @@ log = logging.getLogger(__name__)
 class OperationScope:
     id: int
     unknown: bool = False
+    failed: bool = False
     deferred: bool = False
     ordinal: int = 0
     replayed_call: bool = False
@@ -90,6 +93,20 @@ class ModelWork:
         self.wake.set()
         return op_id
 
+    def submit_again(self, kind, key: str, *, conn):
+        """Explicit retry after a known terminal state, deduping outstanding attempts."""
+        with atomic(conn):
+            rows = conn.execute(
+                "SELECT id, status FROM model_operation WHERE kind = ? "
+                "AND (object_key = ? OR object_key GLOB ?) ORDER BY id DESC",
+                (kind, key, key + ":retry:*"),
+            ).fetchall()
+            for op_id, status in rows:
+                if status in ("queued", "active", "unknown"):
+                    return op_id
+            retry_key = f"{key}:retry:{rows[0][0]}" if rows else key
+            return self.submit(kind, retry_key, conn=conn)
+
     def _loop(self):
         try:
             while not self.stop.is_set():
@@ -126,7 +143,7 @@ class ModelWork:
         if kind not in self.handlers:
             return False
         attempts = conn.execute(
-            "SELECT d.attempt, d.channel, r.model FROM model_dispatch d "
+            "SELECT d.attempt, d.channel, r.model, d.run_id FROM model_dispatch d "
             "JOIN model_run r ON r.id = d.run_id WHERE d.operation_id = ? "
             "ORDER BY d.ordinal",
             (op_id,),
@@ -134,13 +151,17 @@ class ModelWork:
         if not attempts:
             return False
         receipts = {}
-        for attempt, channel, model in attempts:
+        for attempt, channel, model, _ in attempts:
             receipt = configured_channel(channel).outcome(attempt, model)
             if receipt is None or receipt.error_kind in AMBIGUOUS:
                 return False
             receipts[attempt] = receipt
         if self.stop.is_set() or not gate.claim_for_reconciliation(op_id):
             return False
+        with atomic(conn):
+            ledger = Ledger(conn, None)
+            for attempt, _, _, run_id in attempts:
+                record_outcome(conn, ledger, run_id, receipts[attempt])
         self._execute(gate, op_id, kind, key, receipts=receipts)
         return True
 
@@ -152,8 +173,9 @@ class ModelWork:
         except BoundaryWait:
             pass
         except Exception as exc:  # noqa: BLE001
-            scope.unknown = True
+            scope.unknown = gate.has_unresolved_dispatch(op_id)
+            scope.failed = not scope.unknown
             log.warning("model operation %s stopped: %s", op_id, type(exc).__name__)
         finally:
             operation.reset(token)
-            gate.finish(op_id, unknown=scope.unknown, deferred=scope.deferred)
+            gate.finish(op_id, unknown=scope.unknown, deferred=scope.deferred, failed=scope.failed)

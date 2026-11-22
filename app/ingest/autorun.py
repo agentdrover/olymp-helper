@@ -50,6 +50,7 @@ class AutoRun:
             return []
         work = ctx.state.model_work
         ids = []
+        submit = work.submit_again if force else work.submit
         with atomic(conn):
             rows = conn.execute(
                 "SELECT t.id, t.revision, m.run_id FROM task_item t "
@@ -60,7 +61,7 @@ class AutoRun:
                 (material_id, material_id),
             )
             for task_id, revision, run_id in rows:
-                ids.append(work.submit("autopublish", f"{task_id}:{revision}:{run_id}", conn=conn))
+                ids.append(submit("autopublish", f"{task_id}:{revision}:{run_id}", conn=conn))
         return ids
 
     def start(self, ctx, material_id: int | None) -> bool:
@@ -81,7 +82,7 @@ class AutoRun:
     def run_queued(self, ctx, key: str) -> None:
         from app.ingest.autopublish import try_publish
 
-        task_id, revision, run = key.split(":", 2)
+        task_id, revision, run = key.split(":")[:3]
         with closing(open_db(ctx.db_path)) as conn:
             task = get_task(conn, int(task_id), with_import=True)
             if (

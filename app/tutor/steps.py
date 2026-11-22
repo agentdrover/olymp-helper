@@ -60,7 +60,7 @@ def discard(conn, step_id: int) -> None:
             bump(conn)
 
 
-def hold(conn, step_id: int | None) -> None:
+def hold(conn, step_id: int | None, *, final=True) -> None:
     """Сравнить-и-держать: вызывается ВНУТРИ транзакции записи результата. Шаг ещё идёт - строка
     шага залочена этой же транзакцией, снять шаг по сроку одновременно нельзя; не идёт -
     StepExpired, транзакция откатывается и ничего не публикуется. Все писатели результата
@@ -73,7 +73,8 @@ def hold(conn, step_id: int | None) -> None:
     )
     if done.rowcount != 1:
         raise StepExpired(f"шаг {step_id} уже снят")
-    conn.execute("UPDATE tutor_pending_work SET applied = 1 WHERE step_id = ?", (step_id,))
+    if final:
+        conn.execute("UPDATE tutor_pending_work SET applied = 1 WHERE step_id = ?", (step_id,))
 
 
 def finish(
@@ -100,14 +101,15 @@ def latest(conn, task_id: int):
     ).fetchone()
 
 
-def waiting(conn, task_id: int):
+def waiting(conn, task_id: int, *, step_id=None):
     return conn.execute(
         "SELECT s.*, m.status AS operation_status "
         "FROM tutor_step s JOIN tutor_pending_work w ON w.step_id = s.id "
         "JOIN model_operation m ON m.kind = 'tutor' AND m.object_key = CAST(s.id AS TEXT) "
-        "WHERE s.task_item_id = ? AND s.status = 'running' AND m.status IN ('queued', 'active', 'unknown') "
+        "WHERE s.task_item_id = ? AND (? IS NULL OR s.id = ?) "
+        "AND s.status = 'running' AND m.status IN ('queued', 'active', 'unknown') "
         "ORDER BY s.id DESC LIMIT 1",
-        (task_id,),
+        (task_id, step_id, step_id),
     ).fetchone()
 
 
@@ -122,8 +124,7 @@ def expire(conn, inflight, task_id: int, now: datetime) -> None:
         (task_id,),
     ).fetchall()
     for step in row:
-        queued = waiting(conn, task_id)
-        if queued is not None and queued["id"] == step["id"]:
+        if waiting(conn, task_id, step_id=step["id"]) is not None:
             continue
         holder = inflight.step_of(task_id)
         lost = inflight.since(task_id) is None or (holder is not None and holder != step["id"])
@@ -154,16 +155,15 @@ class StepRunner:
         worker.start()
 
     def enqueue(self, conn, task, step_id, name, args, now) -> None:
-        session_id = None
-        with atomic(conn):
-            if name == "_chat_work":
-                from app.tutor.state import session_id_for
+        from app.tutor.state import active_run, session_id_for
 
-                session_id = session_id_for(conn, now)
+        with atomic(conn):
+            session_id = session_id_for(conn, now) if name == "_chat_work" else None
+            run = active_run(conn, task, now)
             conn.execute(
                 "INSERT INTO tutor_pending_work "
-                "(step_id, method, arguments, session_id, revision, key_version, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(step_id, method, arguments, session_id, revision, key_version, run_id, "
+                "attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     step_id,
                     name,
@@ -171,6 +171,8 @@ class StepRunner:
                     session_id,
                     task["revision"],
                     task["key_version"],
+                    run["id"] if run is not None else None,
+                    run["attempts"] if run is not None else None,
                     now.isoformat(),
                 ),
             )
@@ -181,11 +183,13 @@ class StepRunner:
     def run_queued(self, key: str) -> None:
         from app.chat.flow import ChatFlow
         from app.tutor.flow import Flow
+        from app.tutor.state import active_run
 
         step_id = int(key)
         with closing(open_db(self.state.ctx.db_path)) as conn, atomic(conn):
             row = conn.execute(
-                "SELECT s.task_item_id, w.method, w.arguments, w.revision, w.key_version, w.applied "
+                "SELECT s.task_item_id, w.method, w.arguments, w.revision, w.key_version, "
+                "w.applied, w.run_id, w.attempts "
                 "FROM tutor_pending_work w JOIN tutor_step s ON s.id = w.step_id "
                 "WHERE w.step_id = ? AND s.status = 'running'",
                 (step_id,),
@@ -208,11 +212,14 @@ class StepRunner:
                 conn.execute("DELETE FROM tutor_pending_work WHERE step_id = ?", (step_id,))
                 return
             task = get_task(conn, task_id)
+            run = active_run(conn, task) if task is not None else None
+            anchor = (run["id"], run["attempts"]) if run is not None else (None, None)
             if (
                 task is None
                 or not is_published(task)
                 or task["revision"] != row["revision"]
                 or task["key_version"] != row["key_version"]
+                or anchor != (row["run_id"], row["attempts"])
                 or exam.task_locked(conn, task_id, now)
             ):
                 conn.execute("DELETE FROM tutor_pending_work WHERE step_id = ?", (step_id,))
@@ -255,8 +262,10 @@ class StepRunner:
             st.inflight.release(task_id, step_id, conn)
             return False
         except BaseException:
-            log.exception("шаг %s не стартовал", step_id)
             st.inflight.release(task_id, step_id, conn)
+            if getattr(st, "model_work", None) is not None:
+                raise
+            log.exception("шаг %s не стартовал", step_id)
             return False
         finally:
             if conn is not None:

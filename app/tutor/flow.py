@@ -21,7 +21,7 @@ from app.ingest.answers import display
 from app.ingest.publish import assist_mode
 from app.ingest.store import atomic, figure_of, get_task
 from app.model.client import MAX_REQUEST_BYTES, request_size
-from app.model.types import BoundaryWait
+from app.model.types import BoundaryStale, BoundaryWait
 from app.tutor import state, steps
 from app.tutor.guard import GENERIC, finish, render_markdown
 from app.tutor.panel import Inflight, failure_state, panel
@@ -89,7 +89,7 @@ class Flow:
 
     def _reserve(self, task, kind: str) -> bool:
         waiting = steps.waiting(self.conn, task["id"])
-        if waiting is not None:
+        if waiting is not None and kind != "attempt":
             self.panel_state = (
                 "unknown_model" if waiting["operation_status"] == "unknown" else "waiting_model"
             )
@@ -135,11 +135,12 @@ class Flow:
         """Работа шага с моделью: в фоне, когда есть рабочий поток, иначе тут же. Замок после
         вызова принадлежит работе, не запросу."""
         self.launched = True
-        if self.runner is None or self.runner.sync:
+        work = getattr(self.runner.state, "model_work", None) if self.runner is not None else None
+        if self.runner is None or (self.runner.sync and work is None):
             self.execute(task["id"], name, args, reraise=True)
             return
         try:
-            if getattr(self.runner.state, "model_work", None) is None:
+            if work is None:
                 self.runner.submit(type(self), task["id"], self.step_id, name, args)
             else:
                 self.runner.enqueue(self.conn, task, self.step_id, name, args, self.now)
@@ -154,6 +155,8 @@ class Flow:
         failure: Exception | None = None
         try:
             getattr(self, name)(task, *args)
+        except BoundaryStale:
+            error = "superseded"
         except BoundaryWait:
             raise
         except Exception as exc:
@@ -314,14 +317,18 @@ class Flow:
             self.attempt_state = "accepted"
             run = state.get_run(self.conn, info["run_id"])
             if locked and not (info["matched"] and not info["keyed"]):
-                self._launch(task, "_attempt_work", run["id"], bool(info["matched"]))
+                self._launch(
+                    task, "_attempt_work", run["id"], bool(info["matched"]), run["attempts"]
+                )
             return run["id"]
         finally:
             if locked and not self.launched:
                 self._end(task)
 
-    def _attempt_work(self, task, run_id: int, matched: bool) -> None:
+    def _attempt_work(self, task, run_id: int, matched: bool, attempts: int) -> None:
         run = state.get_run(self.conn, run_id)
+        if run is None or run["attempts"] != attempts:
+            return
         if matched:
             self._explain_solution(task, run)
         else:

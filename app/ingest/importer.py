@@ -23,7 +23,7 @@ from app.ingest.schema import (
 )
 from app.ingest.store import open_db, save_snapshot
 from app.ingest.topics import catalog_prompt, load_catalog
-from app.model.types import BoundaryWait
+from app.model.types import BoundaryStale, BoundaryWait
 from app.search import index_pages
 
 log = logging.getLogger("app.ingest")
@@ -486,10 +486,7 @@ def _finish(
 def _auto_publish(ctx, conn, material_id: int | None) -> None:
     """Автопубликация (K5b) идёт после status=done и не влияет на итог импорта."""
     try:
-        if getattr(getattr(ctx, "state", None), "model_work", None) is not None:
-            ctx.autorun.enqueue_candidates(ctx, conn, material_id, force=False)
-        else:
-            ctx.autorun.run_inline(ctx, conn, material_id)
+        ctx.autorun.run_inline(ctx, conn, material_id)
     except BoundaryWait:
         raise
     except Exception:
@@ -521,6 +518,7 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
         ):
             return
         ctx.progress.begin(material_id, run_id)
+        managed = getattr(getattr(ctx, "state", None), "model_work", None) is not None
         try:
             pdf = ctx.material_path(material["file"]).read_bytes()
             pages = extract_pages(
@@ -563,8 +561,13 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                     # увидит ни новый ключ, ни прежний рисунок.
                     changed = figs.changed_materials(before, figs.candidate_snapshot(conn))
                     figs.recheck_materials_figures(ctx, conn, changed)
+                    if managed:
+                        ctx.autorun.enqueue_candidates(ctx, conn, None, force=False)
 
-                if _finish(conn, material_id, run_id, len(pages), write_key, recheck):
+                if (
+                    _finish(conn, material_id, run_id, len(pages), write_key, recheck)
+                    and not managed
+                ):
                     _auto_publish(ctx, conn, None)  # у заданий любого сборника мог появиться ключ
             else:
                 skipped: list[str] = []
@@ -580,6 +583,10 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                 note = skipped_note(skipped)
                 if not tasks and not note:
                     raise ImportFailure("Модель не нашла в файле ни одного задания.")
+
+                def enqueue_auto_publish():
+                    ctx.autorun.enqueue_candidates(ctx, conn, material_id, force=False)
+
                 finished = _finish(
                     conn,
                     material_id,
@@ -595,10 +602,13 @@ def run_import(ctx, material_id: int, cancel: threading.Event, run_id: str) -> N
                             material_id, run_id, done, total, phase="writing"
                         ),
                     ),
+                    after=enqueue_auto_publish if managed else None,
                     note=note,
                 )
-                if finished:
+                if finished and not managed:
                     _auto_publish(ctx, conn, material_id)
+        except BoundaryStale:
+            fail_material(conn, material_id, run_id, "Материал изменился во время ожидания.")
         except BoundaryWait:
             conn.execute(
                 "UPDATE material SET import_status = 'queued' "

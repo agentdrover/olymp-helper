@@ -10,7 +10,7 @@ CREATE TABLE model_operation (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
     object_key TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'active', 'unknown', 'done')),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'active', 'unknown', 'done', 'failed')),
     UNIQUE (kind, object_key)
 );
 CREATE INDEX model_operation_status ON model_operation(status, id);
@@ -24,6 +24,8 @@ CREATE TABLE tutor_pending_work (
     session_id INTEGER REFERENCES study_session(id),
     revision INTEGER NOT NULL,
     key_version INTEGER NOT NULL,
+    run_id INTEGER,
+    attempts INTEGER,
     applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
     created_at TEXT NOT NULL
 );

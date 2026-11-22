@@ -6,7 +6,7 @@ import os
 import urllib.error
 import urllib.request
 
-from app.model.control import NoRedirect
+from app.model.control import WORKER_PROOF_TIMEOUT_S, NoRedirect
 from app.model.images import encode_images
 from app.model.redaction import redact
 from app.model.types import ERROR_MESSAGE, ChannelError, ModelResult
@@ -49,10 +49,14 @@ def request_size(
     images=(),
     channel: str = "claude",
     model: str = "",
+    *,
+    tracked: bool = False,
 ) -> int:
     """Байт в теле запроса (кириллица в JSON занимает по 6 байт на знак): мерить только так.
     Канал и имя модели входят в тело, поэтому проверка до резерва лимита берёт фактические."""
-    return len(encode_payload(request_payload(channel, model, system, messages, schema, images)))
+    attempt = "0" * 32 if tracked else None
+    payload = request_payload(channel, model, system, messages, schema, images, attempt=attempt)
+    return len(encode_payload(payload))
 
 
 def http_post(url: str, payload: dict, timeout: float, headers: dict | None = None) -> dict:
@@ -93,7 +97,7 @@ class ExecutorChannel:
         )
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
-            with opener.open(request, timeout=2) as response:
+            with opener.open(request, timeout=WORKER_PROOF_TIMEOUT_S) as response:
                 content = response.read(1_100_001)
                 if len(content) > 1_100_000:
                     return None

@@ -18,7 +18,7 @@ from app.ingest.prompt import OPTIONS_SCHEMA, neutralize
 from app.ingest.schema import InvalidStructure, validate_tasks
 from app.ingest.store import atomic, get_task, now, save_snapshot, update_task
 from app.ingest.topics import load_catalog
-from app.model.types import LIMIT_MESSAGE, BoundaryWait
+from app.model.types import LIMIT_MESSAGE, BoundaryStale, BoundaryWait
 
 log = logging.getLogger("app.ingest")
 
@@ -483,6 +483,8 @@ def run_pack(ctx, conn, pack_id: int) -> None:
             _finish_failed(
                 conn, pack_id, f"Модель вернула неверную структуру: {exc}. Повторите.", channel
             )
+    except BoundaryStale:
+        _finish_failed(conn, pack_id, "Условия генерации изменились во время ожидания.")
     except BoundaryWait:
         raise
     except Exception:

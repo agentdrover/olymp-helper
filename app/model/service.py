@@ -119,7 +119,10 @@ class ModelService:
         try:
             limit = MAX_IMAGE_REQUEST_BYTES if images else MAX_REQUEST_BYTES
             return all(
-                request_size(system, messages, schema, images or (), n, models[n]) <= limit
+                request_size(
+                    system, messages, schema, images or (), n, models[n], tracked=self.managed
+                )
+                <= limit
                 for n in names
             )
         except ChannelError:
@@ -140,7 +143,12 @@ class ModelService:
         # слишком большой запрос не списывает запуск и не уходит на запасной канал.
         try:
             limit = MAX_IMAGE_REQUEST_BYTES if images else MAX_REQUEST_BYTES
-            if request_size(system, messages, schema, images or (), name, model) > limit:
+            if (
+                request_size(
+                    system, messages, schema, images or (), name, model, tracked=self.managed
+                )
+                > limit
+            ):
                 raise ChannelError("request_too_large")
         except ChannelError as exc:
             return ModelResult.failure(name, model, exc.kind)

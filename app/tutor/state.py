@@ -454,7 +454,7 @@ def record_discrepancy(conn, task, run_id: int, out, now, step_id=None) -> None:
     """Ответ модели расходится с ключом: запись родителю (ребёнок её не видит)."""
     answer = json.dumps(out.value, ensure_ascii=False)
     with atomic(conn):
-        steps.hold(conn, step_id)
+        steps.hold(conn, step_id, final=False)
         same = conn.execute(
             "SELECT 1 FROM tutor_discrepancy WHERE task_item_id = ? AND revision = ? "
             "AND key_version = ? AND model_answer = ?",

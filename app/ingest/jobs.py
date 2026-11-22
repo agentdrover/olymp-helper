@@ -40,24 +40,27 @@ class ImportJobs:
         # одновременных повторах последний владелец в базе совпадает с владельцем записи
         self._owner_lock = threading.Lock()
 
-    def _new_run(self, conn, material_id: int) -> str:
+    def _write_run(self, conn, material_id: int) -> str:
         run_id = uuid.uuid4().hex
         conn.execute("UPDATE material SET run_id = ? WHERE id = ?", (run_id, material_id))
         return run_id
 
+    def _new_run(self, material_id: int) -> str:
+        conn = open_db(self.ctx.db_path)
+        try:
+            return self._write_run(conn, material_id)
+        finally:
+            conn.close()
+
     def enqueue(self, conn, material_id: int) -> int:
         work = self.ctx.state.model_work
         with atomic(conn):
-            run_id = self._new_run(conn, material_id)
+            run_id = self._write_run(conn, material_id)
             return work.submit("import", f"{material_id}:{run_id}", conn=conn)
 
     def submit(self, material_id: int) -> None:
         with self._owner_lock:
-            conn = open_db(self.ctx.db_path)
-            try:
-                run_id = self._new_run(conn, material_id)
-            finally:
-                conn.close()
+            run_id = self._new_run(material_id)
             self.ctx.progress.claim(material_id, run_id)
         self._launch(material_id, run_id)
 

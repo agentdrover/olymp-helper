@@ -94,8 +94,21 @@ class Admission:
                 == 1
             )
 
-    def finish(self, op_id: int, *, unknown=False, deferred=False):
-        disposition = "unknown" if unknown else ("queued" if deferred else "done")
+    def has_unresolved_dispatch(self, op_id: int) -> bool:
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM model_dispatch WHERE operation_id = ? AND disposition <> 'confirmed'",
+                (op_id,),
+            ).fetchone()
+            is not None
+        )
+
+    def finish(self, op_id: int, *, unknown=False, deferred=False, failed=False):
+        disposition = "failed" if failed else "done"
+        if unknown:
+            disposition = "unknown"
+        elif deferred:
+            disposition = "queued"
         self.conn.execute(
             "UPDATE model_operation SET status = ? WHERE id = ? AND status = 'active'",
             (disposition, op_id),

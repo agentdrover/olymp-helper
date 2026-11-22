@@ -155,12 +155,12 @@ def enqueue_pending(ctx, conn) -> list[int]:
             task = get_task(conn, task_id)
             if needs_model(conn, task):
                 key = f"{task_id}:{task['revision']}:{content_hash(task)}"
-                items.append(ctx.state.model_work.submit("page_answer", key, conn=conn))
+                items.append(ctx.state.model_work.submit_again("page_answer", key, conn=conn))
     return items
 
 
 def run_saved_page(ctx, conn, key: str) -> None:
-    task_id, revision, expected = key.split(":", 2)
+    task_id, revision, expected = key.split(":")[:3]
     task = get_task(conn, int(task_id))
     if (
         task is None

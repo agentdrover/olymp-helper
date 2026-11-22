@@ -10,7 +10,7 @@ from app.model.work import operation
 from app.tutor.seq import bump
 
 
-def compute_model_answer(ctx, conn, task_id: int) -> bool:
+def compute_model_answer(ctx, conn, task_id: int, *, explicit_retry=False) -> bool:
     """Вычислить и записать model_answer для текущей ревизии; False - ответ не получен.
 
     Для задания с рисунком не вычисляется никогда: модель картинку не видит.
@@ -20,13 +20,15 @@ def compute_model_answer(ctx, conn, task_id: int) -> bool:
         task = get_task(conn, task_id, with_import=True)
         if task is None:
             return False
-        work.submit("answer", f"{task_id}:{task['revision']}:{task['import_run_id']}", conn=conn)
+        key = f"{task_id}:{task['revision']}:{task['import_run_id']}"
+        submit = work.submit_again if explicit_retry else work.submit
+        submit("answer", key, conn=conn)
         return True
     return compute_model_answer_why(ctx, conn, task_id)[0]
 
 
 def run_saved_answer(ctx, conn, key: str) -> None:
-    task_id, revision, run = key.split(":", 2)
+    task_id, revision, run = key.split(":")[:3]
     task = get_task(conn, int(task_id), with_import=True)
     if (
         task is not None
