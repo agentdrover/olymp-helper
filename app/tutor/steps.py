@@ -142,17 +142,14 @@ class StepRunner:
     def __init__(self, state, *, sync: bool = False):
         self.state = state  # app.state: model, inflight, clock, ctx читаются при запуске
         self.sync = sync
-        self.started = 0
-        self._threads: list[threading.Thread] = []
 
-    def submit(self, cls, task_id: int, step_id: int, name: str, args: tuple) -> None:
-        self.started += 1
+    def submit(self, cls, task_id: int, step_id: int, name: str, args: tuple) -> threading.Thread:
         worker = threading.Thread(
             target=self._run, args=(cls, task_id, step_id, name, args), daemon=True,
             name=f"step-{step_id}",
         )  # fmt: skip
-        self._threads.append(worker)
         worker.start()
+        return worker
 
     def enqueue(self, conn, task, step_id, name, args, now) -> None:
         from app.tutor.state import active_run, session_id_for
@@ -270,14 +267,3 @@ class StepRunner:
         finally:
             if conn is not None:
                 conn.close()
-
-    def join_step(self, step_id: int, timeout: float = 20) -> None:
-        for worker in list(self._threads):
-            if worker.name == f"step-{step_id}":
-                worker.join(timeout)
-
-    def join(self, timeout: float = 20) -> None:
-        """Подождать рабочие потоки (тесты)."""
-        for worker in list(self._threads):
-            worker.join(timeout)
-        self._threads = [w for w in self._threads if w.is_alive()]

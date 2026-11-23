@@ -16,7 +16,7 @@ from app.ingest.packs import KINDS, Verdict, _example_text, check_item
 from app.ingest.prompt import OPTIONS_SCHEMA, neutralize
 from app.ingest.schema import InvalidStructure
 from app.model.client import MAX_REQUEST_BYTES, request_size
-from app.model.types import CHANNELS
+from app.model.types import CHANNELS, BoundaryWait
 from app.tutor.guard import plain, prefilter_reason
 from app.tutor.prompts import JUDGE_SCHEMA, ModelOutputError, build_judge_request, parse_verdict
 
@@ -154,7 +154,7 @@ class PackRun:
         )
 
     def call(self, channel, system, messages, schema, who: str):
-        """Ответ канала (его JSON) или Stop. Размер меряется до вызова; запасного канала нет."""
+        """Ответ канала, Stop или сигнал очереди. Запасного канала нет."""
         if self.halted:
             raise Limit(LIMIT_REASON)
         ask = getattr(self.model, "complete_on", None)
@@ -169,6 +169,8 @@ class PackRun:
             raise Stop(f"{who}: запрос слишком велик", "size")
         try:
             result = ask(channel, system, messages, schema)
+        except BoundaryWait:
+            raise
         except Exception as exc:
             raise Stop(f"{who} недоступен", "unavailable") from exc
         if getattr(result, "error_kind", None) == "limit":

@@ -548,18 +548,17 @@ def _pending_background(tmp_path, _monkeypatch):
     """Шаг в фоне начат до старта и кончается во время олимпиады: ни ответ POST, ни опрос
     (с номером шага и без) его итога не показывают; отложенный итог не сохраняется, а после сдачи
     помощь работает штатно: подсказку можно взять заново."""
-    from tests.bank_helpers import build_app
-    from tests.tutor_helpers import Blocking, Clock
+    from tests.tutor_helpers import Blocking, Clock, background_client
 
     model, clock = Blocking(), Clock()
-    c = TestClient(build_app(tmp_path, model, clock=clock, sync_steps=False))
+    c = background_client(tmp_path, model, clock)
     with c:
         task = seed(tmp_path, key="Б", number="1")
         save_format(c, tmp_path, count_multiple="0", count_match="0", count_numeric="0",
                     points_multiple="0", points_match="0", points_numeric="0")  # fmt: skip
         model.release.set()
         assert attempt(c, task, "А", "sure").status_code == 200  # неверно: разбор в фоне
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         model.release.clear()
         model.entered.clear()
         first = post(c, task, "hint", level=1)
@@ -572,7 +571,7 @@ def _pending_background(tmp_path, _monkeypatch):
         finally:
             conn.close()
         model.release.set()
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         for extra in ({}, {"HX-Request": "true"}):
             for url in (
                 f"/api/tasks/{task}/tutor",

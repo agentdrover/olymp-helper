@@ -9,22 +9,31 @@ import time
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.tutor import state as tutor_state
 from app.tutor import steps
 from app.tutor.panel import LONG_WAIT_S, Inflight
 from app.tutor.steps import STEP_TIMEOUT_S
-from tests.bank_helpers import CHILD, build_app, db
+from tests.bank_helpers import CHILD, db
 from tests.chat_helpers import chat_reply, say
-from tests.tutor_helpers import Blocking, Clock, Scripted, attempt, out, post, seed, view
+from tests.tutor_helpers import (
+    Blocking,
+    Clock,
+    Scripted,
+    attempt,
+    background_client,
+    out,
+    post,
+    seed,
+    view,
+)
 
 STATIC = Path(__file__).parent.parent / "app" / "static" / "tutor.js"
 
 
 def boot_bg(tmp_path, model):
     clock = Clock()
-    c = TestClient(build_app(tmp_path, model, clock=clock, sync_steps=False))
+    c = background_client(tmp_path, model, clock)
     c.__enter__()
     return c, clock
 
@@ -33,7 +42,7 @@ def wrong_attempt(c, tid, model):
     """Неверная попытка: её разбор тоже идёт в фоне; ждём его конца."""
     model.release.set()
     assert attempt(c, tid, "А").status_code == 200
-    c.app.state.steps.join()
+    c.app.state.step_threads.join()
     model.release.clear()
     model.entered.clear()
 
@@ -55,7 +64,7 @@ def test_a_hint_runs_in_the_background_and_the_panel_picks_it_up(tmp_path):
     with c:
         tid = seed(tmp_path, key="Б")
         wrong_attempt(c, tid, model)
-        started = c.app.state.steps.started
+        started = c.app.state.step_threads.started
         t0 = time.monotonic()
         first = post(c, tid, "hint", level=1)
         assert time.monotonic() - t0 < 1.0, "POST не должен ждать модель"
@@ -63,16 +72,16 @@ def test_a_hint_runs_in_the_background_and_the_panel_picks_it_up(tmp_path):
         assert first.json()["panel"]["state"] == "thinking"
         assert first.json()["hints"] == 0
         assert model.entered.wait(10)
-        assert c.app.state.steps.started == started + 1
+        assert c.app.state.step_threads.started == started + 1
         assert view(c, tid)["panel"]["state"] == "thinking"
         assert "Думаю" in fragment(c, tid)
         # второй POST во время работы: «думаю…», новой работы нет
         second = post(c, tid, "hint", level=1)
         assert second.json()["panel"]["state"] == "thinking"
-        assert c.app.state.steps.started == started + 1
+        assert c.app.state.step_threads.started == started + 1
         n = len(model.calls)
         model.release.set()
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         done = view(c, tid)
         assert done["panel"]["state"] == "idle" and done["hints"] == 1
         assert len(done["hints_list"]) == 1
@@ -94,7 +103,7 @@ def test_a_failed_background_step_frees_the_panel(tmp_path, monkeypatch):
         monkeypatch.setattr("app.tutor.state.store_hint", boom)
         model.release.set()
         post(c, tid, "hint", level=1)
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         v = view(c, tid)
         assert v["panel"]["state"] == "step_failed" and not v["panel"]["busy"]
         assert c.app.state.inflight.since(tid) is None
@@ -112,7 +121,7 @@ def test_a_failed_background_step_frees_the_panel(tmp_path, monkeypatch):
         assert c.app.state.inflight.since(tid) is None
         assert hint_button_enabled(fragment(c, tid))
         model.release.set()
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         assert STEP_TIMEOUT_S >= 2 * 130 * 2
 
 
@@ -137,7 +146,7 @@ def test_a_reloaded_page_shows_the_running_step_with_elapsed_time(tmp_path):
         assert "if (fetching) return;" in js  # запросы опроса не накладываются
         assert "5–15" not in js and "5–15" not in page
         model.release.set()
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
 
 
 def test_a_chat_question_runs_in_the_background(tmp_path):
@@ -145,7 +154,7 @@ def test_a_chat_question_runs_in_the_background(tmp_path):
     c, _clock = boot_bg(tmp_path, model)
     with c:
         tid = seed(tmp_path, key="Б")
-        started = c.app.state.steps.started
+        started = c.app.state.step_threads.started
         t0 = time.monotonic()
         first = say(c, tid, "что такое клетка?")
         assert time.monotonic() - t0 < 1.0
@@ -154,9 +163,9 @@ def test_a_chat_question_runs_in_the_background(tmp_path):
         assert view(c, tid)["panel"]["state"] == "thinking" and view(c, tid)["chat"] == []
         second = say(c, tid, "второй вопрос")
         assert second.json()["panel"]["state"] == "thinking"
-        assert c.app.state.steps.started == started + 1
+        assert c.app.state.step_threads.started == started + 1
         model.release.set()
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         done = view(c, tid)
         assert done["panel"]["state"] == "idle" and len(done["chat"]) == 1
         assert c.app.state.inflight.since(tid) is None
@@ -211,7 +220,7 @@ def expire_blocked(c, model, clock, tid, trigger):
 
 def release_late(c, model, k, step):
     model.gate(k).set()
-    c.app.state.steps.join_step(step)
+    c.app.state.step_threads.join_step(step)
 
 
 def rows(tmp_path, sql):
@@ -224,7 +233,7 @@ def rows(tmp_path, sql):
 
 def normal_wrong(c, tid):
     attempt(c, tid, "А")
-    c.app.state.steps.join()
+    c.app.state.step_threads.join()
 
 
 def test_a_late_hint_publishes_nothing(tmp_path):
@@ -263,7 +272,7 @@ def test_a_late_solution_explanation_publishes_nothing(tmp_path):
         assert view(c, tid)["solution"]["explanation"] is None
         other = seed(tmp_path, key="Б")
         attempt(c, other, "Б")
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         assert view(c, other)["solution"]["explanation"]
 
 
@@ -273,7 +282,7 @@ def test_a_late_explain_publishes_nothing(tmp_path):
     with c:
         tid = seed(tmp_path, key="Б")
         attempt(c, tid, "Б")
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         k, step = expire_blocked(
             c, model, clock, tid, lambda: post(c, tid, "explain", mode="simpler")
         )
@@ -282,9 +291,9 @@ def test_a_late_explain_publishes_nothing(tmp_path):
         assert events_of(tmp_path, "explain") == 0
         other = seed(tmp_path, key="Б")
         attempt(c, other, "Б")
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         post(c, other, "explain", mode="simpler")
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         assert len(view(c, other)["explains"]) == 1
 
 
@@ -305,7 +314,7 @@ def test_a_late_step_records_no_discrepancy(tmp_path):
         normal_wrong(c, other)
         mid = len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy"))
         post(c, other, "hint", level=1)
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         assert len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy")) == mid + 1
 
 
@@ -316,7 +325,7 @@ def test_two_chats_late_one_is_not_published_beside_the_other(tmp_path):
         tid = seed(tmp_path, key="Б")
         k, step = expire_blocked(c, model, clock, tid, lambda: say(c, tid, "Исключи А и В"))
         say(c, tid, "Исключи Г")  # замена идёт и записывается
-        c.app.state.steps.join_step(rows(tmp_path, "SELECT MAX(id) FROM tutor_step")[0][0])
+        c.app.state.step_threads.join_step(rows(tmp_path, "SELECT MAX(id) FROM tutor_step")[0][0])
         assert [m["question"] for m in view(c, tid)["chat"]] == ["Исключи Г"]
         release_late(c, model, k, step)
         assert [m["question"] for m in view(c, tid)["chat"]] == ["Исключи Г"]
@@ -368,11 +377,11 @@ def test_a_late_worker_cannot_release_the_next_steps_lock(tmp_path):
         assert holder is not None and holder != step
         release_late(c, model, k, step)
         assert c.app.state.inflight.step_of(tid) == holder  # опоздавший замок не снял
-        started = c.app.state.steps.started
+        started = c.app.state.step_threads.started
         assert post(c, tid, "hint", level=1).json()["panel"]["state"] == "thinking"
-        assert c.app.state.steps.started == started, "третий шаг не должен стартовать"
+        assert c.app.state.step_threads.started == started, "третий шаг не должен стартовать"
         model.gate(k2).set()
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         assert view(c, tid)["hints"] == 1
 
 
@@ -418,7 +427,7 @@ def test_a_step_expired_between_its_writes_does_not_mark_the_solution_disputed(
         expire_after_discrepancy(c, clock, monkeypatch)
         tid = seed(tmp_path, key="Б")
         attempt(c, tid, "Б")
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         assert len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy")) == 1
         assert view(c, tid)["solution"]["disputed"] is False
         assert [r[0] for r in rows(tmp_path, "SELECT error FROM tutor_step")][-1] == "timeout"
@@ -432,10 +441,10 @@ def test_an_explain_step_expired_between_its_writes_does_not_mark_the_solution_d
     with c:
         tid = seed(tmp_path, key="Б")
         attempt(c, tid, "Б")
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         expire_after_discrepancy(c, clock, monkeypatch)
         post(c, tid, "explain", mode="simpler")
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         assert len(rows(tmp_path, "SELECT 1 FROM tutor_discrepancy")) == 1
         assert view(c, tid)["solution"]["disputed"] is False
         assert [r[0] for r in rows(tmp_path, "SELECT error FROM tutor_step")][-1] == "timeout"
@@ -497,7 +506,7 @@ def test_an_older_steps_result_never_hides_a_newer_running_step(tmp_path):
         tid = seed(tmp_path, key="Б")
         normal_wrong(c, tid)
         post(c, tid, "hint", level=1)  # шаг A
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         step_a = rows(tmp_path, "SELECT MAX(id) FROM tutor_step")[0][0]
         k = model.started
         model.blocked.add(k)
@@ -514,7 +523,7 @@ def test_an_older_steps_result_never_hides_a_newer_running_step(tmp_path):
         html = c.get(f"/tasks/{tid}/tutor?step={step_a}", headers=CHILD).text
         assert f'data-step="{step_b}"' in html
         model.gate(k).set()
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         # итог B показывается по его номеру; итог A с устаревшим номером - нет
         done = c.get(f"/api/tasks/{tid}/tutor?step={step_b}", headers=CHILD).json()
         assert done["hints"] == 1 and done["panel"]["state"] == "idle"
@@ -550,8 +559,8 @@ def test_the_response_says_whether_an_attempt_was_accepted(tmp_path):
         assert "ответ не отправлен" in refused.text and 'data-panel="thinking"' in refused.text
         assert view(c, tid)["attempts"] == 1  # попытка не записана
         model.release.set()
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         accepted = c.post(f"/tasks/{tid}/attempt", json={"answer": "Б"}, headers=hx)
         assert accepted.headers["X-Attempt"] == "accepted"
-        c.app.state.steps.join()
+        c.app.state.step_threads.join()
         assert view(c, tid)["attempts"] == 2
