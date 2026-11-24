@@ -1,6 +1,5 @@
 """Общие объекты приложения для загрузки, импорта и проверки заданий."""
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -8,7 +7,7 @@ from app.db import connect
 from app.ingest.autorun import AutoRun
 from app.ingest.progress import ImportProgress
 from app.ingest.render import PageCache
-from app.model.client import ExecutorChannel
+from app.model.client import configured_channel
 from app.model.service import ModelService
 from app.model.types import ModelResult
 
@@ -16,8 +15,9 @@ from app.model.types import ModelResult
 class ExecutorModel:
     """Модель по умолчанию: ModelService на отдельном соединении под каждый запрос."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, *, managed=False):
         self.db_path = db_path
+        self.managed = managed
 
     def complete(self, system, messages, schema=None, session_id=None) -> ModelResult:
         return self._run(lambda svc: svc.complete(system, messages, schema, session_id))
@@ -41,15 +41,8 @@ class ExecutorModel:
     def _run(self, call):
         conn = connect(self.db_path)
         try:
-            channels = {
-                "codex": ExecutorChannel(
-                    "codex", os.environ.get("EXECUTOR_CODEX_URL", "http://executor-codex:8099")
-                ),
-                "cursor": ExecutorChannel(
-                    "cursor", os.environ.get("EXECUTOR_CURSOR_URL", "http://executor-cursor:8099")
-                ),
-            }
-            return call(ModelService(conn, channels))
+            channels = {name: configured_channel(name) for name in ("codex", "cursor")}
+            return call(ModelService(conn, channels, managed=self.managed))
         finally:
             conn.close()
 

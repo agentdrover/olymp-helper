@@ -18,7 +18,7 @@ from app.ingest.prompt import OPTIONS_SCHEMA, neutralize
 from app.ingest.schema import InvalidStructure, validate_tasks
 from app.ingest.store import atomic, get_task, now, save_snapshot, update_task
 from app.ingest.topics import load_catalog
-from app.model.types import LIMIT_MESSAGE
+from app.model.types import LIMIT_MESSAGE, BoundaryStale, BoundaryWait
 
 log = logging.getLogger("app.ingest")
 
@@ -428,12 +428,40 @@ def generate_pack(ctx, conn, topic: str, kind: str, count: int) -> int:
         raise PackRefused("Такого типа вопросов нет.")
     if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= MAX_COUNT:
         raise PackRefused(f"Число вопросов - от 1 до {MAX_COUNT}.")
-    cur = conn.execute(
-        "INSERT INTO question_pack (created_at, topic, task_type, requested_count) "
-        "VALUES (?, ?, ?, ?)",
-        (now(), topic, kind, count),
-    )
-    pack_id = cur.lastrowid
+    work = getattr(getattr(ctx, "state", None), "model_work", None)
+    with atomic(conn):
+        if work is not None:
+            pending = conn.execute(
+                "SELECT p.id FROM question_pack p JOIN model_operation m ON m.kind = 'pack' "
+                "AND m.object_key = CAST(p.id AS TEXT) WHERE p.topic = ? AND p.task_type = ? "
+                "AND p.requested_count = ? AND m.status IN ('queued', 'active', 'unknown') "
+                "ORDER BY p.id LIMIT 1",
+                (topic, kind, count),
+            ).fetchone()
+            if pending is not None:
+                return pending[0]
+        pack_id = conn.execute(
+            "INSERT INTO question_pack (created_at, topic, task_type, requested_count) "
+            "VALUES (?, ?, ?, ?)",
+            (now(), topic, kind, count),
+        ).lastrowid
+        if work is not None:
+            work.submit("pack", pack_id, conn=conn)
+    if work is None:
+        run_pack(ctx, conn, pack_id)
+    return pack_id
+
+
+def run_pack(ctx, conn, pack_id: int) -> None:
+    row = conn.execute(
+        "SELECT topic, task_type, requested_count FROM question_pack "
+        "WHERE id = ? AND status = 'running'",
+        (pack_id,),
+    ).fetchone()
+    if row is None:
+        return
+    topic, kind, count = row
+    catalog = load_catalog(conn)
     try:
         system, messages = build_request(
             catalog[topic]["title"],
@@ -446,7 +474,7 @@ def generate_pack(ctx, conn, topic: str, kind: str, count: int) -> int:
         channel = getattr(result, "channel", None)
         if not getattr(result, "ok", False):
             _finish_failed(conn, pack_id, _failure_message(result), channel)
-            return pack_id
+            return
         try:
             accepted, rejected = sort_out(result.json, kind, count, _bank_texts(conn))
             vetted = _vet_all(ctx, conn, topic, kind, accepted, channel)
@@ -455,15 +483,20 @@ def generate_pack(ctx, conn, topic: str, kind: str, count: int) -> int:
             _finish_failed(
                 conn, pack_id, f"Модель вернула неверную структуру: {exc}. Повторите.", channel
             )
+    except BoundaryStale:
+        _finish_failed(conn, pack_id, "Условия генерации изменились во время ожидания.")
+    except BoundaryWait:
+        raise
     except Exception:
         log.exception("pack %s failed", pack_id)
         _finish_failed(conn, pack_id, "Не удалось составить пачку. Повторите позже.")
-    return pack_id
 
 
 def fail_stale(conn, message: str) -> None:
     """После перезапуска запрос к модели уже не ждёт никто: running -> failed."""
     conn.execute(
-        "UPDATE question_pack SET status = 'failed', error = ? WHERE status = 'running'",
+        "UPDATE question_pack SET status = 'failed', error = ? WHERE status = 'running' "
+        "AND NOT EXISTS (SELECT 1 FROM model_operation WHERE kind = 'pack' "
+        "AND status <> 'done' AND object_key = CAST(question_pack.id AS TEXT))",
         (message,),
     )

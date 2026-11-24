@@ -148,6 +148,32 @@ def normalize_task(ctx, conn, task) -> str:
     return "unparsable" if reason == "unparsable" else "rejected"
 
 
+def enqueue_pending(ctx, conn) -> list[int]:
+    items = []
+    with atomic(conn):
+        for (task_id,) in conn.execute("SELECT id FROM task_item ORDER BY id"):
+            task = get_task(conn, task_id)
+            if needs_model(conn, task):
+                key = f"{task_id}:{task['revision']}:{content_hash(task)}"
+                items.append(ctx.state.model_work.submit_again("page_answer", key, conn=conn))
+    return items
+
+
+def run_saved_page(ctx, conn, key: str) -> None:
+    task_id, revision, expected = key.split(":")[:3]
+    task = get_task(conn, int(task_id))
+    if (
+        task is None
+        or str(task["revision"]) != revision
+        or content_hash(task) != expected
+        or not needs_model(conn, task)
+    ):
+        return
+    outcome = normalize_task(ctx, conn, task)
+    if outcome == "stored" and task["material_id"] is not None:
+        recheck_materials_figures(ctx, conn, {task["material_id"]})
+
+
 def normalize_pending(ctx, conn) -> dict:
     """Пакет: все задания, которым нужна модель. Дневной лимит кончился - остановка."""
     counts = {"stored": 0, "unparsable": 0, "rejected": 0, "error": 0, "skipped": 0}

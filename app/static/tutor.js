@@ -28,7 +28,7 @@
     if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
   }
 
-  var BUSY_SEL = ".helper-status[data-panel='thinking'], .helper-status[data-panel='second_channel']";
+  var BUSY_SEL = ".helper-status[data-panel='unknown_model'], .helper-status[data-panel='waiting_model'], .helper-status[data-panel='thinking'], .helper-status[data-panel='second_channel']";
   var NOTE = "Помощник сейчас не отвечает — проверка по ключу работает.";
   var timer = null;       // единственная цепочка опроса: один таймер, перед новым старый снимается
   var fetching = false;   // запрос опроса в пути: второй не стартует

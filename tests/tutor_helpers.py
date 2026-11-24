@@ -32,6 +32,38 @@ _counter = itertools.count(1)
 START = datetime(2026, 10, 22, 10, 0, 0, tzinfo=UTC)
 
 
+class StepThreads:
+    """Capture the handles of background steps for deterministic joins in tests."""
+
+    def __init__(self, runner):
+        self.submit_step = runner.submit
+        self.started = 0
+        self.workers = []
+        runner.submit = self.submit
+
+    def submit(self, *args, **kwargs):
+        worker = self.submit_step(*args, **kwargs)
+        self.workers.append(worker)
+        self.started += 1
+        return worker
+
+    def join(self, timeout=20):
+        for worker in list(self.workers):
+            worker.join(timeout)
+        self.workers = [worker for worker in self.workers if worker.is_alive()]
+
+    def join_step(self, step_id, timeout=20):
+        for worker in list(self.workers):
+            if worker.name == f"step-{step_id}":
+                worker.join(timeout)
+
+
+def background_client(tmp_path, model, clock):
+    app = build_app(tmp_path, model, clock=clock, sync_steps=False)
+    app.state.step_threads = StepThreads(app.state.steps)
+    return TestClient(app)
+
+
 class Clock:
     def __init__(self):
         self.now = START

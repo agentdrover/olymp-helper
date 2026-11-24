@@ -8,9 +8,11 @@ from datetime import UTC, datetime
 
 from app.ingest.store import atomic
 from app.model.client import MAX_IMAGE_REQUEST_BYTES, MAX_REQUEST_BYTES, request_size
+from app.model.dispatch import Dispatch
 from app.model.ledger import Ledger
 from app.model.redaction import redact
 from app.model.types import CHANNELS, LIMIT_MESSAGE, ChannelError, ModelChannel, ModelResult
+from app.model.work import operation
 from app.tutor.seq import bump
 
 __all__ = ["DEFAULT_MODELS", "LIMIT_MESSAGE", "ModelService", "model_family"]
@@ -38,11 +40,19 @@ log = logging.getLogger("app.model")
 
 
 class ModelService:
-    def __init__(self, conn: sqlite3.Connection, channels: dict[str, ModelChannel], clock=None):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        channels: dict[str, ModelChannel],
+        clock=None,
+        *,
+        managed=False,
+    ):
         self.conn = conn
         self.channels = channels
         self.clock = clock or (lambda: datetime.now(UTC))
         self.ledger = Ledger(conn, self.clock)
+        self.managed = managed
 
     def complete(
         self,
@@ -58,9 +68,16 @@ class ModelService:
         models = self._models()
         spare = "cursor" if primary in ("codex", "claude") else "codex"
         first = self._attempt(primary, models[primary], system, messages, schema, fallback=False)
-        if first.ok or first.error_kind in ("limit", "request_too_large"):
+        if first.ok or first.error_kind in (
+            "limit",
+            "request_too_large",
+            "admission_waiting",
+            "dispatch_unknown",
+        ):
             return first
-        self._fallback_event(session_id, primary, spare, first.error_kind)
+        scope = operation.get() if self.managed else None
+        if scope is None or not scope.replayed_call:
+            self._fallback_event(session_id, primary, spare, first.error_kind)
         return self._attempt(spare, models[spare], system, messages, schema, fallback=True)
 
     def complete_on(
@@ -102,7 +119,10 @@ class ModelService:
         try:
             limit = MAX_IMAGE_REQUEST_BYTES if images else MAX_REQUEST_BYTES
             return all(
-                request_size(system, messages, schema, images or (), n, models[n]) <= limit
+                request_size(
+                    system, messages, schema, images or (), n, models[n], tracked=self.managed
+                )
+                <= limit
                 for n in names
             )
         except ChannelError:
@@ -123,10 +143,30 @@ class ModelService:
         # слишком большой запрос не списывает запуск и не уходит на запасной канал.
         try:
             limit = MAX_IMAGE_REQUEST_BYTES if images else MAX_REQUEST_BYTES
-            if request_size(system, messages, schema, images or (), name, model) > limit:
+            if (
+                request_size(
+                    system, messages, schema, images or (), name, model, tracked=self.managed
+                )
+                > limit
+            ):
                 raise ChannelError("request_too_large")
         except ChannelError as exc:
             return ModelResult.failure(name, model, exc.kind)
+        scope = operation.get() if self.managed else None
+        if self.managed and (scope is None or scope.deferred or scope.unknown):
+            reason = (
+                "dispatch_unknown" if scope is not None and scope.unknown else "admission_waiting"
+            )
+            return ModelResult.failure(name, model, reason)
+        if scope is not None:
+            return Dispatch(self.conn, self.ledger, scope, name, model).call(
+                self.channels[name],
+                system,
+                messages,
+                schema,
+                fallback,
+                images or (),
+            )
         run_id = self.ledger.reserve(name, model, fallback)
         if run_id is None:
             return ModelResult.failure(name, model, "limit", message=LIMIT_MESSAGE)

@@ -10,6 +10,14 @@ ERROR_MESSAGE = "Помощник сейчас не отвечает — про�
 LIMIT_MESSAGE = "На сегодня всё — вопросы к помощнику кончились, проверка по ключу работает."
 
 
+class BoundaryWait(Exception):
+    """The operation must keep its durable continuation for later proof."""
+
+
+class BoundaryStale(BoundaryWait):
+    """The saved request no longer matches its prior execution context."""
+
+
 class ChannelError(Exception):
     """Сбой запуска или разбора ответа CLI. kind - короткий код без деталей."""
 

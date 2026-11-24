@@ -14,14 +14,18 @@ from app.account_web import public as account_public
 from app.db import connect, migrate, schema_version
 from app.exam_web import child as exam_child
 from app.exam_web import parent as exam_parent
+from app.ingest import page_normalizer
 from app.ingest.context import AppContext, ExecutorModel
 from app.ingest.jobs import ImportJobs
 from app.ingest.limits import IMPORT_MAX_BASE_S, IMPORT_MAX_PER_CHUNK_S, IMPORT_STALL_S
-from app.ingest.packs import fail_stale
+from app.ingest.model_answer import run_saved_answer
+from app.ingest.packs import fail_stale, run_pack
 from app.ingest.progress import ImportProgress
 from app.ingest.render import PageCache
+from app.ingest.store import open_db
 from app.ingest.web import parent as parent_router
 from app.ingest.web import public as public_router
+from app.model.work import ModelWork
 from app.sessions import utcnow
 from app.summary_web import child as summary_child
 from app.summary_web import parent as summary_parent
@@ -90,27 +94,36 @@ def create_app(
     path = Path(db_path or os.environ.get("OLYMP_DB", DEFAULT_DB_PATH))
     data = Path(data_dir or os.environ.get("OLYMP_DATA_DIR") or path.parent)
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        conn = connect(path)
-        migrate(conn)
-        # Потоки импорта и их таймеры живут только в памяти процесса: после перезапуска
-        # queued/running зависли бы навсегда. Повтор возможен для failed.
-        conn.execute(
-            "UPDATE material SET import_status = 'failed', import_error = ?, "
-            "run_id = lower(hex(randomblob(16))) "
-            "WHERE import_status IN ('queued', 'running')",
-            (INTERRUPTED,),
-        )
-        fail_stale(conn, INTERRUPTED)  # запрос к модели за пачкой не переживает перезапуск
-        conn.close()
+    def prepare():
+        with contextlib.closing(connect(path)) as conn:
+            migrate(conn)
+            # A job already dispatched may have spent quota. Preserve only the
+            # durable queued operations for automatic recovery.
+            conn.execute(
+                "UPDATE material SET import_status = 'failed', import_error = ?, "
+                "run_id = lower(hex(randomblob(16))) "
+                "WHERE import_status IN ('queued', 'running') AND NOT EXISTS ("
+                "SELECT 1 FROM model_operation WHERE kind = 'import' AND status <> 'done' "
+                "AND object_key = material.id || ':' || material.run_id)",
+                (INTERRUPTED,),
+            )
+            fail_stale(conn, INTERRUPTED)
         sweep(path, clock)
         ctx.page_cache.purge_legacy()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         app.state.db_path = path
+        if app.state.model_work is None:
+            prepare()
+        else:
+            app.state.model_work.start(prepare)
         sweep_task = asyncio.create_task(_sweep_forever(path, clock))
         try:
             yield
         finally:
+            if app.state.model_work is not None:
+                app.state.model_work.close()
             sweep_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sweep_task
@@ -121,7 +134,8 @@ def create_app(
     )
     app.state.clock = clock
     app.add_exception_handler(ExamBusy, lambda request, exc: exc.response)
-    app.state.model = model or ExecutorModel(path)
+    app.state.model_work = ModelWork(path) if model is None else None
+    app.state.model = model or ExecutorModel(path, managed=True)
     # Часы одни на всё приложение (clock выше): тест подменяет их, и 60 секунд до подсказки,
     # простой занятия и сессия родителя идут по одному времени.
     app.state.inflight = Inflight()
@@ -147,6 +161,26 @@ def create_app(
         max_base=import_max_base,
         max_per_chunk=import_max_per_chunk,
     )
+    if app.state.model_work is not None:
+
+        def run_saved_pack(key):
+            with contextlib.closing(open_db(path)) as conn:
+                run_pack(ctx, conn, int(key))
+
+        def run_answer(key):
+            with contextlib.closing(open_db(path)) as conn:
+                run_saved_answer(ctx, conn, key)
+
+        def run_saved_page(key):
+            with contextlib.closing(open_db(path)) as conn:
+                page_normalizer.run_saved_page(ctx, conn, key)
+
+        app.state.model_work.handlers["page_answer"] = run_saved_page
+        app.state.model_work.handlers["answer"] = run_answer
+        app.state.model_work.handlers["autopublish"] = lambda key: ctx.autorun.run_queued(ctx, key)
+        app.state.model_work.handlers["import"] = app.state.imports.run_queued
+        app.state.model_work.handlers["pack"] = run_saved_pack
+        app.state.model_work.handlers["tutor"] = app.state.steps.run_queued
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(account_parent)
     app.include_router(account_public)

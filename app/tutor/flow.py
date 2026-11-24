@@ -19,8 +19,9 @@ from app import exam
 from app.chat import store as chat_store
 from app.ingest.answers import display
 from app.ingest.publish import assist_mode
-from app.ingest.store import figure_of, get_task
+from app.ingest.store import atomic, figure_of, get_task
 from app.model.client import MAX_REQUEST_BYTES, request_size
+from app.model.types import BoundaryStale, BoundaryWait
 from app.tutor import state, steps
 from app.tutor.guard import GENERIC, finish, render_markdown
 from app.tutor.panel import Inflight, failure_state, panel
@@ -83,6 +84,16 @@ class Flow:
 
     def _begin(self, task, kind: str = "step") -> bool:
         """Весь шаг (генерация, судья, перегенерация) - один запрос в работе на задание."""
+        with atomic(self.conn):
+            return self._reserve(task, kind)
+
+    def _reserve(self, task, kind: str) -> bool:
+        waiting = steps.waiting(self.conn, task["id"])
+        if waiting is not None and kind != "attempt":
+            self.panel_state = (
+                "unknown_model" if waiting["operation_status"] == "unknown" else "waiting_model"
+            )
+            return False
         if self.inflight.since(task["id"]) is not None:
             self.panel_state = "thinking"
             return False
@@ -124,11 +135,15 @@ class Flow:
         """Работа шага с моделью: в фоне, когда есть рабочий поток, иначе тут же. Замок после
         вызова принадлежит работе, не запросу."""
         self.launched = True
-        if self.runner is None or self.runner.sync:
+        work = getattr(self.runner.state, "model_work", None) if self.runner is not None else None
+        if self.runner is None or (self.runner.sync and work is None):
             self.execute(task["id"], name, args, reraise=True)
             return
         try:
-            self.runner.submit(type(self), task["id"], self.step_id, name, args)
+            if work is None:
+                self.runner.submit(type(self), task["id"], self.step_id, name, args)
+            else:
+                self.runner.enqueue(self.conn, task, self.step_id, name, args, self.now)
         except BaseException as exc:
             self._end(task, f"{type(exc).__name__}")
             raise
@@ -140,6 +155,10 @@ class Flow:
         failure: Exception | None = None
         try:
             getattr(self, name)(task, *args)
+        except BoundaryStale:
+            error = "superseded"
+        except BoundaryWait:
+            raise
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"[:300]
             failure = exc
@@ -167,6 +186,8 @@ class Flow:
             return None
         try:
             result = self.model.complete(system, messages, OUTPUT_SCHEMA, session_id=self.session)
+        except BoundaryWait:
+            raise
         except Exception:  # noqa: BLE001 - модель любого вида: ребёнку «не отвечает»
             self.panel_state = "down"
             return None
@@ -226,6 +247,8 @@ class Flow:
             return None
         try:
             result = call(other, system, messages, JUDGE_SCHEMA, session_id=self.session)
+        except BoundaryWait:
+            raise
         except Exception:  # noqa: BLE001
             return None
         if not getattr(result, "ok", False):
@@ -294,14 +317,18 @@ class Flow:
             self.attempt_state = "accepted"
             run = state.get_run(self.conn, info["run_id"])
             if locked and not (info["matched"] and not info["keyed"]):
-                self._launch(task, "_attempt_work", run["id"], bool(info["matched"]))
+                self._launch(
+                    task, "_attempt_work", run["id"], bool(info["matched"]), run["attempts"]
+                )
             return run["id"]
         finally:
             if locked and not self.launched:
                 self._end(task)
 
-    def _attempt_work(self, task, run_id: int, matched: bool) -> None:
+    def _attempt_work(self, task, run_id: int, matched: bool, attempts: int) -> None:
         run = state.get_run(self.conn, run_id)
+        if run is None or run["attempts"] != attempts:
+            return
         if matched:
             self._explain_solution(task, run)
         else:

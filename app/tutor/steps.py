@@ -10,12 +10,17 @@ POST проверяет запрос, берёт замок `Inflight`, запи
 замок (перезапуск процесса), помечается failed при следующем чтении, замок снимается.
 """
 
+import json
 import logging
 import threading
+from contextlib import closing
 from datetime import datetime
 
-from app.ingest.store import atomic, open_db
+from app import exam
+from app.ingest.publish import is_published
+from app.ingest.store import atomic, get_task, open_db
 from app.model.client import REQUEST_TIMEOUT_S
+from app.model.types import BoundaryWait
 from app.tutor.seq import bump
 
 log = logging.getLogger(__name__)
@@ -55,7 +60,7 @@ def discard(conn, step_id: int) -> None:
             bump(conn)
 
 
-def hold(conn, step_id: int | None) -> None:
+def hold(conn, step_id: int | None, *, final=True) -> None:
     """Сравнить-и-держать: вызывается ВНУТРИ транзакции записи результата. Шаг ещё идёт - строка
     шага залочена этой же транзакцией, снять шаг по сроку одновременно нельзя; не идёт -
     StepExpired, транзакция откатывается и ничего не публикуется. Все писатели результата
@@ -68,6 +73,8 @@ def hold(conn, step_id: int | None) -> None:
     )
     if done.rowcount != 1:
         raise StepExpired(f"шаг {step_id} уже снят")
+    if final:
+        conn.execute("UPDATE tutor_pending_work SET applied = 1 WHERE step_id = ?", (step_id,))
 
 
 def finish(
@@ -94,6 +101,18 @@ def latest(conn, task_id: int):
     ).fetchone()
 
 
+def waiting(conn, task_id: int, *, step_id=None):
+    return conn.execute(
+        "SELECT s.*, m.status AS operation_status "
+        "FROM tutor_step s JOIN tutor_pending_work w ON w.step_id = s.id "
+        "JOIN model_operation m ON m.kind = 'tutor' AND m.object_key = CAST(s.id AS TEXT) "
+        "WHERE s.task_item_id = ? AND (? IS NULL OR s.id = ?) "
+        "AND s.status = 'running' AND m.status IN ('queued', 'active', 'unknown') "
+        "ORDER BY s.id DESC LIMIT 1",
+        (task_id, step_id, step_id),
+    ).fetchone()
+
+
 def elapsed(row, now: datetime) -> int:
     return max(0, int((now - datetime.fromisoformat(row["started_at"])).total_seconds()))
 
@@ -105,6 +124,8 @@ def expire(conn, inflight, task_id: int, now: datetime) -> None:
         (task_id,),
     ).fetchall()
     for step in row:
+        if waiting(conn, task_id, step_id=step["id"]) is not None:
+            continue
         holder = inflight.step_of(task_id)
         lost = inflight.since(task_id) is None or (holder is not None and holder != step["id"])
         late = elapsed(step, now) > STEP_TIMEOUT_S
@@ -121,19 +142,111 @@ class StepRunner:
     def __init__(self, state, *, sync: bool = False):
         self.state = state  # app.state: model, inflight, clock, ctx читаются при запуске
         self.sync = sync
-        self.started = 0
-        self._threads: list[threading.Thread] = []
 
-    def submit(self, cls, task_id: int, step_id: int, name: str, args: tuple) -> None:
-        self.started += 1
+    def submit(self, cls, task_id: int, step_id: int, name: str, args: tuple) -> threading.Thread:
         worker = threading.Thread(
             target=self._run, args=(cls, task_id, step_id, name, args), daemon=True,
             name=f"step-{step_id}",
         )  # fmt: skip
-        self._threads.append(worker)
         worker.start()
+        return worker
 
-    def _run(self, cls, task_id, step_id, name, args) -> None:
+    def enqueue(self, conn, task, step_id, name, args, now) -> None:
+        from app.tutor.state import active_run, session_id_for
+
+        with atomic(conn):
+            session_id = session_id_for(conn, now) if name == "_chat_work" else None
+            run = active_run(conn, task, now)
+            conn.execute(
+                "INSERT INTO tutor_pending_work "
+                "(step_id, method, arguments, session_id, revision, key_version, run_id, "
+                "attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    step_id,
+                    name,
+                    json.dumps(args),
+                    session_id,
+                    task["revision"],
+                    task["key_version"],
+                    run["id"] if run is not None else None,
+                    run["attempts"] if run is not None else None,
+                    now.isoformat(),
+                ),
+            )
+            self.state.model_work.submit("tutor", step_id, conn=conn)
+            self.state.inflight.release(task["id"], step_id)
+            bump(conn)
+
+    def run_queued(self, key: str) -> None:
+        from app.chat.flow import ChatFlow
+        from app.tutor.flow import Flow
+        from app.tutor.state import active_run
+
+        step_id = int(key)
+        with closing(open_db(self.state.ctx.db_path)) as conn, atomic(conn):
+            row = conn.execute(
+                "SELECT s.task_item_id, w.method, w.arguments, w.revision, w.key_version, "
+                "w.applied, w.run_id, w.attempts "
+                "FROM tutor_pending_work w JOIN tutor_step s ON s.id = w.step_id "
+                "WHERE w.step_id = ? AND s.status = 'running'",
+                (step_id,),
+            ).fetchone()
+            if row is None:
+                return
+            method = row["method"]
+            if method not in (
+                "_chat_work",
+                "_attempt_work",
+                "_solution_work",
+                "_hint_work",
+                "_explain_work",
+            ):
+                raise ValueError("unknown tutor operation")
+            task_id = row["task_item_id"]
+            now = self.state.clock()
+            if row["applied"]:
+                finish(conn, step_id, "done", now)
+                conn.execute("DELETE FROM tutor_pending_work WHERE step_id = ?", (step_id,))
+                return
+            task = get_task(conn, task_id)
+            run = active_run(conn, task) if task is not None else None
+            anchor = (run["id"], run["attempts"]) if run is not None else (None, None)
+            if (
+                task is None
+                or not is_published(task)
+                or task["revision"] != row["revision"]
+                or task["key_version"] != row["key_version"]
+                or anchor != (row["run_id"], row["attempts"])
+                or exam.task_locked(conn, task_id, now)
+            ):
+                conn.execute("DELETE FROM tutor_pending_work WHERE step_id = ?", (step_id,))
+                finish(conn, step_id, "failed", now, error="superseded")
+                return
+            last = conn.execute("SELECT COALESCE(MAX(id), 0) FROM event").fetchone()[0]
+            inflight = self.state.inflight
+            if inflight.step_of(task_id) != step_id and not inflight.acquire(
+                task_id,
+                last,
+                step_id,
+                conn,
+            ):
+                raise RuntimeError("another step is running")
+            conn.execute(
+                "UPDATE tutor_step SET started_at = ? WHERE id = ?", (now.isoformat(), step_id)
+            )
+            bump(conn)
+        executed = self._run(
+            ChatFlow if method == "_chat_work" else Flow,
+            task_id,
+            step_id,
+            method,
+            tuple(json.loads(row["arguments"])),
+        )
+        if executed:
+            with closing(open_db(self.state.ctx.db_path)) as conn:
+                conn.execute("DELETE FROM tutor_pending_work WHERE step_id = ?", (step_id,))
+
+    def _run(self, cls, task_id, step_id, name, args) -> bool:
         st = self.state
         conn = None
         try:
@@ -141,20 +254,16 @@ class StepRunner:
             flow = cls(conn, st.model, st.inflight, st.clock)
             flow.step_id = step_id
             flow.execute(task_id, name, args, reraise=False)
-        except BaseException:
-            log.exception("шаг %s не стартовал", step_id)
+            return True
+        except BoundaryWait:
             st.inflight.release(task_id, step_id, conn)
+            return False
+        except BaseException:
+            st.inflight.release(task_id, step_id, conn)
+            if getattr(st, "model_work", None) is not None:
+                raise
+            log.exception("шаг %s не стартовал", step_id)
+            return False
         finally:
             if conn is not None:
                 conn.close()
-
-    def join_step(self, step_id: int, timeout: float = 20) -> None:
-        for worker in list(self._threads):
-            if worker.name == f"step-{step_id}":
-                worker.join(timeout)
-
-    def join(self, timeout: float = 20) -> None:
-        """Подождать рабочие потоки (тесты)."""
-        for worker in list(self._threads):
-            worker.join(timeout)
-        self._threads = [w for w in self._threads if w.is_alive()]

@@ -31,9 +31,7 @@ LABELS = {
     "sample": "выборка прошедших",
 }
 FAILED_LABEL = "не прошло конвейер"
-SAMPLE_HINT = (
-    sampling.HOLD_TEXT_SAMPLE + " Проверьте условие и ответ."
-)
+SAMPLE_HINT = sampling.HOLD_TEXT_SAMPLE + " Проверьте условие и ответ."
 SAMPLE_ERROR_NOTE = "Родитель нашёл ошибку в выборке: проверьте и поправьте задание"
 
 
@@ -326,7 +324,9 @@ def confirm(ctx, conn, task_id: int, answer=None) -> None:
         missing = uncovered_lefts(task, key_value(task["answer_key"]))
         if missing:
             raise Refusal(UNCOVERED_KEY.format(", ".join(missing)))
-    sampling.parent_outcome(conn, task_id, task["revision"], "clean" if verified(task) else "edited")
+    sampling.parent_outcome(
+        conn, task_id, task["revision"], "clean" if verified(task) else "edited"
+    )
     update_task(conn, task_id, import_status="checked", auto_checked=0, auto_hold=None)
     _clear_dispute(conn, task)
     save_snapshot(conn, task_id)
@@ -372,7 +372,7 @@ def retry_model(ctx, conn, task_id: int) -> bool:
             "Ответ модели уже получен. Чтобы пересчитать, исправьте задание: это новая ревизия.",
             409,
         )
-    return compute_model_answer(ctx, conn, task_id)
+    return compute_model_answer(ctx, conn, task_id, explicit_retry=True)
 
 
 # ------------------------------------------------------------------------ карточки

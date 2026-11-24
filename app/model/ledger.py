@@ -8,6 +8,8 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from app.ingest.store import atomic
+
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 
@@ -24,8 +26,7 @@ class Ledger:
         """Записать попытку и вернуть её id; None - дневной лимит исчерпан."""
         now = self.clock()
         day = moscow_day(now)
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
+        with atomic(self.conn):
             limit = self.conn.execute(
                 "SELECT daily_run_limit FROM settings WHERE id = 1"
             ).fetchone()[0]
@@ -33,18 +34,12 @@ class Ledger:
                 "SELECT COUNT(*) FROM model_run WHERE day = ?", (day,)
             ).fetchone()[0]
             if used >= limit:
-                self.conn.execute("ROLLBACK")
                 return None
             cur = self.conn.execute(
                 "INSERT INTO model_run (day, started_at, channel, model, fallback) VALUES (?, ?, ?, ?, ?)",
                 (day, now.isoformat(), channel, model, int(fallback)),
             )
-            self.conn.execute("COMMIT")
             return cur.lastrowid
-        except BaseException:
-            if self.conn.in_transaction:
-                self.conn.execute("ROLLBACK")
-            raise
 
     def finish(self, run_id: int, ok: bool, duration_ms: int, error_kind: str | None) -> None:
         self.conn.execute(

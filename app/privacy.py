@@ -71,6 +71,7 @@ def delete_messages(
     ):  # счёт, версия и удаление - одна транзакция: сообщение между ними не теряется
         summary.preserve_message_counts(conn, session_id)
         bump(conn)  # сообщения исчезают с экрана: версия растёт, а не падает
+        cancel_pending_chat(conn, session_id=session_id)
         return conn.execute(f"DELETE FROM event WHERE {where}", args).rowcount
 
 
@@ -81,10 +82,35 @@ def cleanup_retention(conn: sqlite3.Connection, now: datetime) -> int:
     with atomic(conn):
         summary.preserve_message_counts(conn, before=cutoff)
         bump(conn)
+        cancel_pending_chat(conn, before=cutoff)
         return conn.execute(
             f"DELETE FROM event WHERE type IN ({_IN}) AND created_at < ?",
             (*MESSAGE_TYPES, cutoff),
         ).rowcount
+
+
+def cancel_pending_chat(conn, *, session_id=None, before=None):
+    where = "method = '_chat_work'"
+    args = []
+    if session_id is not None:
+        where += " AND session_id = ?"
+        args.append(session_id)
+    if before is not None:
+        where += " AND created_at < ?"
+        args.append(before)
+    for (step_id,) in conn.execute(
+        f"DELETE FROM tutor_pending_work WHERE {where} RETURNING step_id", args
+    ).fetchall():
+        conn.execute(
+            "UPDATE tutor_step SET status = 'failed', error = 'deleted' "
+            "WHERE id = ? AND status = 'running'",
+            (step_id,),
+        )
+        conn.execute(
+            "UPDATE model_operation SET status = 'done' "
+            "WHERE kind = 'tutor' AND object_key = ? AND status = 'queued'",
+            (str(step_id),),
+        )
 
 
 # -------------------------------------------------------------------------- материалы

@@ -34,6 +34,9 @@ def snapshot_live(conn, inflight: Inflight, task_id: int, now: datetime) -> str:
     """Идёт ли шаг. Читать ПЕРВЫМ, до прогона и итога шага: закончившийся между чтениями шаг
     тогда виден как «думаю» (опрос продолжится), а не как «пусто» при устаревшем прогоне."""
     steps.expire(conn, inflight, task_id, now)  # зависший шаг не держит панель вечно
+    pending = steps.waiting(conn, task_id)
+    if inflight.since(task_id) is None and pending is not None:
+        return "unknown_model" if pending["operation_status"] == "unknown" else "waiting_model"
     return live_state(conn, inflight, task_id)
 
 

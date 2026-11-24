@@ -6,15 +6,37 @@ from app.ingest.answers import display, normalize_answer
 from app.ingest.keys import candidate
 from app.ingest.prompt import ANSWER_SCHEMA, build_task_request
 from app.ingest.store import figure_of, get_task, save_snapshot
+from app.model.work import operation
 from app.tutor.seq import bump
 
 
-def compute_model_answer(ctx, conn, task_id: int) -> bool:
+def compute_model_answer(ctx, conn, task_id: int, *, explicit_retry=False) -> bool:
     """Вычислить и записать model_answer для текущей ревизии; False - ответ не получен.
 
     Для задания с рисунком не вычисляется никогда: модель картинку не видит.
     """
+    work = getattr(getattr(ctx, "state", None), "model_work", None)
+    if work is not None and operation.get() is None:
+        task = get_task(conn, task_id, with_import=True)
+        if task is None:
+            return False
+        key = f"{task_id}:{task['revision']}:{task['import_run_id']}"
+        submit = work.submit_again if explicit_retry else work.submit
+        submit("answer", key, conn=conn)
+        return True
     return compute_model_answer_why(ctx, conn, task_id)[0]
+
+
+def run_saved_answer(ctx, conn, key: str) -> None:
+    task_id, revision, run = key.split(":")[:3]
+    task = get_task(conn, int(task_id), with_import=True)
+    if (
+        task is not None
+        and str(task["revision"]) == revision
+        and str(task["import_run_id"]) == run
+        and task["model_answer"] is None
+    ):
+        compute_model_answer_why(ctx, conn, int(task_id))
 
 
 def compute_model_answer_why(
